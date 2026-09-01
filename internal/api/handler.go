@@ -1,15 +1,15 @@
 package api
 
 import (
-	"encoding/json"
-	"fmt"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
@@ -27,6 +27,7 @@ type Handler struct {
 	Advanced   interface {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
 	}
+	UsageRecorder *finops.CostTracker
 }
 
 // LoggerInterface defines the logging interface.
@@ -66,6 +67,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiKey := r.Header.Get("Authorization")
+	if h.UsageRecorder != nil && apiKey != "" {
+		_ = h.UsageRecorder.RecordUsage(ctx, finops.CostRequest{APIKey: apiKey, Model: req.Model, Usage: &models.Usage{}})
+	}
+
 	// Cache exact-match check
 	if h.Cache != nil {
 		cacheKey := cache.KeyForRequest(&req)
@@ -81,7 +87,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Rate limiting
 	if h.RateLimiter != nil {
-		allowed, err := h.RateLimiter.Allow(ctx, r.Header.Get("Authorization"), req.Model)
+		allowed, err := h.RateLimiter.Allow(ctx, apiKey, req.Model)
 		if err != nil || !allowed {
 			h.Logger.Error("rate limited", "error", err)
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
@@ -168,7 +174,7 @@ func (h *Handler) ResumeApproval(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.Advanced.ResumeApproval(r.Context(), approvalID, req.Approved, &models.LLMRequest{})
 	if err != nil {
 		h.Logger.Error("resume approval failed", "error", err)
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadRequest)
+		http.Error(w, `{"error":"approval failed"}`, http.StatusBadRequest)
 		return
 	}
 

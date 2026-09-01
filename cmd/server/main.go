@@ -109,7 +109,7 @@ func main() {
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
 
 	prices := finops.NewPricingMap()
-	_ = finops.NewCostTracker(redisClient.(*redis.Client), prices)
+	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
 	scoper.AddScope(guardrails.APIKeyScope{
 		APIKey:       "sk-dev-1",
@@ -117,6 +117,9 @@ func main() {
 		MaxBudgetUSD: 100,
 		IPAllowlist:  []string{"127.0.0.1"},
 	})
+
+	// FinOps usage recorder
+	handler.UsageRecorder = costTracker
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)

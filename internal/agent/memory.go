@@ -59,3 +59,9 @@ func (m *MessageMemory) Summarize(ctx context.Context, conversationID string) (s
 	summary := fmt.Sprintf("conversation %s has %d messages", conversationID, len(history))
 	return summary, nil
 }
+
+// VectorMemory is a stub long-term memory interface for vector-backed storage.
+type VectorMemory interface {
+	Upsert(ctx context.Context, conversationID string, message models.Message) error
+	Search(ctx context.Context, conversationID string, query string, limit int) ([]models.Message, error)
+}
