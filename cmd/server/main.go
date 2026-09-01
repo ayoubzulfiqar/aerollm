@@ -18,6 +18,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
+	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -118,8 +119,27 @@ func main() {
 		IPAllowlist:  []string{"127.0.0.1"},
 	})
 
-	// FinOps usage recorder
 	handler.UsageRecorder = costTracker
+
+	webhookDispatcher := webhooks.NewWebhookDispatcher()
+	webhookDispatcher.Register(webhooks.EventBudgetExceeded, webhooks.WebhookConfig{
+		URL:        getenvOrDefault("AEROLLM_WEBHOOK_URL", "http://localhost:8080/webhooks"),
+		Secret:     getenvOrDefault("AEROLLM_WEBHOOK_SECRET", ""),
+		Timeout:    2 * time.Second,
+		Retries:    3,
+		RetryDelay: 200 * time.Millisecond,
+	})
+
+	queue := webhooks.NewRedisWebhookQueue(redisClient.(*redis.Client), "webhook:queue")
+	webhookDispatcher.StartWorker(ctx, queue)
+
+	costTracker.SetBudgetWebhookConfig(webhookDispatcher, webhooks.BudgetWebhookConfig{
+		URL:        getenvOrDefault("AEROLLM_BUDGET_WEBHOOK_URL", "http://localhost:8080/webhooks/budget"),
+		Secret:     getenvOrDefault("AEROLLM_BUDGET_WEBHOOK_SECRET", ""),
+		Timeout:    2 * time.Second,
+		Retries:    3,
+		RetryDelay: 200 * time.Millisecond,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
@@ -170,4 +190,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "server forced to shutdown: %v\n", err)
 	}
 	fmt.Println("server gracefully stopped")
+}
+
+func getenvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

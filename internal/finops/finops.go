@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -73,8 +74,11 @@ type CostRequest struct {
 
 // CostTracker tracks costs and budgets in Redis.
 type CostTracker struct {
-	redis  *redis.Client
-	prices *PricingMap
+	redis         *redis.Client
+	prices        *PricingMap
+	dispatcher    dispatcherInterface
+	budgetWebhook webhooks.BudgetWebhookConfig
+	webhookMu     sync.RWMutex
 }
 
 // NewCostTracker creates a new cost tracker.
@@ -148,5 +152,42 @@ func (c *CostTracker) RecordUsage(ctx context.Context, req CostRequest) error {
 	}
 	cost := c.CalculateCost(req.Model, req.Usage)
 	req.CostUSD = cost
-	return c.DeductBudget(ctx, req.APIKey, cost)
+	err := c.DeductBudget(ctx, req.APIKey, cost)
+	if err != nil && strings.Contains(err.Error(), "budget exceeded") {
+		remaining := float64(0)
+		if req.Usage != nil {
+			remaining = c.CalculateCost(req.Model, req.Usage)
+		}
+		c.webhookMu.RLock()
+		cfg := c.budgetWebhook
+		d := c.dispatcher
+		c.webhookMu.RUnlock()
+		if d != nil && cfg.URL != "" {
+			d.DispatchAsync(ctx, webhooks.Event{
+				ID:        fmt.Sprintf("budget-%s-%d", req.APIKey, time.Now().UnixNano()),
+				Type:      webhooks.EventBudgetExceeded,
+				Timestamp: time.Now(),
+				Payload: map[string]interface{}{
+					"api_key":       req.APIKey,
+					"model":         req.Model,
+					"remaining_usd": remaining,
+				},
+			})
+		}
+	}
+	return err
+}
+
+type dispatcherInterface interface {
+	DispatchAsync(ctx context.Context, event webhooks.Event)
+}
+
+// SetBudgetWebhookConfig configures the webhook target for budget exceeded events.
+func (c *CostTracker) SetBudgetWebhookConfig(dispatcher dispatcherInterface, cfg webhooks.BudgetWebhookConfig) {
+	c.webhookMu.Lock()
+	defer c.webhookMu.Unlock()
+	c.budgetWebhook = cfg
+	if d, ok := dispatcher.(*webhooks.WebhookDispatcher); ok {
+		c.dispatcher = d
+	}
 }

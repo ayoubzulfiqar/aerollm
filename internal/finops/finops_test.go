@@ -1,10 +1,24 @@
 package finops
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 )
+
+type fakeDispatcher struct {
+	dispatched []webhooks.Event
+	mu         sync.Mutex
+}
+
+func (f *fakeDispatcher) DispatchAsync(_ context.Context, event webhooks.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dispatched = append(f.dispatched, event)
+}
 
 func TestPricingMapDefaults(t *testing.T) {
 	p := NewPricingMap()
@@ -21,5 +35,26 @@ func TestCalculateCost(t *testing.T) {
 	expected := 10*0.03 + 20*0.06
 	if cost != expected {
 		t.Fatalf("expected %.4f, got %.4f", expected, cost)
+	}
+}
+
+func TestCalculateCostNilUsage(t *testing.T) {
+	p := NewPricingMap()
+	c := NewCostTracker(nil, p)
+	if got := c.CalculateCost("gpt-4", nil); got != 0 {
+		t.Fatalf("expected 0 for nil usage, got %f", got)
+	}
+}
+
+func TestRecordUsageNoRedisNoOp(t *testing.T) {
+	p := NewPricingMap()
+	c := NewCostTracker(nil, p)
+	err := c.RecordUsage(context.Background(), CostRequest{
+		APIKey: "sk-nil-redis",
+		Model:  "gpt-4",
+		Usage:  &models.Usage{PromptTokens: 10, CompletionTokens: 10},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error without redis, got %v", err)
 	}
 }

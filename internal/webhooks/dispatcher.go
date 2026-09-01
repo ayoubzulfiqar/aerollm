@@ -39,6 +39,15 @@ type WebhookConfig struct {
 	RetryDelay time.Duration
 }
 
+// BudgetWebhookConfig holds budget webhook target configuration.
+type BudgetWebhookConfig struct {
+	URL        string
+	Secret     string
+	Timeout    time.Duration
+	Retries    int
+	RetryDelay time.Duration
+}
+
 // WebhookDispatcher dispatches webhook events asynchronously.
 type WebhookDispatcher struct {
 	mu      sync.RWMutex

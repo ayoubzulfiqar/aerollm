@@ -13,6 +13,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
+	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 )
 
@@ -28,6 +29,7 @@ type Handler struct {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
 	}
 	UsageRecorder *finops.CostTracker
+	Webhooks      *webhooks.WebhookDispatcher
 }
 
 // LoggerInterface defines the logging interface.
