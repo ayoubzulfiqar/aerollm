@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
@@ -21,6 +24,9 @@ type Handler struct {
 	RateLimiter ratelimit.RateLimiter
 	Telemetry   *telemetry.Provider
 	Logger      LoggerInterface
+	Advanced   interface {
+		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
+	}
 }
 
 // LoggerInterface defines the logging interface.
@@ -136,6 +142,38 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	telemetry.RecordRequestCount(selectedProvider.Name(), 1)
 	telemetry.RecordLatencyMs(float64(time.Since(start).Milliseconds()))
+}
+
+// ResumeApproval handles the /v1/agents/approvals/{id} endpoint.
+func (h *Handler) ResumeApproval(w http.ResponseWriter, r *http.Request) {
+	if h.Advanced == nil {
+		http.Error(w, `{"error":"advanced agent not enabled"}`, http.StatusNotImplemented)
+		return
+	}
+
+	approvalID := strings.TrimPrefix(r.URL.Path, "/v1/agents/approvals/")
+	if approvalID == "" {
+		http.Error(w, `{"error":"missing approval id"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.Advanced.ResumeApproval(r.Context(), approvalID, req.Approved, &models.LLMRequest{})
+	if err != nil {
+		h.Logger.Error("resume approval failed", "error", err)
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // ProviderHealth represents provider health status for HTTP responses.

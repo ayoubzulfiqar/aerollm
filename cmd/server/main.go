@@ -61,7 +61,13 @@ func NewRateLimiter() *ratelimit.TokenBucketLimiter {
 	return ratelimit.NewTokenBucketLimiter(100, 10)
 }
 
-// NewAgent creates a new agent engine.
+// NewAdvancedAgent creates a new advanced agent engine with HITL support.
+func NewAdvancedAgent(registry *agent.ToolRegistry, redisClient cache.RedisClient) *agent.AdvancedAgentEngine {
+	store := agent.NewRedisApprovalStore(redisClient, "approval:", 24*time.Hour)
+	return agent.NewAdvancedAgentEngine(nil, registry, store)
+}
+
+// NewAgent creates a new base agent engine.
 func NewAgent(registry *agent.ToolRegistry) *agent.AgentEngine {
 	return agent.NewAgentEngine(nil, registry)
 }
@@ -103,7 +109,7 @@ func main() {
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
 
 	prices := finops.NewPricingMap()
-	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
+	_ = finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
 	scoper.AddScope(guardrails.APIKeyScope{
 		APIKey:       "sk-dev-1",
@@ -115,6 +121,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
+	mux.HandleFunc("/v1/chat/completions", handler.ChatCompletions)
 
 	chat := handler.ChatCompletions
 	chat = guardrails.InjectionShieldMiddleware(chat)
@@ -126,11 +133,13 @@ func main() {
 	chat = middleware.NewRecoveryMiddleware(chat).Next
 
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, req *http.Request) {
-		if costTracker != nil {
-			_ = costTracker
-		}
 		chat(w, req)
 	})
+
+	advanced := NewAdvancedAgent(registry, redisClient)
+	handler.Advanced = advanced
+
+	mux.HandleFunc("/v1/agents/approvals/", handler.ResumeApproval)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
