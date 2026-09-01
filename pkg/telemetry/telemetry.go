@@ -35,7 +35,12 @@ func NewProvider(ctx context.Context, cfg Config) (*Provider, error) {
 		}
 	}
 
-	tp := sdktrace.NewTracerProvider(exporterOpt)
+	var opts []sdktrace.TracerProviderOption
+if exporterOpt != nil {
+	opts = append(opts, exporterOpt)
+}
+
+tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
 
 	return &Provider{
