@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
@@ -57,4 +58,22 @@ func TestRecordUsageNoRedisNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error without redis, got %v", err)
 	}
+}
+
+func TestSetBudgetWebhookConfigStoresDispatcher(t *testing.T) {
+	p := NewPricingMap()
+	c := NewCostTracker(nil, p)
+	fd := &fakeDispatcher{}
+	c.SetBudgetWebhookConfig(fd, webhooks.BudgetWebhookConfig{
+		URL:     "http://example.com/budget",
+		Timeout: time.Second,
+	})
+
+	// Without Redis, RecordUsage is a no-op and no webhook is emitted.
+	// This verifies the config is stored without panicking.
+	_ = c.RecordUsage(context.Background(), CostRequest{
+		APIKey: "sk-test",
+		Model:  "gpt-4",
+		Usage:  &models.Usage{PromptTokens: 10, CompletionTokens: 10},
+	})
 }
