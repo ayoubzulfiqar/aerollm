@@ -1,0 +1,136 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/api"
+	"github.com/ayoubzulfiqar/aerollm/internal/agent"
+	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/config"
+	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
+	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
+	"github.com/ayoubzulfiqar/aerollm/internal/router"
+	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
+	"github.com/redis/go-redis/v9"
+)
+
+// LoggerAdapter implements the LoggerInterface.
+type LoggerAdapter struct{}
+
+func (l *LoggerAdapter) Info(msg string, keysAndValues ...interface{}) {
+	fmt.Printf("INFO: %s\n", msg)
+}
+
+func (l *LoggerAdapter) Error(msg string, keysAndValues ...interface{}) {
+	fmt.Printf("ERROR: %s\n", msg)
+}
+
+// NewRedisClient creates a new Redis client.
+func NewRedisClient(ctx context.Context, addr string) (cache.RedisClient, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: "",
+		DB:       0,
+	})
+	if err := client.Ping(ctx).Err(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// NewTelemetryProvider creates a new telemetry provider.
+func NewTelemetryProvider(ctx context.Context, cfg telemetry.Config) (*telemetry.Provider, error) {
+	return telemetry.NewProvider(ctx, cfg)
+}
+
+// NewRouter creates a new router.
+func NewRouter(cfg router.Config) *router.Router {
+	return router.New(cfg)
+}
+
+// NewRateLimiter creates a new rate limiter.
+func NewRateLimiter() *ratelimit.TokenBucketLimiter {
+	return ratelimit.NewTokenBucketLimiter(100, 10)
+}
+
+// NewAgent creates a new agent engine.
+func NewAgent() *agent.AgentEngine {
+	return agent.NewAgentEngine(nil)
+}
+
+func main() {
+	appName := "aerollm"
+	appVersion := "v1.0.0"
+
+	logger := &LoggerAdapter{}
+	ctx := context.Background()
+
+	fmt.Printf("starting %s %s\n", appName, appVersion)
+
+	tp, err := NewTelemetryProvider(ctx, telemetry.Config{ServiceName: "aerollm"})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "telemetry init error: %v\n", err)
+		os.Exit(1)
+	}
+	tp.Start()
+
+	redisClient, err := NewRedisClient(ctx, "localhost:6379")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "redis init error: %v\n", err)
+		os.Exit(1)
+	}
+	defer redisClient.Close()
+
+	appCfg, err := config.LoadConfig("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config load error: %v\n", err)
+		os.Exit(1)
+	}
+
+	r := NewRouter(router.Config{Strategy: appCfg.Router.Strategy})
+	rl := NewRateLimiter()
+	a := NewAgent()
+	cacheInst := cache.NewRedisCache(redisClient, time.Hour)
+	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", handler.HealthCheck)
+	mux.HandleFunc("/ready", handler.ReadyCheck)
+	mux.HandleFunc("/v1/chat/completions", handler.ChatCompletions)
+
+	wrapped := middleware.NewAuthMiddleware(handler.ChatCompletions)
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { wrapped.ServeHTTP(w, r) })
+
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		fmt.Println("server starting on port 8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("shutting down server...")
+	shutdownCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "server forced to shutdown: %v\n", err)
+	}
+	fmt.Println("server gracefully stopped")
+}
