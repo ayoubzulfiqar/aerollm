@@ -13,9 +13,14 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
-	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 )
+
+// LoggerInterface defines the logging interface.
+type LoggerInterface interface {
+	Info(msg string, keysAndValues ...interface{})
+	Error(msg string, keysAndValues ...interface{})
+}
 
 // Handler handles HTTP requests for the LLM gateway.
 type Handler struct {
@@ -28,17 +33,7 @@ type Handler struct {
 	Advanced   interface {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
 	}
-	UsageRecorder interface {
-		CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error)
-		RecordUsage(ctx context.Context, req finops.CostRequest) error
-	}
-	Webhooks      *webhooks.WebhookDispatcher
-}
-
-// LoggerInterface defines the logging interface.
-type LoggerInterface interface {
-	Info(msg string, keysAndValues ...interface{})
-	Error(msg string, keysAndValues ...interface{})
+	UsageRecorder *finops.CostTracker
 }
 
 // NewHandler creates a new Handler with dependency injection.
@@ -96,15 +91,6 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil || !allowed {
 			h.Logger.Error("rate limited", "error", err)
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
-			return
-		}
-	}
-
-	// Budget pre-check
-	if h.UsageRecorder != nil && apiKey != "" {
-		if _, err := h.UsageRecorder.CheckBudget(ctx, apiKey, 0); err != nil {
-			h.Logger.Error("budget exceeded", "error", err)
-			http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 			return
 		}
 	}
