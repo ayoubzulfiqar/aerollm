@@ -121,6 +121,7 @@ func main() {
 	})
 
 	handler.UsageRecorder = costTracker
+	handler.BudgetChecker = costTracker
 
 	webhookDispatcher := webhooks.NewWebhookDispatcher()
 	webhookDispatcher.Register(webhooks.EventBudgetExceeded, webhooks.WebhookConfig{

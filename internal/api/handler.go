@@ -34,6 +34,9 @@ type Handler struct {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
 	}
 	UsageRecorder *finops.CostTracker
+	BudgetChecker interface {
+		CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error)
+	}
 }
 
 // NewHandler creates a new Handler with dependency injection.
@@ -91,6 +94,15 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil || !allowed {
 			h.Logger.Error("rate limited", "error", err)
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	// Budget pre-check
+	if h.BudgetChecker != nil && apiKey != "" {
+		if _, err := h.BudgetChecker.CheckBudget(ctx, apiKey, 0); err != nil {
+			h.Logger.Error("budget exceeded", "error", err)
+			http.Error(w, `{"error":"budget exceeded"}`, http.StatusPaymentRequired)
 			return
 		}
 	}

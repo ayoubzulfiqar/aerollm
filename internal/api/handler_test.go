@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,7 +34,9 @@ func (m *mockProvider) Close() error                          { return nil }
 
 type mockRateLimiter struct{}
 
-func (m *mockRateLimiter) Allow(ctx context.Context, apiKey, provider string) (bool, error) { return true, nil }
+func (m *mockRateLimiter) Allow(ctx context.Context, apiKey, provider string) (bool, error) {
+	return true, nil
+}
 func (m *mockRateLimiter) GetLimits(ctx context.Context, apiKey, provider string) (*ratelimit.RateLimitRecord, error) {
 	return &ratelimit.RateLimitRecord{}, nil
 }
@@ -146,4 +149,73 @@ func TestChatCompletionsCacheHit(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "cached") {
 		t.Fatalf("expected cached response, got: %s", w.Body.String())
 	}
+}
+
+func TestChatCompletionsBudgetExceeded(t *testing.T) {
+	logger := &testLogger{}
+	tp := newTestTelemetry()
+	defer tp.Stop(context.Background())
+
+	r := router.New(router.Config{Strategy: "round_robin"})
+	p := &mockProvider{name: "p1"}
+	r.RegisterProvider(p)
+
+	a := agent.NewAgentEngine(&mockToolProvider{}, nil)
+	c := cache.NewRedisCache(&mockRedisClient{}, time.Hour)
+	rl := &mockRateLimiter{}
+	h := NewHandler(r, a, c, rl, tp, logger)
+	h.BudgetChecker = &mockBudgetChecker{fail: true}
+
+	body := `{"model":"p1","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer key-1")
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("expected 402, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChatCompletionsRateLimited(t *testing.T) {
+	logger := &testLogger{}
+	tp := newTestTelemetry()
+	defer tp.Stop(context.Background())
+
+	r := router.New(router.Config{Strategy: "round_robin"})
+	p := &mockProvider{name: "p1"}
+	r.RegisterProvider(p)
+
+	a := agent.NewAgentEngine(&mockToolProvider{}, nil)
+	c := cache.NewRedisCache(&mockRedisClient{}, time.Hour)
+	rl := &mockRateLimiter{}
+	h := NewHandler(r, a, c, rl, tp, logger)
+	h.RateLimiter = &mockBlockingRateLimiter{}
+
+	body := `{"model":"p1","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", w.Code)
+	}
+}
+
+type mockBudgetChecker struct {
+	fail bool
+}
+
+func (m *mockBudgetChecker) CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error) {
+	if m.fail {
+		return 0, fmt.Errorf("budget exceeded")
+	}
+	return estimatedCost, nil
+}
+
+type mockBlockingRateLimiter struct{}
+
+func (m *mockBlockingRateLimiter) Allow(ctx context.Context, apiKey, provider string) (bool, error) {
+	return false, nil
+}
+func (m *mockBlockingRateLimiter) GetLimits(ctx context.Context, apiKey, provider string) (*ratelimit.RateLimitRecord, error) {
+	return &ratelimit.RateLimitRecord{}, nil
 }
