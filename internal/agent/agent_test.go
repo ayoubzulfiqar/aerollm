@@ -28,6 +28,23 @@ func (m *mockToolProvider) CallLLM(ctx context.Context, req *models.LLMRequest) 
 	return m.response, nil
 }
 
+// counterTool always returns a fixed result.
+type counterTool struct{}
+
+func (c *counterTool) Name() string        { return "counter" }
+func (c *counterTool) Description() string { return "Returns a fixed counter result" }
+func (c *counterTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+func (c *counterTool) Execute(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	_ = ctx
+	_ = args
+	return map[string]interface{}{"count": 42}, nil
+}
+
 func TestNewAgentEngine(t *testing.T) {
 	a := NewAgentEngine(nil, nil)
 	if a == nil {
@@ -35,6 +52,9 @@ func TestNewAgentEngine(t *testing.T) {
 	}
 	if a.MaxIterations != 10 {
 		t.Fatalf("expected default max iterations 10, got %d", a.MaxIterations)
+	}
+	if a.Registry == nil {
+		t.Fatal("expected non-nil registry")
 	}
 }
 
@@ -54,32 +74,6 @@ func TestRunToolExecutionLoopNoTools(t *testing.T) {
 	}
 }
 
-func TestRunToolExecutionLoopWithTools(t *testing.T) {
-	firstResp := &models.LLMResponse{
-		Choices: []models.Choice{{
-			Message: models.Message{
-				Role: models.RoleAssistant,
-				ToolCalls: []models.ToolCall{{
-					ID:   "call-1",
-					Type: "function",
-					Function: models.ToolFunction{
-						Name:      "test_tool",
-						Arguments: `{"arg":"value"}`,
-					},
-				}},
-			},
-		}},
-	}
-
-	a := NewAgentEngine(&mockToolProvider{response: firstResp}, nil)
-	a.MaxIterations = 5
-
-	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
-	if err == nil {
-		t.Fatal("expected max iterations error when provider always returns tool calls")
-	}
-}
-
 func TestRunToolExecutionLoopMaxIterations(t *testing.T) {
 	respWithTools := &models.LLMResponse{
 		Choices: []models.Choice{{
@@ -89,14 +83,17 @@ func TestRunToolExecutionLoopMaxIterations(t *testing.T) {
 					ID:   "call-1",
 					Type: "function",
 					Function: models.ToolFunction{
-						Name:      "test_tool",
-						Arguments: `{"arg":"value"}`,
+						Name:      "counter",
+						Arguments: `{}`,
 					},
 				}},
 			},
 		}},
 	}
-	a := NewAgentEngine(&mockToolProvider{response: respWithTools}, nil)
+
+	registry := NewToolRegistry()
+	registry.Register(&counterTool{})
+	a := NewAgentEngine(&mockToolProvider{response: respWithTools}, registry)
 	a.MaxIterations = 2
 	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
 	if err == nil {
@@ -104,7 +101,7 @@ func TestRunToolExecutionLoopMaxIterations(t *testing.T) {
 	}
 	var maxErr *MaxIterationsError
 	if !errors.As(err, &maxErr) {
-		t.Fatalf("expected MaxIterationsError, got %T", err)
+		t.Fatalf("expected MaxIterationsError, got %T: %v", err, err)
 	}
 }
 
@@ -122,6 +119,23 @@ func TestExecuteToolsContextCancel(t *testing.T) {
 	_, err := a.ExecuteTools(ctx, toolCalls)
 	if err == nil {
 		t.Fatal("expected context deadline exceeded error")
+	}
+}
+
+func TestToolRegistryIntegration(t *testing.T) {
+	registry := NewToolRegistry()
+	if err := registry.Register(&EchoTool{}); err != nil {
+		t.Fatalf("failed to register tool: %v", err)
+	}
+
+	_, err := registry.Execute(context.Background(), "echo", `{"message":"hello"}`)
+	if err != nil {
+		t.Fatalf("tool execution failed: %v", err)
+	}
+
+	_, err = registry.Execute(context.Background(), "missing", `{}`)
+	if err == nil {
+		t.Fatal("expected error for missing tool")
 	}
 }
 
