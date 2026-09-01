@@ -117,7 +117,7 @@ func (c *CostTracker) CheckBudget(ctx context.Context, apiKey string, estimatedC
 	if _, err := fmt.Sscanf(val, "%f", &remaining); err != nil {
 		return 0, err
 	}
-	if remaining < estimatedCost {
+	if remaining <= 0 || remaining < estimatedCost {
 		return remaining, fmt.Errorf("budget exceeded: remaining %.4f USD, need %.4f USD", remaining, estimatedCost)
 	}
 	return remaining, nil

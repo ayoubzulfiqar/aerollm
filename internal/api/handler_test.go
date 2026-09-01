@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,11 +47,21 @@ func (m *mockToolProvider) CallLLM(ctx context.Context, req *models.LLMRequest) 
 }
 
 type mockRedisClient struct {
-	hit bool
+	hit            bool
+	budgetRemaining float64
+	budgetKey      string
 }
 
 func (m *mockRedisClient) Get(ctx context.Context, key string) *redis.StringCmd {
 	cmd := redis.NewStringCmd(ctx)
+	if m.budgetKey != "" && key == m.budgetKey {
+		if m.budgetRemaining <= 0 {
+			cmd.SetVal("0")
+		} else {
+			cmd.SetVal(fmt.Sprintf("%f", m.budgetRemaining))
+		}
+		return cmd
+	}
 	if m.hit {
 		cmd.SetVal(`{"model":"mock","choices":[{"message":{"role":"assistant","content":"cached"}}]}`)
 	} else {
@@ -146,4 +158,40 @@ func TestChatCompletionsCacheHit(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "cached") {
 		t.Fatalf("expected cached response, got: %s", w.Body.String())
 	}
+}
+
+func TestChatCompletionsBudgetExceeded(t *testing.T) {
+	logger := &testLogger{}
+	tp := newTestTelemetry()
+	defer tp.Stop(context.Background())
+
+	r := router.New(router.Config{Strategy: "round_robin"})
+	r.RegisterProvider(&mockProvider{name: "p1"})
+
+	a := agent.NewAgentEngine(&mockToolProvider{}, nil)
+	c := cache.NewRedisCache(&mockRedisClient{}, time.Hour)
+	rl := &mockRateLimiter{}
+	h := NewHandler(r, a, c, rl, tp, logger)
+	h.UsageRecorder = &fakeBudgetChecker{err: errors.New("budget exceeded")}
+
+	body := `{"model":"p1","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "sk-budget")
+	w := httptest.NewRecorder()
+	h.ChatCompletions(w, req)
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("expected 402, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+type fakeBudgetChecker struct {
+	err error
+}
+
+func (f *fakeBudgetChecker) CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error) {
+	return 0, f.err
+}
+
+func (f *fakeBudgetChecker) RecordUsage(ctx context.Context, req interface{}) error {
+	return nil
 }
