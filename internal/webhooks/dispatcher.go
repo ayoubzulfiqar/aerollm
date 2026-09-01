@@ -171,7 +171,15 @@ func (q *RedisWebhookQueue) Dequeue(ctx context.Context) (Event, error) {
 
 // StartWorker begins a background worker that processes webhook events from the queue.
 func (d *WebhookDispatcher) StartWorker(ctx context.Context, queue WebhookQueue) {
+	var wg sync.WaitGroup
+	d.StartWorkerWithWaitGroup(ctx, queue, &wg)
+}
+
+// StartWorkerWithWaitGroup begins a background worker and tracks it in the provided WaitGroup.
+func (d *WebhookDispatcher) StartWorkerWithWaitGroup(ctx context.Context, queue WebhookQueue, wg *sync.WaitGroup) {
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			event, err := queue.Dequeue(ctx)
 			if err != nil {

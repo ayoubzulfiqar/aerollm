@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -131,7 +132,8 @@ func main() {
 	})
 
 	queue := webhooks.NewRedisWebhookQueue(redisClient.(*redis.Client), "webhook:queue")
-	webhookDispatcher.StartWorker(ctx, queue)
+	var webhookWg sync.WaitGroup
+	webhookDispatcher.StartWorkerWithWaitGroup(ctx, queue, &webhookWg)
 
 	costTracker.SetBudgetWebhookConfig(webhookDispatcher, webhooks.BudgetWebhookConfig{
 		URL:        getenvOrDefault("AEROLLM_BUDGET_WEBHOOK_URL", "http://localhost:8080/webhooks/budget"),
@@ -189,6 +191,7 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "server forced to shutdown: %v\n", err)
 	}
+	webhookWg.Wait()
 	fmt.Println("server gracefully stopped")
 }
 

@@ -40,3 +40,18 @@ func TestMessageMemorySummarize(t *testing.T) {
 		t.Fatal("expected non-empty summary")
 	}
 }
+
+func TestInMemoryVectorMemoryUpsertSearch(t *testing.T) {
+	vm := NewInMemoryVectorMemory()
+	_ = vm.Upsert(context.Background(), "conv-1", models.Message{Role: "user", Content: strPtr("hello")})
+	_ = vm.Upsert(context.Background(), "conv-1", models.Message{Role: "assistant", Content: strPtr("world")})
+	_ = vm.Upsert(context.Background(), "conv-2", models.Message{Role: "user", Content: strPtr("other")})
+
+	results, err := vm.Search(context.Background(), "conv-1", "hello", 10)
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	if len(results) != 1 || *results[0].Content != "hello" {
+		t.Fatalf("expected 1 hello result, got %d", len(results))
+	}
+}

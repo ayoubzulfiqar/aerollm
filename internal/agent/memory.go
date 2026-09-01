@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
@@ -60,8 +61,54 @@ func (m *MessageMemory) Summarize(ctx context.Context, conversationID string) (s
 	return summary, nil
 }
 
-// VectorMemory is a stub long-term memory interface for vector-backed storage.
+// VectorMemory is the interface for long-term vector-backed memory.
 type VectorMemory interface {
 	Upsert(ctx context.Context, conversationID string, message models.Message) error
 	Search(ctx context.Context, conversationID string, query string, limit int) ([]models.Message, error)
+}
+
+// InMemoryVectorMemory implements VectorMemory using an in-memory store with simple keyword search.
+type InMemoryVectorMemory struct {
+	mu      sync.RWMutex
+	entries []vectorEntry
+}
+
+type vectorEntry struct {
+	conversationID string
+	message        models.Message
+}
+
+// NewInMemoryVectorMemory creates a new in-memory vector search backend.
+func NewInMemoryVectorMemory() *InMemoryVectorMemory {
+	return &InMemoryVectorMemory{}
+}
+
+// Upsert appends a message to the in-memory vector store.
+func (v *InMemoryVectorMemory) Upsert(ctx context.Context, conversationID string, message models.Message) error {
+	_ = ctx
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.entries = append(v.entries, vectorEntry{conversationID: conversationID, message: message})
+	return nil
+}
+
+// Search returns messages from the conversation that match the query by simple substring matching.
+func (v *InMemoryVectorMemory) Search(ctx context.Context, conversationID string, query string, limit int) ([]models.Message, error) {
+	_ = ctx
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	q := strings.ToLower(query)
+	var out []models.Message
+	for _, e := range v.entries {
+		if e.conversationID != conversationID {
+			continue
+		}
+		if e.message.Content != nil && strings.Contains(strings.ToLower(*e.message.Content), q) {
+			out = append(out, e.message)
+			if len(out) >= limit && limit > 0 {
+				break
+			}
+		}
+	}
+	return out, nil
 }

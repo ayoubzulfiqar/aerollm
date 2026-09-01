@@ -140,3 +140,47 @@ func TestWebhookDispatcherStartWorker(t *testing.T) {
 	}
 	cancel()
 }
+
+func TestWebhookDispatcherStartWorkerCancelStops(t *testing.T) {
+	received := make(chan Event, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var evt Event
+		_ = json.NewDecoder(r.Body).Decode(&evt)
+		received <- evt
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	d := NewWebhookDispatcher()
+	d.Register(EventBudgetExceeded, WebhookConfig{
+		URL:     server.URL,
+		Secret:  "",
+		Timeout: 2 * time.Second,
+	})
+
+	fq := &fakeWebhookQueue{}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	d.StartWorkerWithWaitGroup(ctx, fq, &wg)
+	_ = fq.Enqueue(ctx, Event{ID: "q-2", Type: EventBudgetExceeded, Timestamp: time.Now()})
+
+	select {
+	case got := <-received:
+		if got.ID != "q-2" {
+			t.Fatalf("unexpected event ID: %s", got.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not dispatch queued event")
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after cancel")
+	}
+}
