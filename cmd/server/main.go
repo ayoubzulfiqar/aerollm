@@ -13,6 +13,8 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
+	"github.com/ayoubzulfiqar/aerollm/internal/finops"
+	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
@@ -100,13 +102,35 @@ func main() {
 	cacheInst := cache.NewRedisCache(redisClient, time.Hour)
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
 
+	prices := finops.NewPricingMap()
+	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
+	scoper := guardrails.NewAPIKeyScoper()
+	scoper.AddScope(guardrails.APIKeyScope{
+		APIKey:       "sk-dev-1",
+		AllowedModels: []string{"gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"},
+		MaxBudgetUSD: 100,
+		IPAllowlist:  []string{"127.0.0.1"},
+	})
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
-	mux.HandleFunc("/v1/chat/completions", handler.ChatCompletions)
 
-	wrapped := middleware.NewAuthMiddleware(handler.ChatCompletions)
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { wrapped.ServeHTTP(w, r) })
+	chat := handler.ChatCompletions
+	chat = guardrails.InjectionShieldMiddleware(chat)
+	chat = guardrails.PIIMiddleware(chat)
+	chat = guardrails.APIKeyScopingMiddleware(scoper)(chat)
+	chat = middleware.NewRateLimitMiddleware(chat, rl).Next
+	chat = middleware.NewAuthMiddleware(chat).Next
+	chat = middleware.NewLoggingMiddleware(chat, logger).Next
+	chat = middleware.NewRecoveryMiddleware(chat).Next
+
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, req *http.Request) {
+		if costTracker != nil {
+			_ = costTracker
+		}
+		chat(w, req)
+	})
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
