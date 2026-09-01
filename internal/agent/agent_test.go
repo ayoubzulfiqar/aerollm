@@ -29,7 +29,7 @@ func (m *mockToolProvider) CallLLM(ctx context.Context, req *models.LLMRequest) 
 }
 
 func TestNewAgentEngine(t *testing.T) {
-	a := NewAgentEngine(nil)
+	a := NewAgentEngine(nil, nil)
 	if a == nil {
 		t.Fatal("expected non-nil agent engine")
 	}
@@ -44,7 +44,7 @@ func TestRunToolExecutionLoopNoTools(t *testing.T) {
 			Message: models.Message{Role: models.RoleAssistant, Content: strPtr("hello")},
 		}},
 	}
-	a := NewAgentEngine(&mockToolProvider{response: resp})
+	a := NewAgentEngine(&mockToolProvider{response: resp}, nil)
 	result, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -71,7 +71,7 @@ func TestRunToolExecutionLoopWithTools(t *testing.T) {
 		}},
 	}
 
-	a := NewAgentEngine(&mockToolProvider{response: firstResp})
+	a := NewAgentEngine(&mockToolProvider{response: firstResp}, nil)
 	a.MaxIterations = 5
 
 	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
@@ -96,7 +96,7 @@ func TestRunToolExecutionLoopMaxIterations(t *testing.T) {
 			},
 		}},
 	}
-	a := NewAgentEngine(&mockToolProvider{response: respWithTools})
+	a := NewAgentEngine(&mockToolProvider{response: respWithTools}, nil)
 	a.MaxIterations = 2
 	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
 	if err == nil {
@@ -113,7 +113,7 @@ func TestExecuteToolsContextCancel(t *testing.T) {
 	defer cancel()
 	time.Sleep(2 * time.Millisecond)
 
-	a := NewAgentEngine(nil)
+	a := NewAgentEngine(nil, nil)
 	toolCalls := []models.ToolCall{{
 		ID:      "call-1",
 		Type:    "function",

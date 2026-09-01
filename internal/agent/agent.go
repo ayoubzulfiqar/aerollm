@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -39,6 +41,80 @@ type ToolProvider interface {
 	CallLLM(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error)
 }
 
+// Tool is the interface that tool implementations must satisfy.
+type Tool interface {
+	Name() string
+	Description() string
+	Parameters() map[string]interface{}
+	Execute(ctx context.Context, args map[string]interface{}) (interface{}, error)
+}
+
+// ToolRegistry stores available tools for the agent.
+type ToolRegistry struct {
+	mu    sync.RWMutex
+	tools map[string]Tool
+}
+
+// NewToolRegistry creates a new ToolRegistry.
+func NewToolRegistry() *ToolRegistry {
+	return &ToolRegistry{tools: make(map[string]Tool)}
+}
+
+// Register adds a tool to the registry.
+func (r *ToolRegistry) Register(t Tool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t == nil {
+		return errors.New("tool cannot be nil")
+	}
+	if _, exists := r.tools[t.Name()]; exists {
+		return fmt.Errorf("tool %q already registered", t.Name())
+	}
+	r.tools[t.Name()] = t
+	return nil
+}
+
+// Get returns a tool by name.
+func (r *ToolRegistry) Get(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	return t, ok
+}
+
+// All returns all registered tool names.
+func (r *ToolRegistry) All() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	return names
+}
+
+// Execute runs a tool by name with JSON arguments.
+func (r *ToolRegistry) Execute(ctx context.Context, name string, argsJSON string) (interface{}, error) {
+	r.mu.RLock()
+	t, ok := r.tools[name]
+	r.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("unknown tool: %s", name)
+	}
+
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return nil, fmt.Errorf("invalid tool arguments: %w", err)
+	}
+
+	result, err := t.Execute(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("tool %q failed: %w", name, err)
+	}
+	return result, nil
+}
+
 // AgentEngine executes tool calls from LLM responses concurrently.
 type AgentEngine struct {
 	Provider      ToolProvider
@@ -47,16 +123,21 @@ type AgentEngine struct {
 	MaxConcurrent int
 	ToolCache     map[string]*ToolResult
 	mu            sync.RWMutex
+	Registry      *ToolRegistry
 }
 
 // NewAgentEngine creates a new AgentEngine.
-func NewAgentEngine(provider ToolProvider) *AgentEngine {
+func NewAgentEngine(provider ToolProvider, registry *ToolRegistry) *AgentEngine {
+	if registry == nil {
+		registry = NewToolRegistry()
+	}
 	return &AgentEngine{
 		Provider:      provider,
 		MaxIterations: 10,
 		ToolTimeout:   30 * time.Second,
 		MaxConcurrent: 10,
 		ToolCache:     make(map[string]*ToolResult),
+		Registry:      registry,
 	}
 }
 
@@ -105,13 +186,11 @@ func (e *AgentEngine) ExecuteTools(ctx context.Context, toolCalls []models.ToolC
 
 	results := make([]*ToolResult, len(toolCalls))
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	for i, tc := range toolCalls {
 		i := i
 		tc := tc
 		g.Go(func() error {
-			defer wg.Done()
 			start := time.Now()
 			result, err := e.executeSingleTool(ctx, tc)
 			result.Duration = time.Since(start)
@@ -120,7 +199,6 @@ func (e *AgentEngine) ExecuteTools(ctx context.Context, toolCalls []models.ToolC
 			mu.Unlock()
 			return err
 		})
-		wg.Add(1)
 	}
 
 	if err := g.Wait(); err != nil {
@@ -130,7 +208,7 @@ func (e *AgentEngine) ExecuteTools(ctx context.Context, toolCalls []models.ToolC
 	return results, nil
 }
 
-// executeSingleTool executes a single tool call.
+// executeSingleTool executes a single tool call from the registry.
 func (e *AgentEngine) executeSingleTool(ctx context.Context, tc models.ToolCall) (*ToolResult, error) {
 	select {
 	case <-ctx.Done():
@@ -140,6 +218,9 @@ func (e *AgentEngine) executeSingleTool(ctx context.Context, tc models.ToolCall)
 			Error:      ctx.Err(),
 		}, ctx.Err()
 	default:
+	}
+
+	if e.Registry == nil {
 		return &ToolResult{
 			ToolCallID: tc.ID,
 			Name:       tc.Function.Name,
@@ -147,6 +228,22 @@ func (e *AgentEngine) executeSingleTool(ctx context.Context, tc models.ToolCall)
 			Error:      nil,
 		}, nil
 	}
+
+	content, err := e.Registry.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+	if err != nil {
+		return &ToolResult{
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Error:      err,
+		}, err
+	}
+
+	return &ToolResult{
+		ToolCallID: tc.ID,
+		Name:       tc.Function.Name,
+		Content:    content,
+		Error:      nil,
+	}, nil
 }
 
 func (e *AgentEngine) getMaxConcurrent() int {
@@ -186,7 +283,7 @@ func buildToolMessages(calls []models.ToolCall, results []*ToolResult) []models.
 			}
 		}
 		messages[i] = models.Message{
-			Role:      models.RoleTool,
+			Role:       models.RoleTool,
 			ToolCallID: &tc.ID,
 			ToolResult: &content,
 		}

@@ -163,7 +163,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
 
-	v.SetEnvPrefix("GOCONDUIT")
+	v.SetEnvPrefix("AEROLLM")
 	v.AutomaticEnv()
 	v.AllowEmptyEnv(true)
 

@@ -70,17 +70,6 @@ func RecordLatency(name string, latency time.Duration) {
 	_ = latency
 }
 
-// RecordRequestCount records a request count metric.
-func RecordRequestCount(provider string, count int64) {
-	_ = provider
-	_ = count
-}
-
-// RecordCacheHit records a cache hit/miss metric.
-func RecordCacheHit(hit bool) {
-	_ = hit
-}
-
 // TraceSpan represents an active trace span.
 type TraceSpan struct {
 	span trace.Span
@@ -111,4 +100,51 @@ func (t *TraceSpan) SetAttributes(attrs ...attribute.KeyValue) {
 	if t.span != nil {
 		t.span.SetAttributes(attrs...)
 	}
+}
+
+var (
+	requestCount int64
+	cacheHits    int64
+	errorCount   int64
+	totalLatency int64
+	latencyCount int64
+)
+
+// RecordRequestCount increments request counter.
+func RecordRequestCount(provider string, count int64) {
+	_ = provider
+	requestCount += count
+}
+
+// RequestCount returns total requests.
+func RequestCount() int64 { return requestCount }
+
+// RecordCacheHit increments cache hit counter.
+func RecordCacheHit(hit bool) {
+	if hit {
+		cacheHits++
+	}
+}
+
+// CacheHits returns cache hit count.
+func CacheHits() int64 { return cacheHits }
+
+// RecordError increments error counter.
+func RecordError() { errorCount++ }
+
+// ErrorCount returns error count.
+func ErrorCount() int64 { return errorCount }
+
+// RecordLatencyMs records latency in milliseconds.
+func RecordLatencyMs(latency float64) {
+	totalLatency += int64(latency)
+	latencyCount++
+}
+
+// AvgLatency returns average latency in ms.
+func AvgLatency() float64 {
+	if latencyCount == 0 {
+		return 0
+	}
+	return float64(totalLatency) / float64(latencyCount)
 }

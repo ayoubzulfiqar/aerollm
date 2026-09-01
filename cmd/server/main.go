@@ -60,8 +60,8 @@ func NewRateLimiter() *ratelimit.TokenBucketLimiter {
 }
 
 // NewAgent creates a new agent engine.
-func NewAgent() *agent.AgentEngine {
-	return agent.NewAgentEngine(nil)
+func NewAgent(registry *agent.ToolRegistry) *agent.AgentEngine {
+	return agent.NewAgentEngine(nil, registry)
 }
 
 func main() {
@@ -95,7 +95,8 @@ func main() {
 
 	r := NewRouter(router.Config{Strategy: appCfg.Router.Strategy})
 	rl := NewRateLimiter()
-	a := NewAgent()
+	registry := agent.NewToolRegistry()
+	a := NewAgent(registry)
 	cacheInst := cache.NewRedisCache(redisClient, time.Hour)
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
 

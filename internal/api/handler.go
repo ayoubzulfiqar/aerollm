@@ -54,6 +54,11 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 		return
 	}
+	if req.Model == "" {
+		h.Logger.Error("missing model")
+		http.Error(w, `{"error":"missing model"}`, http.StatusBadRequest)
+		return
+	}
 
 	// Cache exact-match check
 	if h.Cache != nil {
@@ -70,7 +75,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Rate limiting
 	if h.RateLimiter != nil {
-		allowed, err := h.RateLimiter.Allow(ctx, r.Header.Get("Authorization"), "")
+		allowed, err := h.RateLimiter.Allow(ctx, r.Header.Get("Authorization"), req.Model)
 		if err != nil || !allowed {
 			h.Logger.Error("rate limited", "error", err)
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
@@ -79,19 +84,37 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route to provider
-	_, err := h.Router.Route(ctx, &req)
+	selectedProvider, err := h.Router.Route(ctx, &req)
 	if err != nil {
 		h.Logger.Error("routing error", "error", err)
 		http.Error(w, `{"error":"routing failed"}`, http.StatusInternalServerError)
+		telemetry.RecordError()
 		return
 	}
 
-	// Agentic tool execution loop
-	resp, err := h.Agent.RunToolExecutionLoop(ctx, &req)
+	// Provider-aware agentic tool execution loop
+	agentWithProvider := &agent.AgentEngine{
+		Provider:      h.Agent.Provider,
+		MaxIterations: h.Agent.MaxIterations,
+		ToolTimeout:   h.Agent.ToolTimeout,
+		MaxConcurrent: h.Agent.MaxConcurrent,
+		ToolCache:     h.Agent.ToolCache,
+		Registry:      h.Agent.Registry,
+	}
+	resp, err := agentWithProvider.RunToolExecutionLoop(ctx, &req)
 	if err != nil {
 		h.Logger.Error("agent error", "error", err)
 		http.Error(w, `{"error":"agent execution failed"}`, http.StatusInternalServerError)
+		telemetry.RecordError()
 		return
+	}
+	if resp == nil {
+		h.Logger.Error("empty agent response")
+		http.Error(w, `{"error":"empty agent response"}`, http.StatusInternalServerError)
+		return
+	}
+	if selectedProvider != nil {
+		resp.Model = selectedProvider.Name()
 	}
 
 	respBytes, err := json.Marshal(resp)
@@ -111,8 +134,34 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 
-	telemetry.RecordRequestCount("", 1)
-	telemetry.RecordLatency("", time.Since(start))
+	telemetry.RecordRequestCount(selectedProvider.Name(), 1)
+	telemetry.RecordLatencyMs(float64(time.Since(start).Milliseconds()))
+}
+
+// ProviderHealth represents provider health status for HTTP responses.
+type ProviderHealth struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Healthy     bool   `json:"healthy"`
+	CircuitOpen bool   `json:"circuit_open"`
+}
+
+// HealthProviders returns the health status of all registered providers.
+func (h *Handler) HealthProviders() []ProviderHealth {
+	var out []ProviderHealth
+	if h.Router == nil {
+		return out
+	}
+	for _, cb := range h.Router.Providers() {
+		health := cb.Health()
+		out = append(out, ProviderHealth{
+			Name:        health.Name,
+			Type:        string(health.Type),
+			Healthy:     health.Healthy,
+			CircuitOpen: health.CircuitOpen,
+		})
+	}
+	return out
 }
 
 // HealthCheck handles the /health endpoint.

@@ -12,14 +12,14 @@ import (
 
 // Config holds router configuration.
 type Config struct {
-	Strategy string
+	Strategy     string
 	BreakerConfig CircuitBreakerConfig
 }
 
 // CircuitBreakerConfig holds circuit breaker settings.
 type CircuitBreakerConfig struct {
-	MaxFailures    int
-	ResetTimeout   time.Duration
+	MaxFailures     int
+	ResetTimeout    time.Duration
 	HalfOpenMaxCalls int
 }
 
@@ -124,20 +124,29 @@ type Router struct {
 	mu           sync.RWMutex
 }
 
+// New creates a new Router with the given configuration.
 func New(cfg Config) *Router {
-	r := &Router{
-		strategy:  cfg.Strategy,
+	return &Router{
+		strategy:    cfg.Strategy,
 		breakerCfg: cfg.BreakerConfig,
 	}
-	_ = r
-	return r
 }
 
-// RegisterProvider adds a provider to the router.
+// RegisterProvider adds a provider to the router with circuit breaker protection.
 func (r *Router) RegisterProvider(p providers.Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	cb := NewCircuitBreaker(p, r.breakerCfg.MaxFailures, r.breakerCfg.ResetTimeout)
+
+	maxFailures := r.breakerCfg.MaxFailures
+	if maxFailures <= 0 {
+		maxFailures = 5
+	}
+	resetTimeout := r.breakerCfg.ResetTimeout
+	if resetTimeout <= 0 {
+		resetTimeout = 60 * time.Second
+	}
+
+	cb := NewCircuitBreaker(p, maxFailures, resetTimeout)
 	r.providers = append(r.providers, cb)
 }
 
@@ -211,7 +220,7 @@ func (r *Router) latencyBased(available []providers.Provider) providers.Provider
 	return best
 }
 
-// costBased returns the provider with the lowest cost for the given request.
+// costBased returns the provider with the lowest estimated cost for the given request.
 func (r *Router) costBased(available []providers.Provider, req *models.LLMRequest) providers.Provider {
 	var best providers.Provider
 	var lowestCost float64 = 1<<63 - 1
@@ -250,4 +259,13 @@ type NoProviderError struct{}
 
 func (e *NoProviderError) Error() string {
 	return "no available provider"
+}
+
+// Providers returns all registered circuit breakers.
+func (r *Router) Providers() []*CircuitBreaker {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out:=make([]*CircuitBreaker,len(r.providers))
+	copy(out,r.providers)
+	return out
 }
