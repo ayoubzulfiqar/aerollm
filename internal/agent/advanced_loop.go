@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"regexp"
 	"sync"
 	"time"
 
@@ -88,6 +89,18 @@ func (e *AgentEngine) RunAdvancedExecutionLoop(ctx context.Context, req *models.
 			hook.AfterTools(ctx, results)
 		}
 
+		for _, r := range results {
+			if r != nil && r.Error != nil {
+				missing := unknownToolPattern.FindStringSubmatch(r.Error.Error())
+				if len(missing) == 2 {
+					signal := ToolDeficitSignal{RequestID: req.Model, MissingTool: missing[1], Reason: r.Error.Error()}
+					for _, hook := range opts.Hooks {
+						hook.OnToolDeficit(ctx, signal)
+					}
+				}
+			}
+		}
+
 		toolMessages := buildToolMessages(toolCalls, results)
 		req.Messages = append(req.Messages, toolMessages...)
 	}
@@ -146,6 +159,8 @@ type ToolDeficitHandler struct {
 	mu       sync.RWMutex
 	deficits map[string]ToolDeficitSignal
 }
+
+var unknownToolPattern = regexp.MustCompile(`(?i)unknown tool:\s*([A-Za-z0-9_]+)`)
 
 // NewToolDeficitHandler creates a new handler.
 func NewToolDeficitHandler() *ToolDeficitHandler {

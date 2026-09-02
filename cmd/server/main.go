@@ -240,16 +240,7 @@ func main() {
 		_ = synthesis.NewToolPromoter(nil)
 	}()
 
-	requestsFn := func() int64 {
-		return 0
-	}
-	errorsFn := func() int64 {
-		return 0
-	}
-	latencyFn := func() float64 {
-		return 0
-	}
-	tuner := aiops.NewMetaAgentTuner(aiops.NewDefaultMetricsSource(requestsFn, errorsFn, latencyFn), 30*time.Second, 5*time.Minute)
+	tuner := aiops.NewMetaAgentTuner(aiops.NewDefaultMetricsSource(telemetry.RequestCount, telemetry.ErrorCount, func() float64 { return telemetry.AvgLatency() }), 30*time.Second, 5*time.Minute)
 	go tuner.Run(ctx)
 
 	feedbackExporter := flywheel.NewFeedbackExporter(ledgerStore)

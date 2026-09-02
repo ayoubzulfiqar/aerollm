@@ -264,6 +264,26 @@ func (h *Handler) ReadyCheck(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"ready": "true"})
 }
 
+// AdvancedLoopHandler wires the advanced execution loop into the HTTP handler.
+type AdvancedLoopHandler struct {
+	Agent  *agent.AgentEngine
+	Logger LoggerInterface
+	Hooks  []agent.LoopHook
+}
+
+// NewAdvancedLoopHandler creates a new handler wrapper.
+func NewAdvancedLoopHandler(a *agent.AgentEngine, logger LoggerInterface, hooks []agent.LoopHook) *AdvancedLoopHandler {
+	return &AdvancedLoopHandler{Agent: a, Logger: logger, Hooks: hooks}
+}
+
+// Run executes the advanced agent loop for a request.
+func (h *AdvancedLoopHandler) Run(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
+	if h.Agent == nil {
+		return nil, nil
+	}
+	return h.Agent.RunAdvancedExecutionLoop(ctx, req, agent.AdvancedLoopOptions{Hooks: h.Hooks})
+}
+
 // RateLimitMiddleware wraps a handler with rate limiting.
 func RateLimitMiddleware(next http.HandlerFunc, rl ratelimit.RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
