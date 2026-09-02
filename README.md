@@ -265,7 +265,7 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Developer CLI**: `cmd/cli` uses Cobra; `aerollm init` scaffolds `config.yaml`, `docker-compose.yml`, and `plugin.go`
 - **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests
 - **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
-- **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events
+- **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events; chat responses now opt into GenUI when requested
 
 ## FinOps
 
