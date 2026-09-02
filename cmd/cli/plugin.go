@@ -59,7 +59,9 @@ func newPluginPublishCmd() *cobra.Command {
 				fmt.Println("missing private key; use --private-key or AEROLLM_PLUGIN_PRIVATE_KEY")
 				return
 			}
-			fmt.Printf("publishing %s with key %s\n", args[0], priv)
+
+			manifest := fmt.Sprintf(`{"wasm":"%s","signature":"ed25519-stub","public_key":"%s"}`, args[0], priv)
+			fmt.Printf("prepared manifest: %s\n", manifest)
 		},
 	}
 	cmd.Flags().StringP("private-key", "k", "", "Ed25519 private key path")

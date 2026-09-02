@@ -139,6 +139,50 @@ func TestToolRegistryIntegration(t *testing.T) {
 	}
 }
 
+func TestExecuteToolsBillsToolCalls(t *testing.T) {
+	registry := NewToolRegistry()
+	registry.Register(&counterTool{})
+
+	provider := &mockToolProvider{response: &models.LLMResponse{
+		Choices: []models.Choice{{
+			Message: models.Message{
+				Role: models.RoleAssistant,
+				ToolCalls: []models.ToolCall{{
+					ID:   "call-1",
+					Type: "function",
+					Function: models.ToolFunction{
+						Name:      "counter",
+						Arguments: `{}`,
+					},
+				}},
+			},
+		}},
+	}}
+
+	a := NewAgentEngine(provider, registry)
+	a.ToolBilling = &fakeToolBilling{}
+	_, err := a.ExecuteTools(context.Background(), []models.ToolCall{{
+		ID:      "call-1",
+		Type:    "function",
+		Function: models.ToolFunction{Name: "counter", Arguments: `{}`},
+	}})
+	if err != nil {
+		t.Fatalf("execute tools failed: %v", err)
+	}
+	if a.ToolBilling.(*fakeToolBilling).lastTool != "counter" {
+		t.Fatalf("expected billing for counter, got %s", a.ToolBilling.(*fakeToolBilling).lastTool)
+	}
+}
+
+type fakeToolBilling struct {
+	lastTool string
+}
+
+func (f *fakeToolBilling) BillToolCall(_ context.Context, toolName string) error {
+	f.lastTool = toolName
+	return nil
+}
+
 func strPtr(s string) *string {
 	return &s
 }

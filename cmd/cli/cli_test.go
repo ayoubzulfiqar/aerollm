@@ -51,6 +51,22 @@ func TestPluginBuildMissingFile(t *testing.T) {
 	}
 }
 
+func TestPluginPublishMissingKey(t *testing.T) {
+	output := captureOutput(t, []string{"plugin", "publish", "plugin.wasm"})
+	if !strings.Contains(output, "missing private key") {
+		t.Fatalf("expected missing key output, got: %s", output)
+	}
+}
+
+func TestPluginPublishPreparesManifest(t *testing.T) {
+	_ = os.Setenv("AEROLLM_PLUGIN_PRIVATE_KEY", "fake-key")
+	defer os.Unsetenv("AEROLLM_PLUGIN_PRIVATE_KEY")
+	output := captureOutput(t, []string{"plugin", "publish", "plugin.wasm"})
+	if !strings.Contains(output, "prepared manifest") {
+		t.Fatalf("expected prepared manifest output, got: %s", output)
+	}
+}
+
 func TestGitOpsSync(t *testing.T) {
 	output := captureOutput(t, []string{"sync"})
 	if !strings.Contains(output, "gitops sync triggered") {

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/ayoubzulfiqar/aerollm/internal/tenant"
 )
 
 // PluginPricing captures commercial metadata for a tool/plugin.
@@ -57,7 +55,7 @@ type ToolCallBilling struct {
 
 // WalletStore resolves wallets by identifier.
 type WalletStore interface {
-	Wallet(ctx context.Context, id tenant.TenantID) (Wallet, error)
+	Wallet(ctx context.Context, id WalletID) (Wallet, error)
 }
 
 // NewToolCallBilling creates a new tool billing interceptor.
@@ -66,7 +64,7 @@ func NewToolCallBilling(wallets WalletStore, pricing PricingStore) *ToolCallBill
 }
 
 // BillToolCall charges the caller wallet and credits the creator wallet.
-func (b *ToolCallBilling) BillToolCall(ctx context.Context, callerID tenant.TenantID, toolName string) error {
+func (b *ToolCallBilling) BillToolCall(ctx context.Context, callerID WalletID, toolName string) error {
 	if b.wallets == nil || b.pricing == nil {
 		return nil
 	}
@@ -86,7 +84,7 @@ func (b *ToolCallBilling) BillToolCall(ctx context.Context, callerID tenant.Tena
 	}
 
 	if pricing.CreatorID != "" {
-		creatorWallet, err := b.wallets.Wallet(ctx, tenant.TenantID(pricing.CreatorID))
+		creatorWallet, err := b.wallets.Wallet(ctx, WalletID(pricing.CreatorID))
 		if err == nil {
 			_, _ = creatorWallet.Credit(ctx, pricing.PricePerCall, fmt.Sprintf("tool_call:%s", toolName))
 		}
@@ -97,7 +95,7 @@ func (b *ToolCallBilling) BillToolCall(ctx context.Context, callerID tenant.Tena
 
 // ToolCallEvent represents an intercepted tool call for economy evaluation.
 type ToolCallEvent struct {
-	TenantID tenant.TenantID
+	TenantID WalletID
 	ToolName string
 }
 

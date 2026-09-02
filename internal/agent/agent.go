@@ -124,6 +124,12 @@ type AgentEngine struct {
 	ToolCache     map[string]*ToolResult
 	mu            sync.RWMutex
 	Registry      *ToolRegistry
+	ToolBilling   ToolCallBiller
+}
+
+// ToolCallBiller bills tool executions for the economy layer.
+type ToolCallBiller interface {
+	BillToolCall(ctx context.Context, toolName string) error
 }
 
 // NewAgentEngine creates a new AgentEngine.
@@ -238,12 +244,18 @@ func (e *AgentEngine) executeSingleTool(ctx context.Context, tc models.ToolCall)
 		}, err
 	}
 
-	return &ToolResult{
+	result := &ToolResult{
 		ToolCallID: tc.ID,
 		Name:       tc.Function.Name,
 		Content:    content,
 		Error:      nil,
-	}, nil
+	}
+
+	if e.ToolBilling != nil {
+		_ = e.ToolBilling.BillToolCall(ctx, tc.Function.Name)
+	}
+
+	return result, nil
 }
 
 func (e *AgentEngine) getMaxConcurrent() int {

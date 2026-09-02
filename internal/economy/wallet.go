@@ -50,12 +50,17 @@ type InMemoryWalletStore struct {
 	transactions []Transaction
 }
 
-// NewInMemoryWalletStore creates an in-memory wallet store.
+// NewInMemoryWalletStore creates a new in-memory wallet store.
 func NewInMemoryWalletStore() *InMemoryWalletStore {
-	return &InMemoryWalletStore{
-		balances:    make(map[WalletID]float64),
-		transactions: make([]Transaction, 0),
+	return &InMemoryWalletStore{balances: make(map[WalletID]float64), transactions: make([]Transaction, 0)}
+}
+
+// Wallet returns a Wallet handle for the given identifier.
+func (s *InMemoryWalletStore) Wallet(_ context.Context, id WalletID) (Wallet, error) {
+	if id == "" {
+		return nil, fmt.Errorf("economy: missing wallet id")
 	}
+	return NewDefaultWallet(id, s), nil
 }
 
 // Balance returns the current balance.
