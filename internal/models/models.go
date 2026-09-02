@@ -56,6 +56,7 @@ type LLMRequest struct {
 	PresencePenalty  *float64          `json:"presence_penalty,omitempty"`
 	FrequencyPenalty *float64          `json:"frequency_penalty,omitempty"`
 	Tools            []ToolDefinition  `json:"tools,omitempty"`
+	RagEnabled       bool              `json:"rag_enabled,omitempty"`
 }
 
 // LLMResponse is the unified response structure from any LLM provider.

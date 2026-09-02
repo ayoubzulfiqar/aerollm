@@ -145,6 +145,20 @@ Supported methods:
 - `POST /mcp` with JSON-RPC `tools/call`
 - `GET /mcp` for SSE event stream
 
+Example JSON-RPC calls:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
 ## Middleware Chain
 
 `/v1/chat/completions` is composed as:

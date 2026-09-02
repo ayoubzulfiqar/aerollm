@@ -17,6 +17,8 @@ type LedgerRecord struct {
 	ResponseHash string
 	ChainHash    string
 	Metadata     map[string]interface{}
+	RequestPayload  string
+	ResponsePayload string
 }
 
 // LedgerStore persists ledger records.

@@ -16,12 +16,13 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
+	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
-	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
+	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -116,7 +117,7 @@ func main() {
 	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
 	scoper.AddScope(guardrails.APIKeyScope{
-		APIKey:       "sk-dev-1",
+		APIKey:       getenvOrDefault("AEROLLM_API_KEY", "sk-demo"),
 		AllowedModels: []string{"gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"},
 		MaxBudgetUSD: 100,
 		IPAllowlist:  []string{"127.0.0.1"},
@@ -124,6 +125,9 @@ func main() {
 
 	handler.UsageRecorder = costTracker
 	handler.BudgetChecker = costTracker
+
+	ledgerStore := ledger.NewInMemoryLedgerStore()
+	handler.Ledger = ledgerStore
 
 	webhookDispatcher := webhooks.NewWebhookDispatcher()
 	webhookDispatcher.Register(webhooks.EventBudgetExceeded, webhooks.WebhookConfig{

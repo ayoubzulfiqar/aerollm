@@ -11,6 +11,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
+	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
@@ -37,6 +38,10 @@ type Handler struct {
 	UsageRecorder *finops.CostTracker
 	BudgetChecker interface {
 		CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error)
+	}
+	Ledger interface {
+		Append(ctx context.Context, record ledger.LedgerRecord) error
+		Latest(ctx context.Context) (*ledger.LedgerRecord, error)
 	}
 }
 
@@ -169,6 +174,24 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	telemetry.RecordRequestCount(selectedProvider.Name(), 1)
 	telemetry.RecordLatencyMs(float64(time.Since(start).Milliseconds()))
+
+	if h.Ledger != nil {
+		reqBytes, _ := json.Marshal(req)
+		respBytes, _ := json.Marshal(resp)
+		latest, _ := h.Ledger.Latest(ctx)
+		prevHash := ""
+		if latest != nil {
+			prevHash = latest.ChainHash
+		}
+		chainHash := ledger.ComputeChainHash(prevHash, string(reqBytes), string(respBytes))
+		_ = h.Ledger.Append(ctx, ledger.LedgerRecord{
+			Timestamp:         time.Now().UTC(),
+			PrevHash:          prevHash,
+			RequestPayload:    string(reqBytes),
+			ResponsePayload:   string(respBytes),
+			ChainHash:         chainHash,
+		})
+	}
 }
 
 // ResumeApproval handles the /v1/agents/approvals/{id} endpoint.
