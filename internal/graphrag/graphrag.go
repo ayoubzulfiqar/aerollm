@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -257,6 +259,17 @@ func (w *AutoOntologyWorker) Run(ctx context.Context, ledger interface{}) error 
 	_ = ledger
 	_ = ctx
 	return nil
+}
+
+// Middleware returns an HTTP middleware that injects graph context when enabled.
+func (m *GraphRAGMiddleware) Middleware(next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		var r models.LLMRequest
+		if err := json.NewDecoder(req.Body).Decode(&r); err == nil && r.RagEnabled {
+			_ = m.MaybeInject(req.Context(), &r)
+		}
+		next.ServeHTTP(w, req)
+	}
 }
 
 func tokenize(s string) []string {

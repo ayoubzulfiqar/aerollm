@@ -12,10 +12,12 @@ import (
 
 	"github.com/ayoubzulfiqar/aerollm/internal/api"
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
+	"github.com/ayoubzulfiqar/aerollm/internal/aiops"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
+	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
@@ -30,6 +32,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
+	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
@@ -100,6 +103,13 @@ func (r *realtimeProvider) StreamChatCompletions(ctx context.Context, req *model
 }
 
 func (r *realtimeProvider) Name() string { return "realtime-adapter" }
+
+func getenvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func main() {
 	appName := "aerollm"
@@ -178,6 +188,12 @@ func main() {
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
 
+	graphStore := graphrag.NewBboltGraphStore()
+	_ = graphStore
+	graphRAGMiddleware := graphrag.NewGraphRAGMiddleware(graphStore)
+	deficitDetector := synthesis.NewDeficitDetector()
+	_ = deficitDetector
+
 	chat := handler.ChatCompletions
 	chat = rag.RAGHTTPMiddleware(rag.NewHybridRetriever(rag.NewInMemoryVectorStore(), rag.NewInMemoryKeywordIndex()))(chat)
 	chat = guardrails.InjectionShieldMiddleware(chat)
@@ -187,9 +203,16 @@ func main() {
 	chat = middleware.NewAuthMiddleware(chat).Next
 	chat = middleware.NewLoggingMiddleware(chat, logger).Next
 	chat = middleware.NewRecoveryMiddleware(chat).Next
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, req *http.Request) {
+	chat = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ctx := req.Context()
+		if signals, ok := deficitDetector.Analyze(ctx, getenvOrDefault("AEROLLM_REQUEST_ID", "req"), req.URL.Path, nil); ok {
+			logger.Info("synthesis deficit detected", "tool", signals.MissingTool)
+		}
 		chat(w, req)
 	})
+	chatHandler := http.HandlerFunc(chat)
+	chatHandler = graphRAGMiddleware.Middleware(chatHandler)
+	mux.HandleFunc("/v1/chat/completions", chatHandler.ServeHTTP)
 
 	advanced := NewAdvancedAgent(registry, redisClient)
 	handler.Advanced = advanced
@@ -206,12 +229,28 @@ func main() {
 		redteam.NewWorker(redteam.DefaultConfig(), ledgerStore).Start(ctx)
 	}()
 
-	swarmOrchestrator := swarm.NewSwarmOrchestrator(stateStore, registry)
-	_ = swarmOrchestrator
+	_ = swarm.NewSwarmOrchestrator(stateStore, registry)
 	_ = learning.NewTrainer(&flywheel.DatasetExporter{Ledger: ledgerStore}, ledgerStore, getenvOrDefault("AEROLLM_LEARNING_DIR", "./fine-tune-jobs"))
 	go func() {
 		evolution.NewEngine(evolution.DefaultConfig()).Start(ctx)
 	}()
+
+	_ = graphrag.NewAutoOntologyWorker(graphStore, nil)
+	go func() {
+		_ = synthesis.NewToolPromoter(nil)
+	}()
+
+	requestsFn := func() int64 {
+		return 0
+	}
+	errorsFn := func() int64 {
+		return 0
+	}
+	latencyFn := func() float64 {
+		return 0
+	}
+	tuner := aiops.NewMetaAgentTuner(aiops.NewDefaultMetricsSource(requestsFn, errorsFn, latencyFn), 30*time.Second, 5*time.Minute)
+	go tuner.Run(ctx)
 
 	feedbackExporter := flywheel.NewFeedbackExporter(ledgerStore)
 	mux.HandleFunc("/v1/feedback", feedbackExporter.FeedbackHandler)
@@ -258,11 +297,4 @@ func main() {
 		_ = stateStore.Close()
 	}
 	fmt.Println("server gracefully stopped")
-}
-
-func getenvOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
