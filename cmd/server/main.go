@@ -21,6 +21,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
+	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -150,6 +151,7 @@ func main() {
 	mux.HandleFunc("/ready", handler.ReadyCheck)
 
 	chat := handler.ChatCompletions
+	chat = rag.RAGHTTPMiddleware(rag.NewHybridRetriever(rag.NewInMemoryVectorStore(), rag.NewInMemoryKeywordIndex()))(chat)
 	chat = guardrails.InjectionShieldMiddleware(chat)
 	chat = guardrails.PIIMiddleware(chat)
 	chat = guardrails.APIKeyScopingMiddleware(scoper)(chat)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
@@ -86,6 +87,14 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.Logger.Info("cache hit", "key", cacheKey)
 			return
 		}
+	}
+
+	// Auto-summarization to keep context within model limits
+	if len(req.Messages) > 0 {
+		ctxMgr := contextmgr.NewContextManager(map[string]int{
+			req.Model: 4096,
+		})
+		_, _ = ctxMgr.MaybeSummarize(ctx, req.Model, req.Messages)
 	}
 
 	// Rate limiting

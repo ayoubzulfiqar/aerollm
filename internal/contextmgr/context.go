@@ -1,4 +1,4 @@
-package contextpkg
+package contextmgr
 
 import (
 	"context"
