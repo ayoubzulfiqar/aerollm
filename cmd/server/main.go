@@ -274,8 +274,13 @@ func main() {
 	studioOrchestrator := swarm.NewSwarmOrchestrator(stateStore, registry)
 	_ = studioOrchestrator
 	studioHandler := studio.NewHandler(r, studioOrchestrator, prices)
+	dagStore := studio.NewInMemoryDAGStore()
+	_ = dagStore
+	dagHandler := studio.NewDAGHandler(dagStore)
+	_ = dagHandler
 	mux.HandleFunc("/v1/studio/topology", studioHandler.Topology)
 	mux.HandleFunc("/v1/studio/analytics/cost", studioHandler.AnalyticsCost)
+	mux.HandleFunc("/v1/studio/dags", dagHandler.ServeDAGs)
 
 	meshCfg := mesh.DefaultMeshConfig()
 	meshCfg.Enabled = os.Getenv("AEROLLM_MESH_ENABLED") == "true"

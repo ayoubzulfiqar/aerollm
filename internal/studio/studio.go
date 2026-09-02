@@ -121,7 +121,7 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 		SyncInterval: "5s",
 	}
 
-	respondJSON(w, resp)
+	writeJSON(w, resp)
 }
 
 // AnalyticsCost returns cost analytics data.
@@ -147,10 +147,10 @@ func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	respondJSON(w, resp)
+	writeJSON(w, resp)
 }
 
-func respondJSON(w http.ResponseWriter, v interface{}) {
+func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
