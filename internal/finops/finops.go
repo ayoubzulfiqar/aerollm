@@ -61,6 +61,17 @@ func (p *PricingMap) Ensure(model string) Pricing {
 	return fallback
 }
 
+// Models returns all registered model pricing keys.
+func (p *PricingMap) Models() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, 0, len(p.prices))
+	for model := range p.prices {
+		out = append(out, model)
+	}
+	return out
+}
+
 // CostRequest represents a billable request.
 type CostRequest struct {
 	RequestID      string
