@@ -107,8 +107,10 @@ Request path for `/v1/chat/completions`:
 8. Budget pre-check
 9. Exact-match cache lookup
 10. Provider routing
-11. Agent tool execution loop
-12. Usage recording + webhook dispatch on failure
+11. Synthesis deficit detection + GraphRAG context injection
+12. Advanced agent loop with hooks, retry, and tool error recovery
+13. AIOps self-optimization
+14. Usage recording + webhook dispatch on failure
 
 Key packages:
 - `internal/middleware` — HTTP middleware primitives
@@ -140,6 +142,10 @@ Key packages:
 - `internal/plugins` — plugin hooks, registry, and WASM host
 - `internal/eval` — judge pipeline, regression detection, benchmark runner
 - `internal/compliance` — policy engine and HTTP 451 middleware
+- `internal/synthesis` — deficit detection, LLM code generation stub, tool promoter
+- `internal/graphrag` — temporal graph store, BFS neighbors, token query, GraphRAG middleware
+- `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
+- `internal/providers/universal` — universal model registry for capability cards
 
 ## API
 
