@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,15 +27,19 @@ func captureOutput(t *testing.T, args []string) string {
 
 func TestInitCmd(t *testing.T) {
 	dir := t.TempDir()
-	_ = os.Chdir(dir)
-	output := captureOutput(t, []string{"init"})
-	if !strings.Contains(output, "created config.yaml and plugin.go") {
+	absDir, _ := filepath.Abs(dir)
+	_ = os.Chdir(absDir)
+	output := captureOutput(t, []string{"init", "--dir", absDir})
+	if !strings.Contains(output, "created config.yaml, docker-compose.yml, and plugin.go") {
 		t.Fatalf("unexpected output: %s", output)
 	}
-	if _, err := os.Stat("config.yaml"); err != nil {
+	if _, err := os.Stat(filepath.Join(absDir, "config.yaml")); err != nil {
 		t.Fatalf("config.yaml missing: %v", err)
 	}
-	if _, err := os.Stat("plugin.go"); err != nil {
+	if _, err := os.Stat(filepath.Join(absDir, "docker-compose.yml")); err != nil {
+		t.Fatalf("docker-compose.yml missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(absDir, "plugin.go")); err != nil {
 		t.Fatalf("plugin.go missing: %v", err)
 	}
 }

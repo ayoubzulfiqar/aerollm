@@ -1,11 +1,15 @@
 package studio
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
+	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
+	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 )
 
@@ -19,26 +23,27 @@ type TopologyResponse struct {
 
 // ProviderStatus represents the status of a provider.
 type ProviderStatus struct {
-	Name     string  `json:"name"`
-	Type     string `json:"type"`
-	LatencyMs float64 `json:"latency_ms"`
-	CircuitOpen bool `json:"circuit_open"`
+	Name        string  `json:"name"`
+	Type        string  `json:"type"`
+	LatencyMs   float64 `json:"latency_ms"`
+	CircuitOpen bool    `json:"circuit_open"`
 }
 
 // SwarmStatus represents the status of an agent swarm.
 type SwarmStatus struct {
-	ID       string `json:"id"`
-	Task     string `json:"task"`
-	Status   string `json:"status"`
-	AgentCount int  `json:"agent_count"`
+	ID         string `json:"id"`
+	Task       string `json:"task"`
+	Status     string `json:"status"`
+	AgentCount int    `json:"agent_count"`
 }
 
 // MeshStatus represents the status of the mesh network.
 type MeshStatus struct {
 	Enabled      bool     `json:"enabled"`
-	LocalPeerID  string `json:"local_peer_id"`
-	PeerCount    int    `json:"peer_count"`
-	SyncInterval string `json:"sync_interval"`
+	LocalPeerID  string   `json:"local_peer_id"`
+	PeerCount    int      `json:"peer_count"`
+	SyncInterval string   `json:"sync_interval"`
+	PeerIDs      []string `json:"peer_ids"`
 }
 
 // AnalyticsCostResponse represents the cost analytics response.
@@ -63,9 +68,21 @@ type CostBreakdown struct {
 
 // Handler handles studio API requests.
 type Handler struct {
+	mu         sync.RWMutex
 	router     *router.Router
 	swarms     SwarmProvider
 	pricing    *finops.PricingMap
+	meshStatus MeshStatus
+	ledger     ledgerStore
+	market     marketplaceRecorder
+}
+
+type ledgerStore interface {
+	All(ctx context.Context) ([]ledger.LedgerRecord, error)
+}
+
+type marketplaceRecorder interface {
+	Snapshot() []marketplace.RoyaltyEvent
 }
 
 // SwarmProvider provides swarm status information.
@@ -74,12 +91,28 @@ type SwarmProvider interface {
 }
 
 // NewHandler creates a new studio handler.
-func NewHandler(router *router.Router, swarms SwarmProvider, pricing *finops.PricingMap) *Handler {
+func NewHandler(
+	router *router.Router,
+	swarms SwarmProvider,
+	pricing *finops.PricingMap,
+	ledgerStore ledgerStore,
+	marketRecorder marketplaceRecorder,
+) *Handler {
 	return &Handler{
-		router:  router,
-		swarms:  swarms,
-		pricing: pricing,
+		router:     router,
+		swarms:     swarms,
+		pricing:    pricing,
+		ledger:     ledgerStore,
+		market:     marketRecorder,
+		meshStatus: MeshStatus{SyncInterval: "5s"},
 	}
+}
+
+// SetMeshStatus updates mesh status shown in topology.
+func (h *Handler) SetMeshStatus(status MeshStatus) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.meshStatus = status
 }
 
 // Topology returns the current system topology.
@@ -94,8 +127,7 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.router != nil {
-		providers := h.router.Providers()
-		for _, p := range providers {
+		for _, p := range h.router.Providers() {
 			health := p.Health()
 			resp.Providers = append(resp.Providers, ProviderStatus{
 				Name:        p.Name(),
@@ -114,17 +146,14 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	resp.Mesh = MeshStatus{
-		Enabled:      false,
-		LocalPeerID:  "",
-		PeerCount:    0,
-		SyncInterval: "5s",
-	}
+	h.mu.RLock()
+	resp.Mesh = h.meshStatus
+	h.mu.RUnlock()
 
 	writeJSON(w, resp)
 }
 
-// AnalyticsCost returns cost analytics data.
+// AnalyticsCost returns cost analytics data aggregated from ledger/marketplace state.
 func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -141,9 +170,27 @@ func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.pricing != nil {
-		models := h.pricing.Models()
-		for _, model := range models {
+		for _, model := range h.pricing.Models() {
 			resp.Breakdown.ByModel[model] = 0
+		}
+	}
+
+	if h.ledger != nil {
+		records, err := h.ledger.All(r.Context())
+		if err == nil {
+			for _, rec := range records {
+				resp.TimeSeries = append(resp.TimeSeries, CostTimeSeries{
+					Timestamp: rec.Timestamp,
+					CostUSD:   0,
+					Tokens:    0,
+				})
+			}
+		}
+	}
+
+	if h.market != nil {
+		for _, ev := range h.market.Snapshot() {
+			resp.Breakdown.ByPlugin[ev.PluginID] += ev.CostUSD
 		}
 	}
 

@@ -274,7 +274,7 @@ func main() {
 
 	studioOrchestrator := swarm.NewSwarmOrchestrator(stateStore, registry)
 	_ = studioOrchestrator
-	studioHandler := studio.NewHandler(r, studioOrchestrator, prices)
+	studioHandler := studio.NewHandler(r, studioOrchestrator, prices, ledgerStore, royaltyRecorder)
 	dagStore := studio.NewInMemoryDAGStore()
 	_ = dagStore
 	dagHandler := studio.NewDAGHandler(dagStore)

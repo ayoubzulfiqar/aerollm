@@ -82,10 +82,22 @@ func NewRateLimitMiddleware(next http.HandlerFunc, rl interface{}) *RateLimitMid
 
 // ServeHTTP checks the rate limit for the requesting API key.
 func (m *RateLimitMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	apiKey := r.Header.Get("Authorization")
+	apiKey := APIKeyFromRequest(r)
 	if apiKey == "" {
 		m.Next(w, r)
 		return
 	}
 	m.Next(w, r)
+}
+
+// APIKeyFromRequest extracts the API key from the Authorization header.
+func APIKeyFromRequest(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return ""
+	}
+	if len(auth) > 7 && auth[:7] == "Bearer " {
+		return auth[7:]
+	}
+	return auth
 }

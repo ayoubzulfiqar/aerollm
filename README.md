@@ -148,6 +148,7 @@ Key packages:
 - `internal/providers/universal` — universal model registry for capability cards
 - `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers, and an in-memory transport stub used for local tests
 - `internal/marketplace` — signed manifest verification, registry client, micro-royalty tracking
+- `internal/economy` — agent wallets, micro-transaction billing for tool calls, and SLA-aware selection
 - `internal/zk` — zero-knowledge encrypted payload middleware and confidential compute stubs
 
 ## API
@@ -258,6 +259,13 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Global Edge Mesh**: `internal/mesh` with CRDT-backed state, peer discovery, and gossip sync for bandit weights and plugin registries
 - **Marketplace & Royalties**: `internal/marketplace` with signed manifest verification, registry client, and micro-royalty tracking via webhook dispatch
 - **Zero-Knowledge Guardrails**: `internal/zk` with `ConfidentialCompute` middleware stubs for encrypted payload handling
+
+### Phase 9: Visual Control Plane, Developer CLI & Agent Economy
+- **AeroLLM Studio Backend**: `internal/studio` exposes `/v1/studio/topology`, `/v1/studio/analytics/cost`, and `/v1/studio/dags` under existing licensing middleware
+- **Developer CLI**: `cmd/cli` uses Cobra; `aerollm init` scaffolds `config.yaml`, `docker-compose.yml`, and `plugin.go`
+- **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests
+- **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
+- **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events
 
 ## FinOps
 
