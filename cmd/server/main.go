@@ -249,7 +249,10 @@ func main() {
 
 	marketClient := marketplace.NewClient(getenvOrDefault("AEROLLM_MARKETPLACE_URL", "https://registry.aerollm.io"))
 	_ = marketClient
-	registryStore := marketplace.NewInMemoryStore()
+	var registryStore marketplace.Store = marketplace.NewInMemoryStore()
+	if redisClient != nil {
+		registryStore = marketplace.NewRedisStore(marketplace.RedisOptions{Client: redisClient.(*redis.Client)})
+	}
 	_ = registryStore
 	registryService := marketplace.NewRegistryService(marketClient, registryStore)
 	_ = registryService
