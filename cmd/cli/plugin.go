@@ -1,0 +1,50 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+func newPluginCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "plugin",
+		Short: "Plugin build/publish utilities",
+	}
+
+	cmd.AddCommand(newPluginBuildCmd())
+	cmd.AddCommand(newPluginPublishCmd())
+	return cmd
+}
+
+func newPluginBuildCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "build [source]",
+		Short: "Build a Go source file into a WASM plugin",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			out, _ := cmd.Flags().GetString("output")
+			if out == "" {
+				out = "plugin.wasm"
+			}
+			fmt.Printf("building %s -> %s\n", args[0], out)
+		},
+	}
+	cmd.Flags().StringP("output", "o", "plugin.wasm", "output wasm path")
+	return cmd
+}
+
+func newPluginPublishCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "publish [wasm]",
+		Short: "Prepare a signed plugin manifest for marketplace publish",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			priv, _ := cmd.Flags().GetString("private-key")
+			_ = priv
+			fmt.Printf("publishing %s\n", args[0])
+		},
+	}
+	cmd.Flags().StringP("private-key", "k", "", "Ed25519 private key path")
+	return cmd
+}
