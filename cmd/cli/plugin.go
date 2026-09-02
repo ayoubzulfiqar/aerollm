@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 )
@@ -27,7 +29,16 @@ func newPluginBuildCmd() *cobra.Command {
 			if out == "" {
 				out = "plugin.wasm"
 			}
-			fmt.Printf("building %s -> %s\n", args[0], out)
+
+			buildCmd := exec.Command("go", "build", "-o", out, args[0])
+			buildCmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+			buildCmd.Stdout = os.Stdout
+			buildCmd.Stderr = os.Stderr
+			if err := buildCmd.Run(); err != nil {
+				fmt.Printf("build failed: %v\n", err)
+				return
+			}
+			fmt.Printf("built %s -> %s\n", args[0], out)
 		},
 	}
 	cmd.Flags().StringP("output", "o", "plugin.wasm", "output wasm path")
@@ -41,8 +52,14 @@ func newPluginPublishCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			priv, _ := cmd.Flags().GetString("private-key")
-			_ = priv
-			fmt.Printf("publishing %s\n", args[0])
+			if priv == "" {
+				priv = os.Getenv("AEROLLM_PLUGIN_PRIVATE_KEY")
+			}
+			if priv == "" {
+				fmt.Println("missing private key; use --private-key or AEROLLM_PLUGIN_PRIVATE_KEY")
+				return
+			}
+			fmt.Printf("publishing %s with key %s\n", args[0], priv)
 		},
 	}
 	cmd.Flags().StringP("private-key", "k", "", "Ed25519 private key path")

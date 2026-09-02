@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func main() {
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "aerollm",
 		Short: "AeroLLM CLI",
@@ -17,7 +17,11 @@ func main() {
 	root.AddCommand(newPluginCmd())
 	root.AddCommand(newGitOpsCmd())
 
-	if err := root.Execute(); err != nil {
+	return root
+}
+
+func main() {
+	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
 }
