@@ -20,6 +20,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
+	"github.com/ayoubzulfiqar/aerollm/internal/licensing"
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
@@ -278,9 +279,17 @@ func main() {
 	_ = dagStore
 	dagHandler := studio.NewDAGHandler(dagStore)
 	_ = dagHandler
-	mux.HandleFunc("/v1/studio/topology", studioHandler.Topology)
-	mux.HandleFunc("/v1/studio/analytics/cost", studioHandler.AnalyticsCost)
-	mux.HandleFunc("/v1/studio/dags", dagHandler.ServeDAGs)
+
+	var studioTopology http.Handler = http.HandlerFunc(studioHandler.Topology)
+	var studioAnalytics http.Handler = http.HandlerFunc(studioHandler.AnalyticsCost)
+	var studioDAGs http.Handler = http.HandlerFunc(dagHandler.ServeDAGs)
+	licenseChecker := licensing.NewEnvLicenseChecker()
+	studioTopology = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioTopology)
+	studioAnalytics = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioAnalytics)
+	studioDAGs = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioDAGs)
+	mux.Handle("/v1/studio/topology", studioTopology)
+	mux.Handle("/v1/studio/analytics/cost", studioAnalytics)
+	mux.Handle("/v1/studio/dags", studioDAGs)
 
 	meshCfg := mesh.DefaultMeshConfig()
 	meshCfg.Enabled = os.Getenv("AEROLLM_MESH_ENABLED") == "true"
