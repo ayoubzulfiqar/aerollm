@@ -23,6 +23,15 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **Shadow Traffic**: Async shadow routing for provider comparison
 - **Webhook Dispatcher**: Async retry-capable webhook delivery with exponential backoff
 
+### Phase 3: Autonomous AI Control Plane
+- **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
+- **MCP Hub**: Native Model Context Protocol server for external tool integration
+- **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
+- **Context Manager**: Token counting and auto-summarization for long conversations
+- **GitOps**: Git-backed prompt template versioning and delivery
+- **Immutable Ledger**: Cryptographic audit chain for request/response integrity
+- **WASM Sandbox**: Zero-trust isolated tool execution runtime
+
 ### Provider Support
 - **OpenAI**: GPT-4, GPT-3.5-turbo, and compatible APIs
 - **Anthropic**: Claude 3 models (Sonnet, Opus, Haiku)
@@ -91,6 +100,13 @@ Key packages:
 - `internal/webhooks` — async webhook dispatch with retry/backoff
 - `internal/agent` — agent engine, memory, approvals
 - `internal/router` — round-robin, latency, cost, fallback + circuit breaker
+- `internal/orchestrator` — DAG execution with `errgroup` concurrency
+- `internal/mcp` — Model Context Protocol HTTP/SSE server
+- `internal/rag` — hybrid retrieval, RRF fusion, context injection
+- `internal/context` — token counting, auto-summarization
+- `internal/gitops` — git-backed prompt template polling store
+- `internal/ledger` — chained-hash append-only audit log
+- `internal/sandbox` — WASM tool execution interface
 
 ## API
 
@@ -119,6 +135,15 @@ curl -X POST http://localhost:8080/v1/agents/approvals/approval-123 \
   -H "Content-Type: application/json" \
   -d '{"approved":true}'
 ```
+
+### MCP Server
+AeroLLM exposes a native MCP endpoint at `/mcp`.
+
+Supported methods:
+- `POST /mcp` with JSON-RPC `initialize`
+- `POST /mcp` with JSON-RPC `tools/list`
+- `POST /mcp` with JSON-RPC `tools/call`
+- `GET /mcp` for SSE event stream
 
 ## Middleware Chain
 
