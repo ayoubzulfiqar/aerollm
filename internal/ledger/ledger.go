@@ -25,6 +25,7 @@ type LedgerRecord struct {
 type LedgerStore interface {
 	Append(ctx context.Context, record LedgerRecord) error
 	Latest(ctx context.Context) (*LedgerRecord, error)
+	All(ctx context.Context) ([]LedgerRecord, error)
 }
 
 // InMemoryLedgerStore implements LedgerStore in memory for development/testing.
@@ -59,6 +60,16 @@ func (s *InMemoryLedgerStore) Latest(ctx context.Context) (*LedgerRecord, error)
 	}
 	out := *s.last
 	return &out, nil
+}
+
+// All returns all stored records.
+func (s *InMemoryLedgerStore) All(ctx context.Context) ([]LedgerRecord, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]LedgerRecord, len(s.records))
+	copy(out, s.records)
+	return out, nil
 }
 
 // ComputeChainHash computes the chained hash for a new record.

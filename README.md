@@ -190,7 +190,9 @@ curl -X POST http://localhost:8080/mcp \
 
 ### Phase 4: AI-Native Edge Fabric & Data Flywheel
 - **Realtime WebSocket**: Bidirectional streaming via `/ws`
-- **Barge-in/VAD**: Cancel provider generation on user voice activity
+  - Text control: `{"type":"ping"}` -> `{"event":"pong"}`, `{"type":"barge-in"}` or `{"action":"cancel"}` cancels generation and returns `{"event":"barge-in"}`
+  - Binary frames: non-empty binary WebSocket messages are treated as barge-in/cancel by default
+- **Barge-in/VAD**: Cancel provider generation on user voice activity or explicit cancel event
 - **Multimodal**: Audio/image preprocessing with transcription/vision hooks
 - **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
 - **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline

@@ -3,6 +3,7 @@ package flywheel
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -55,13 +56,25 @@ type DatasetExporter struct {
 
 // ExportJSONL formats matched ledger records to JSONL text.
 func (d *DatasetExporter) ExportJSONL(ctx context.Context, minRating string) (string, error) {
-	_ = ctx
-	_ = minRating
-	latest, _ := d.Ledger.Latest(ctx)
-	if latest == nil {
-		return "", nil
+	records, err := d.Ledger.All(ctx)
+	if err != nil || len(records) == 0 {
+		return "", err
 	}
-	return "", nil
+	var sb strings.Builder
+	for _, rec := range records {
+		if rec.RequestPayload == "" || rec.ResponsePayload == "" {
+			continue
+		}
+		item := map[string]string{
+			"request":  rec.RequestPayload,
+			"response": rec.ResponsePayload,
+			"rating":   minRating,
+		}
+		b, _ := json.Marshal(item)
+		sb.WriteString(string(b))
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
 }
 
 // FeedbackHandler serves POST /v1/feedback.
@@ -107,4 +120,13 @@ func (w *BackgroundExportWorker) Start(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// JSONLReadCloser returns exported payload as an io.ReadCloser for upload targets.
+func (d *DatasetExporter) JSONLReadCloser(ctx context.Context, minRating string) (io.ReadCloser, error) {
+	payload, err := d.ExportJSONL(ctx, minRating)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(strings.NewReader(payload)), nil
 }

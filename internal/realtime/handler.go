@@ -10,6 +10,27 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// isBargeIn reports whether an inbound WebSocket frame should cancel the current provider stream.
+// It accepts JSON events (`type=barge-in` or `action=cancel`) and non-empty binary frames.
+func isBargeIn(msg []byte) bool {
+	if len(msg) == 0 {
+		return false
+	}
+	if msg[0] == '{' {
+		var evt map[string]interface{}
+		if json.Unmarshal(msg, &evt) == nil {
+			if t, ok := evt["type"].(string); ok && t == "barge-in" {
+				return true
+			}
+			if action, ok := evt["action"].(string); ok && action == "cancel" {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // ServeWS upgrades HTTP connections to WebSocket and manages the bidirectional streaming lifecycle.
 func ServeWS(hub *Hub, provider ProviderStreamer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +90,11 @@ func ServeWS(hub *Hub, provider ProviderStreamer) http.HandlerFunc {
 				}
 				if t, ok := evt["type"].(string); ok && t == "ping" {
 					_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"pong"}`))
+				}
+				if isBargeIn(msg) {
+					cancel()
+					_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"event":"barge-in"}`))
+					return
 				}
 			}
 		}

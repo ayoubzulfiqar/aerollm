@@ -100,3 +100,30 @@ func TestHubCancelAll(t *testing.T) {
 		t.Fatal("expected session context to be canceled")
 	}
 }
+
+func TestIsBargeInJSON(t *testing.T) {
+	if !isBargeIn([]byte(`{"type":"barge-in"}`)) {
+		t.Fatal("expected barge-in for type=barge-in")
+	}
+	if !isBargeIn([]byte(`{"action":"cancel"}`)) {
+		t.Fatal("expected barge-in for action=cancel")
+	}
+	if isBargeIn([]byte(`{"type":"ping"}`)) {
+		t.Fatal("did not expect barge-in for ping")
+	}
+}
+
+func TestIsBargeInBinary(t *testing.T) {
+	if !isBargeIn([]byte{0x01, 0x02}) {
+		t.Fatal("expected barge-in for non-empty binary frame")
+	}
+}
+
+func TestIsBargeInEmpty(t *testing.T) {
+	if isBargeIn(nil) {
+		t.Fatal("did not expect barge-in for nil frame")
+	}
+	if isBargeIn([]byte{}) {
+		t.Fatal("did not expect barge-in for empty frame")
+	}
+}
