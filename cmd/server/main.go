@@ -113,14 +113,13 @@ func main() {
 	prices := finops.NewPricingMap()
 	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
-	scoper.AddScope(guardrails.APIKeyScope{
+		scoper.AddScope(guardrails.APIKeyScope{
 		APIKey:       "sk-dev-1",
 		AllowedModels: []string{"gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"},
 		MaxBudgetUSD: 100,
 		IPAllowlist:  []string{"127.0.0.1"},
 	})
-
-	handler.UsageRecorder = costTracker
+handler.UsageRecorder = costTracker
 	handler.BudgetChecker = costTracker
 
 	webhookDispatcher := webhooks.NewWebhookDispatcher()

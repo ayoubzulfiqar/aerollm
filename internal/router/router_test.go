@@ -13,6 +13,7 @@ type mockProvider struct {
 	name       string
 	providerType providers.ProviderType
 	available  bool
+	latencyMs  float64
 }
 
 func (m *mockProvider) Name() string                          { return m.name }
@@ -21,7 +22,7 @@ func (m *mockProvider) ChatCompletions(ctx context.Context, req *models.LLMReque
 	return &models.LLMResponse{}, nil
 }
 func (m *mockProvider) Health() providers.ProviderHealth {
-	return providers.ProviderHealth{Name: m.name, Healthy: m.available}
+	return providers.ProviderHealth{Name: m.name, Healthy: m.available, LatencyMs: m.latencyMs}
 }
 func (m *mockProvider) Close() error { return nil }
 
@@ -72,5 +73,33 @@ func TestRouteNoProvider(t *testing.T) {
 	_, err := r.Route(context.Background(), &models.LLMRequest{})
 	if err == nil {
 		t.Fatal("expected error when no providers available")
+	}
+}
+
+func TestRouteLatencyBased(t *testing.T) {
+	r := New(Config{Strategy: "latency"})
+	r.RegisterProvider(&mockProvider{name: "slow", providerType: providers.ProviderOpenAI, available: true, latencyMs: 500})
+	r.RegisterProvider(&mockProvider{name: "fast", providerType: providers.ProviderOpenAI, available: true, latencyMs: 50})
+
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Name() != "fast" {
+		t.Fatalf("expected fast provider, got %s", p.Name())
+	}
+}
+
+func TestRouteCostBased(t *testing.T) {
+	r := New(Config{Strategy: "cost"})
+	r.RegisterProvider(&mockProvider{name: "expensive", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "cheap", providerType: providers.ProviderAnthropic, available: true})
+
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
 	}
 }

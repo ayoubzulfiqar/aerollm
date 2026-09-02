@@ -22,6 +22,9 @@ type Config struct {
 	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
 	Agent      AgentConfig      `mapstructure:"agent"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
+	Guardrails GuardrailsConfig `mapstructure:"guardrails"`
+	Finops     FinopsConfig     `mapstructure:"finops"`
+	Webhooks   WebhooksConfig   `mapstructure:"webhooks"`
 }
 
 // AppConfig holds application-level settings.
@@ -109,6 +112,22 @@ type LoggingConfig struct {
 	Format string `mapstructure:"format"`
 }
 
+// GuardrailsConfig holds guardrail settings.
+type GuardrailsConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// FinopsConfig holds FinOps settings.
+type FinopsConfig struct {
+	Enabled        bool    `mapstructure:"enabled"`
+	DefaultMaxUSD  float64 `mapstructure:"default_max_usd"`
+}
+
+// WebhooksConfig holds webhook settings.
+type WebhooksConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+}
+
 // LoadConfig reads configuration from the given file path and environment variables.
 func LoadConfig(configPath string) (*Config, error) {
 	v := viper.NewWithOptions(
@@ -162,6 +181,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetDefault("agent.cache_tool_results", true)
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
+	v.SetDefault("guardrails.enabled", true)
+	v.SetDefault("finops.enabled", true)
+	v.SetDefault("finops.default_max_usd", 0)
+	v.SetDefault("webhooks.enabled", true)
 
 	v.SetEnvPrefix("AEROLLM")
 	v.AutomaticEnv()

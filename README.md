@@ -57,3 +57,39 @@ docker-compose up -d
 POST /v1/chat/completions
 GET /health
 GET /ready
+
+## Middleware Chain
+
+`/v1/chat/completions` is composed as:
+
+1. Recovery
+2. Logging
+3. Authentication
+4. Rate limiting
+5. Injection shield
+6. PII redaction
+7. API key scoping
+8. Budget pre-check
+9. Exact-match cache lookup
+10. Provider routing
+11. Agent tool execution loop
+12. Usage recording + webhook dispatch on failure
+
+### FinOps
+
+- Budget checks happen before routing.
+- If `BudgetChecker.CheckBudget` returns an error, the handler returns `HTTP 402` with body `{"error":"budget exceeded"}`.
+- Set `AEROLLM_BUDGET_WEBHOOK_URL` and `AEROLLM_BUDGET_WEBHOOK_SECRET` to receive `budget_exceeded` events.
+
+### Guardrails
+
+- Injection shield returns `HTTP 403`.
+- PII redaction rewrites the request body with placeholders; original body is preserved in request context for downstream handlers that need restoration.
+- API key scoping enforces `AllowedModels` and `IPAllowlist`.
+
+## Env Vars
+
+- `AEROLLM_WEBHOOK_URL`
+- `AEROLLM_WEBHOOK_SECRET`
+- `AEROLLM_BUDGET_WEBHOOK_URL`
+- `AEROLLM_BUDGET_WEBHOOK_SECRET`
