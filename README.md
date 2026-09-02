@@ -22,6 +22,7 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **Memory**: Short-term message memory plus long-term vector memory interfaces
 - **Shadow Traffic**: Async shadow routing for provider comparison
 - **Webhook Dispatcher**: Async retry-capable webhook delivery with exponential backoff
+- **Advanced Agent Loop**: Hookable execution loop with retry, deficit detection, and tool error recovery
 
 ### Phase 3: Autonomous AI Control Plane
 - **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
@@ -238,7 +239,11 @@ Embedded state store, dynamic agent swarms, consensus, federated learning, red-t
 Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin ecosystem, evaluation engine, and compliance-as-code.
 
 ### Phase 7: The Sentient Mesh
-Generative API synthesis with tool deficit detection, temporal GraphRAG with auto-ontology, and self-optimizing AIOps meta-agent tuner.
+- **Generative API Synthesis**: `internal/synthesis` with tool deficit detection, LLM-backed code generation stub, WASM compilation stub, and tool promotion into the plugin registry
+- **Temporal GraphRAG**: `internal/graphrag` with temporal nodes/edges, BFS neighbor traversal, tokenized query ranking, and HTTP middleware that injects graph context when `rag_enabled=true`
+- **Self-Optimizing AIOps**: `internal/aiops` with `MetaAgentTuner`, configurable `MetricsSource`, and tuner actions with cooldown semantics; wired to live telemetry in `cmd/server/main.go`
+- **Advanced Agent Loop**: `internal/agent/advanced_loop.go` adds `LoopHook` lifecycle hooks, `ExecuteToolsWithRetry`, unknown-tool deficit detection, and `ToolDeficitHandler`
+- **Universal Model Registry**: `internal/providers/universal/model_registry.go` for model capability cards, provider-indexed lookup, and registration validation
 
 ## FinOps
 
