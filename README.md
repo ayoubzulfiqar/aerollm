@@ -146,6 +146,9 @@ Key packages:
 - `internal/graphrag` — temporal graph store, BFS neighbors, token query, GraphRAG middleware
 - `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
 - `internal/providers/universal` — universal model registry for capability cards
+- `internal/mesh` — CRDT-backed state, peer discovery, gossip sync for global edge mesh
+- `internal/marketplace` — signed manifest verification, registry client, micro-royalty tracking
+- `internal/zk` — zero-knowledge encrypted payload middleware and confidential compute stubs
 
 ## API
 
