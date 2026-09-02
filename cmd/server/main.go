@@ -34,6 +34,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
+	"github.com/ayoubzulfiqar/aerollm/internal/studio"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/internal/zk"
@@ -269,6 +270,12 @@ func main() {
 			},
 		}
 	}()
+
+	studioOrchestrator := swarm.NewSwarmOrchestrator(stateStore, registry)
+	_ = studioOrchestrator
+	studioHandler := studio.NewHandler(r, studioOrchestrator, prices)
+	mux.HandleFunc("/v1/studio/topology", studioHandler.Topology)
+	mux.HandleFunc("/v1/studio/analytics/cost", studioHandler.AnalyticsCost)
 
 	meshCfg := mesh.DefaultMeshConfig()
 	meshCfg.Enabled = os.Getenv("AEROLLM_MESH_ENABLED") == "true"
