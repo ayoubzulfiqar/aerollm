@@ -251,6 +251,11 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Advanced Agent Loop**: `internal/agent/advanced_loop.go` adds `LoopHook` lifecycle hooks, `ExecuteToolsWithRetry`, unknown-tool deficit detection, and `ToolDeficitHandler`
 - **Universal Model Registry**: `internal/providers/universal/model_registry.go` for model capability cards, provider-indexed lookup, and registration validation
 
+### Phase 8: The Global Cognitive Mesh & Zero-Knowledge Fabric
+- **Global Edge Mesh**: `internal/mesh` with CRDT-backed state, peer discovery, and gossip sync for bandit weights and plugin registries
+- **Marketplace & Royalties**: `internal/marketplace` with signed manifest verification, registry client, and micro-royalty tracking via webhook dispatch
+- **Zero-Knowledge Guardrails**: `internal/zk` with `ConfidentialCompute` middleware stubs for encrypted payload handling
+
 ## FinOps
 
 - Budget checks happen before routing.
