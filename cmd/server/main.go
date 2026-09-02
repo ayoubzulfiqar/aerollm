@@ -24,6 +24,9 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
+	"github.com/ayoubzulfiqar/aerollm/internal/evolution"
+	"github.com/ayoubzulfiqar/aerollm/internal/learning"
+	"github.com/ayoubzulfiqar/aerollm/internal/swarm"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
@@ -201,6 +204,13 @@ func main() {
 	_ = stateStore
 	go func() {
 		redteam.NewWorker(redteam.DefaultConfig(), ledgerStore).Start(ctx)
+	}()
+
+	swarmOrchestrator := swarm.NewSwarmOrchestrator(stateStore, registry)
+	_ = swarmOrchestrator
+	_ = learning.NewTrainer(&flywheel.DatasetExporter{Ledger: ledgerStore}, ledgerStore, getenvOrDefault("AEROLLM_LEARNING_DIR", "./fine-tune-jobs"))
+	go func() {
+		evolution.NewEngine(evolution.DefaultConfig()).Start(ctx)
 	}()
 
 	feedbackExporter := flywheel.NewFeedbackExporter(ledgerStore)
