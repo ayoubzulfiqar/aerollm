@@ -249,6 +249,11 @@ func main() {
 
 	marketClient := marketplace.NewClient(getenvOrDefault("AEROLLM_MARKETPLACE_URL", "https://registry.aerollm.io"))
 	_ = marketClient
+	registryStore := marketplace.NewInMemoryStore()
+	_ = registryStore
+	registryService := marketplace.NewRegistryService(marketClient, registryStore)
+	_ = registryService
+	registryService.RegisterRoutes(mux)
 	royaltyRecorder := marketplace.NewRoyaltyRecorder(webhookDispatcher, webhooks.BudgetWebhookConfig{
 		URL:     getenvOrDefault("AEROLLM_ROYALTY_WEBHOOK_URL", "http://localhost:8080/webhooks/royalty"),
 		Timeout: 2 * time.Second,

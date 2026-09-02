@@ -263,7 +263,8 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 ### Phase 9: Visual Control Plane, Developer CLI & Agent Economy
 - **AeroLLM Studio Backend**: `internal/studio` exposes `/v1/studio/topology`, `/v1/studio/analytics/cost`, and `/v1/studio/dags` under existing licensing middleware
 - **Developer CLI**: `cmd/cli` uses Cobra; `aerollm init` scaffolds `config.yaml`, `docker-compose.yml`, and `plugin.go`
-- **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests
+- **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests and POSTs to `/v1/marketplace/plugins`
+- **Marketplace Registry API**: `internal/marketplace/registry_api.go` adds in-memory registry store plus HTTP handlers for `/v1/marketplace/plugins` list/publish and `/v1/marketplace/plugins/{id}` get
 - **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
 - **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events; chat responses now opt into GenUI when requested
 

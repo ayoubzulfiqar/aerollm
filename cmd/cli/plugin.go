@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -48,7 +50,7 @@ func newPluginBuildCmd() *cobra.Command {
 func newPluginPublishCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "publish [wasm]",
-		Short: "Prepare a signed plugin manifest for marketplace publish",
+		Short: "Prepare and publish a signed plugin manifest to the marketplace registry",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			priv, _ := cmd.Flags().GetString("private-key")
@@ -62,8 +64,31 @@ func newPluginPublishCmd() *cobra.Command {
 
 			manifest := fmt.Sprintf(`{"wasm":"%s","signature":"ed25519-stub","public_key":"%s"}`, args[0], priv)
 			fmt.Printf("prepared manifest: %s\n", manifest)
+
+			registryURL, _ := cmd.Flags().GetString("registry-url")
+			if registryURL == "" {
+				registryURL = os.Getenv("AEROLLM_MARKETPLACE_URL")
+			}
+			if registryURL == "" {
+				return
+			}
+
+			req, err := http.NewRequest(http.MethodPost, registryURL+"/v1/marketplace/plugins", strings.NewReader(manifest))
+			if err != nil {
+				fmt.Printf("registry request failed: %v\n", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				fmt.Printf("registry publish failed: %v\n", err)
+				return
+			}
+			defer resp.Body.Close()
+			fmt.Printf("registry response: %s\n", resp.Status)
 		},
 	}
 	cmd.Flags().StringP("private-key", "k", "", "Ed25519 private key path")
+	cmd.Flags().StringP("registry-url", "r", "", "Marketplace registry URL override")
 	return cmd
 }
