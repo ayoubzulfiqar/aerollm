@@ -3,201 +3,149 @@ package mesh
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"encoding/json"
 	"io"
 	"sync"
-	"time"
-
-	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
-	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 )
 
-// MDNSDiscoveryTag is the mDNS service tag for AeroLLM mesh peers.
-const MDNSDiscoveryTag = "aerollm-mesh"
+// inMemoryTransport is a simple local transport that satisfies SecureTransport.
+// It is suitable for single-process or test environments.
+// TODO: replace with libp2p-backed transport for real P2P mesh.
+type inMemoryTransport struct {
+	mu      sync.RWMutex
+	conns   map[PeerID]*inMemoryConn
+	peerID  PeerID
+}
 
-// libp2pTransport wraps libp2p host, streams, and discovery.
-type libp2pTransport struct {
-	mu       sync.RWMutex
-	host     host.Host
-	listener network.Listener
-	peers    map[peer.ID]PeerDescriptor
-	connCh   chan PeerConn
+func newInMemoryTransport(local PeerID) *inMemoryTransport {
+	return &inMemoryTransport{
+		conns:  make(map[PeerID]*inMemoryConn),
+		peerID: local,
+	}
+}
+
+// NewInMemoryTransport creates an in-memory mesh transport.
+func NewInMemoryTransport(local PeerID) SecureTransport { return newInMemoryTransport(local) }
+
+// Dial creates an in-memory connection to a peer.
+func (t *inMemoryTransport) Dial(ctx context.Context, peerDesc PeerDescriptor) (PeerConn, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	remote, ok := t.conns[peerDesc.ID]
+	if !ok {
+		localCh := make(chan Envelope, 64)
+		remoteCh := make(chan Envelope, 64)
+		remote = &inMemoryConn{
+			peer:     peerDesc.ID,
+			outbound: localCh,
+			inbound:  remoteCh,
+		}
+		t.conns[peerDesc.ID] = remote
+	}
+
+	localConn := &inMemoryConn{
+		peer:     t.peerID,
+		outbound: remote.inbound,
+		inbound:  remote.outbound,
+	}
+	return localConn, nil
+}
+
+// Listen satisfies SecureTransport by returning a no-op listener.
+func (t *inMemoryTransport) Listen(_ context.Context, _ string) (PeerListener, error) {
+	return &inMemoryListener{t: t}, nil
+}
+
+// Close satisfies SecureTransport by releasing resources.
+func (t *inMemoryTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, c := range t.conns {
+		close(c.outbound)
+		close(c.inbound)
+	}
+	t.conns = nil
+	return nil
+}
+
+type inMemoryConn struct {
+	peer     PeerID
+	outbound chan Envelope
+	inbound  chan Envelope
+	mu       sync.Mutex
 	closed   bool
 }
 
-// NewLibp2pTransport creates a new libp2p-backed transport.
-func NewLibp2pTransport(ctx context.Context, listenAddr string) (*libp2pTransport, error) {
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(listenAddr),
-		libp2p.Ping(true),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("libp2p new: %w", err)
-	}
-
-	lst, err := h.Network().Listen(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("libp2p listen: %w", err)
-	}
-
-	t := &libp2pTransport{
-		host:     h,
-		listener: lst,
-		peers:    make(map[peer.ID]PeerDescriptor),
-		connCh:   make(chan PeerConn, 64),
-	}
-
-	if err := mdns.NewMdnsService(h, MDNSDiscoveryTag, &mdnsNotifier{t: t}); err != nil {
-		return nil, fmt.Errorf("mdns init: %w", err)
-	}
-
-	go t.acceptLoop(ctx)
-
-	return t, nil
-}
-
-// Dial opens a stream to a peer.
-func (t *libp2pTransport) Dial(ctx context.Context, peerDesc PeerDescriptor) (PeerConn, error) {
-	info, err := peer.AddrInfoFromString(peerDesc.Address)
-	if err != nil {
-		return nil, fmt.Errorf("bad peer address: %w", err)
-	}
-	if err := t.host.Connect(ctx, *info); err != nil {
-		return nil, fmt.Errorf("connect peer: %w", err)
-	}
-	stream, err := t.host.NewStream(ctx, info.ID, MDNSDiscoveryTag)
-	if err != nil {
-		return nil, fmt.Errorf("open stream: %w", err)
-	}
-	conn := &libp2pConn{stream: stream, peer: peerDesc.ID}
-	return conn, nil
-}
-
-// Listen advertises the local listener.
-func (t *libp2pTransport) Listen(ctx context.Context, address string) (PeerListener, error) {
-	return &libp2pListener{t: t}, nil
-}
-
-// Close tears down the transport.
-func (t *libp2pTransport) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed {
-		return nil
-	}
-	t.closed = true
-	close(t.connCh)
-	return t.host.Close()
-}
-
-// Peers returns known peer descriptors.
-func (t *libp2pTransport) Peers() []PeerDescriptor {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make([]PeerDescriptor, 0, len(t.peers))
-	for _, p := range t.peers {
-		out = append(out, p)
-	}
-	return out
-}
-
-func (t *libp2pTransport) acceptLoop(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case stream, ok := <-t.host.Network().Peers():
-			if !ok {
-				return
-			}
-			_ = stream
-		default:
-			stream, err := t.listener.Accept()
-			if err != nil {
-				if t.mu.RLock(); !t.closed; t.mu.RUnlock() {
-					time.Sleep(100 * time.Millisecond)
-				}
-				continue
-			}
-			remotePeer := stream.Conn().RemotePeer()
-			conn := &libp2pConn{stream: stream, peer: PeerID(remotePeer.String())}
-			select {
-			case t.connCh <- conn:
-			default:
-				_ = conn.Close()
-			}
-		}
-	}
-}
-
-type libp2pConn struct {
-	stream network.Stream
-	peer   PeerID
-	mu     sync.Mutex
-	closed bool
-}
-
-func (c *libp2pConn) Send(_ context.Context, env Envelope) error {
+func (c *inMemoryConn) Send(_ context.Context, env Envelope) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return io.EOF
 	}
-	_ = env
-	_, err := c.stream.Write([]byte("ping\n"))
-	if err != nil {
-		return err
+	env.From = c.peer
+	select {
+	case c.outbound <- env:
+		return nil
+	default:
+		return io.ErrShortWrite
 	}
-	return nil
 }
 
-func (c *libp2pConn) Receive(_ context.Context) (<-chan Envelope, error) {
-	ch := make(chan Envelope, 8)
-	go func() {
-		defer close(ch)
-		scanner := bufio.NewScanner(c.stream)
-		for scanner.Scan() {
-			ch <- Envelope{From: c.peer, Payload: scanner.Bytes()}
-		}
-	}()
-	return ch, nil
+func (c *inMemoryConn) Receive(_ context.Context) (<-chan Envelope, error) {
+	return c.inbound, nil
 }
 
-func (c *libp2pConn) Close() error {
+func (c *inMemoryConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil
 	}
 	c.closed = true
-	return c.stream.Close()
+	close(c.outbound)
+	return nil
 }
 
-type libp2pListener struct {
-	t *libp2pTransport
+type inMemoryListener struct {
+	t *inMemoryTransport
 }
 
-func (l *libp2pListener) Accept(ctx context.Context) (PeerConn, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case conn, ok := <-l.t.connCh:
-		if !ok {
-			return nil, io.EOF
-		}
-		return conn, nil
+func (l *inMemoryListener) Accept(ctx context.Context) (PeerConn, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (l *inMemoryListener) Close() error { return nil }
+
+// StreamConn is a simple text-based envelope stream used for debugging.
+type StreamConn struct {
+	r *bufio.Reader
+	w io.Writer
+}
+
+// WriteEnvelope writes a newline-delimited JSON envelope.
+func (s *StreamConn) WriteEnvelope(env Envelope) error {
+	b, err := json.Marshal(env)
+	if err != nil {
+		return err
 	}
+	_, err = s.w.Write(append(b, '\n'))
+	return err
 }
 
-func (l *libp2pListener) Close() error { return nil }
-
-type mdnsNotifier struct {
-	t *libp2pTransport
-}
-
-func (n *mdnsNotifier) HandlePeerFound(p peer.AddrInfo) {
-	_ = p
+// ReadEnvelope reads a newline-delimited JSON envelope.
+func (s *StreamConn) ReadEnvelope() (Envelope, error) {
+	line, err := s.r.ReadBytes('\n')
+	if err != nil {
+		return Envelope{}, err
+	}
+	var env Envelope
+	return env, json.Unmarshal(line, &env)
 }

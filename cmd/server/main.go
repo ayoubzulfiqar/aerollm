@@ -21,6 +21,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
+	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
@@ -257,6 +258,37 @@ func main() {
 			},
 		}
 	}()
+
+	meshCfg := mesh.DefaultMeshConfig()
+	meshCfg.Enabled = os.Getenv("AEROLLM_MESH_ENABLED") == "true"
+	meshCfg.BindAddress = getenvOrDefault("AEROLLM_MESH_BIND", "/ip4/127.0.0.1/tcp/0")
+	meshCfg.LocalPeerID = mesh.PeerID(getenvOrDefault("AEROLLM_MESH_NODE_ID", ""))
+	if meshCfg.LocalPeerID == "" {
+		meshCfg.LocalPeerID = mesh.PeerID(fmt.Sprintf("node-%d", time.Now().UnixNano()))
+	}
+	meshCfg.PeerAddresses = append(meshCfg.PeerAddresses, getenvOrDefault("AEROLLM_MESH_PEERS", ""))
+
+	if meshCfg.Enabled {
+		meshTransport := mesh.NewInMemoryTransport(meshCfg.LocalPeerID)
+		pluginState := mesh.NewPluginRegistrySync()
+		discovery := mesh.NewDiscovery(mesh.DiscoveryConfig{
+			LocalID:     meshCfg.LocalPeerID,
+			BindAddress: meshCfg.BindAddress,
+			Peers: []mesh.PeerDescriptor{{
+				ID:      meshCfg.LocalPeerID,
+				Address: meshCfg.BindAddress,
+			}},
+			Transport: meshTransport,
+		})
+		go mesh.NewSyncWorker(mesh.SyncWorkerConfig{
+			State:     pluginState,
+			Discovery: discovery,
+			Interval:  meshCfg.GossipInterval,
+		}).Start(ctx)
+		_ = meshTransport
+		_ = discovery
+		_ = pluginState
+	}
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
