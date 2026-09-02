@@ -13,12 +13,35 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 )
 
+// NodeType identifies the kind of topology node.
+type NodeType string
+
+const (
+	NodeTypeProvider NodeType = "provider"
+	NodeTypeSwarm    NodeType = "swarm"
+	NodeTypeMesh     NodeType = "mesh"
+)
+
+// Node represents a graph node for frontend visualization.
+type Node struct {
+	ID    string   `json:"id"`
+	Label string   `json:"label"`
+	Type  NodeType `json:"type"`
+	Meta  map[string]interface{} `json:"meta,omitempty"`
+}
+
+// Edge represents a graph relationship between nodes.
+type Edge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Label  string `json:"label,omitempty"`
+}
+
 // TopologyResponse represents the current system topology.
 type TopologyResponse struct {
-	Timestamp time.Time         `json:"timestamp"`
-	Providers []ProviderStatus `json:"providers"`
-	Swarms    []SwarmStatus    `json:"swarms"`
-	Mesh      MeshStatus       `json:"mesh"`
+	Timestamp time.Time `json:"timestamp"`
+	Nodes     []Node    `json:"nodes"`
+	Edges     []Edge    `json:"edges"`
 }
 
 // ProviderStatus represents the status of a provider.
@@ -66,12 +89,16 @@ type CostBreakdown struct {
 	ByPlugin map[string]float64 `json:"by_plugin"`
 }
 
+type pricingProvider interface {
+	Models() []string
+}
+
 // Handler handles studio API requests.
 type Handler struct {
 	mu         sync.RWMutex
 	router     *router.Router
 	swarms     SwarmProvider
-	pricing    *finops.PricingMap
+	pricing    pricingProvider
 	meshStatus MeshStatus
 	ledger     ledgerStore
 	market     marketplaceRecorder
@@ -115,7 +142,7 @@ func (h *Handler) SetMeshStatus(status MeshStatus) {
 	h.meshStatus = status
 }
 
-// Topology returns the current system topology.
+// Topology returns the current system topology as graph nodes/edges.
 func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -129,26 +156,69 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 	if h.router != nil {
 		for _, p := range h.router.Providers() {
 			health := p.Health()
-			resp.Providers = append(resp.Providers, ProviderStatus{
-				Name:        p.Name(),
-				Type:        string(p.Type()),
-				LatencyMs:   health.LatencyMs,
-				CircuitOpen: health.CircuitOpen,
+			id := p.Name()
+			resp.Nodes = append(resp.Nodes, Node{
+				ID:    id,
+				Label: p.Name(),
+				Type:  NodeTypeProvider,
+				Meta: map[string]interface{}{
+					"type":          string(p.Type()),
+					"latency_ms":    health.LatencyMs,
+					"circuit_open":  health.CircuitOpen,
+					"healthy":       health.Healthy,
+				},
+			})
+			resp.Edges = append(resp.Edges, Edge{
+				Source: "router",
+				Target: id,
+				Label:  "routes",
 			})
 		}
 	}
 
 	if h.swarms != nil {
-		resp.Swarms = append(resp.Swarms, SwarmStatus{
-			ID:         "default",
-			Status:     "active",
-			AgentCount: h.swarms.ActiveCount(),
+		swarmID := "swarm-default"
+		resp.Nodes = append(resp.Nodes, Node{
+			ID:    swarmID,
+			Label: "Default Swarm",
+			Type:  NodeTypeSwarm,
+			Meta: map[string]interface{}{
+				"agent_count": h.swarms.ActiveCount(),
+			},
+		})
+		resp.Edges = append(resp.Edges, Edge{
+			Source: "router",
+			Target: swarmID,
+			Label:  "orchestrates",
 		})
 	}
 
 	h.mu.RLock()
-	resp.Mesh = h.meshStatus
+	meshStatus := h.meshStatus
 	h.mu.RUnlock()
+
+	if meshStatus.Enabled {
+		meshNodeID := "mesh-local"
+		resp.Nodes = append(resp.Nodes, Node{
+			ID:    meshNodeID,
+			Label: "Mesh " + meshStatus.LocalPeerID,
+			Type:  NodeTypeMesh,
+			Meta: map[string]interface{}{
+				"peer_count":    meshStatus.PeerCount,
+				"sync_interval": meshStatus.SyncInterval,
+				"peer_ids":      meshStatus.PeerIDs,
+			},
+		})
+		resp.Edges = append(resp.Edges, Edge{
+			Source: "router",
+			Target: meshNodeID,
+			Label:  "gossip",
+		})
+	}
+
+	if len(resp.Nodes) == 0 {
+		resp.Nodes = append(resp.Nodes, Node{ID: "router", Label: "Router", Type: NodeTypeProvider})
+	}
 
 	writeJSON(w, resp)
 }

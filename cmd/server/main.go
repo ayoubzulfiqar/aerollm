@@ -17,6 +17,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
+	"github.com/ayoubzulfiqar/aerollm/internal/genui"
 	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
@@ -215,6 +216,7 @@ func main() {
 		}
 		chat(w, req)
 	})
+	chat = genui.NewGenUIHandler(chat)
 	var chatHandler http.Handler = http.HandlerFunc(chat)
 	chatHandler = graphRAGMiddleware.Middleware(chatHandler)
 	chatHandler = zk.Middleware(nil)(chatHandler)
@@ -237,9 +239,8 @@ func main() {
 
 	_ = swarm.NewSwarmOrchestrator(stateStore, registry)
 	_ = learning.NewTrainer(&flywheel.DatasetExporter{Ledger: ledgerStore}, ledgerStore, getenvOrDefault("AEROLLM_LEARNING_DIR", "./fine-tune-jobs"))
-	go func() {
-		evolution.NewEngine(evolution.DefaultConfig()).Start(ctx)
-	}()
+	engine := evolution.NewEngine(evolution.DefaultConfig())
+	go engine.Start(ctx)
 
 	_ = graphrag.NewAutoOntologyWorker(graphStore, nil)
 	go func() {
@@ -287,6 +288,9 @@ func main() {
 	studioTopology = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioTopology)
 	studioAnalytics = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioAnalytics)
 	studioDAGs = licensing.Middleware(licenseChecker, licensing.FeatureAdvancedCRDTMesh)(studioDAGs)
+	studioTopology = middleware.NewAuthMiddleware(studioTopology.ServeHTTP).Next
+	studioAnalytics = middleware.NewAuthMiddleware(studioAnalytics.ServeHTTP).Next
+	studioDAGs = middleware.NewAuthMiddleware(studioDAGs.ServeHTTP).Next
 	mux.Handle("/v1/studio/topology", studioTopology)
 	mux.Handle("/v1/studio/analytics/cost", studioAnalytics)
 	mux.Handle("/v1/studio/dags", studioDAGs)
