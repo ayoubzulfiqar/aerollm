@@ -16,6 +16,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
+	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
@@ -113,13 +114,14 @@ func main() {
 	prices := finops.NewPricingMap()
 	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
-		scoper.AddScope(guardrails.APIKeyScope{
+	scoper.AddScope(guardrails.APIKeyScope{
 		APIKey:       "sk-dev-1",
 		AllowedModels: []string{"gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"},
 		MaxBudgetUSD: 100,
 		IPAllowlist:  []string{"127.0.0.1"},
 	})
-handler.UsageRecorder = costTracker
+
+	handler.UsageRecorder = costTracker
 	handler.BudgetChecker = costTracker
 
 	webhookDispatcher := webhooks.NewWebhookDispatcher()
@@ -146,7 +148,6 @@ handler.UsageRecorder = costTracker
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
-	mux.HandleFunc("/v1/chat/completions", handler.ChatCompletions)
 
 	chat := handler.ChatCompletions
 	chat = guardrails.InjectionShieldMiddleware(chat)
@@ -156,15 +157,16 @@ handler.UsageRecorder = costTracker
 	chat = middleware.NewAuthMiddleware(chat).Next
 	chat = middleware.NewLoggingMiddleware(chat, logger).Next
 	chat = middleware.NewRecoveryMiddleware(chat).Next
-
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, req *http.Request) {
 		chat(w, req)
 	})
 
 	advanced := NewAdvancedAgent(registry, redisClient)
 	handler.Advanced = advanced
-
 	mux.HandleFunc("/v1/agents/approvals/", handler.ResumeApproval)
+
+	mcpServer := mcp.NewServer()
+	mux.Handle("/mcp", mcpServer)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
