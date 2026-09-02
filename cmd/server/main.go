@@ -20,6 +20,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
+	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
@@ -35,6 +36,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
+	"github.com/ayoubzulfiqar/aerollm/internal/zk"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -211,8 +213,9 @@ func main() {
 		}
 		chat(w, req)
 	})
-	chatHandler := http.HandlerFunc(chat)
+	var chatHandler http.Handler = http.HandlerFunc(chat)
 	chatHandler = graphRAGMiddleware.Middleware(chatHandler)
+	chatHandler = zk.Middleware(nil)(chatHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler.ServeHTTP)
 
 	advanced := NewAdvancedAgent(registry, redisClient)
@@ -240,6 +243,14 @@ func main() {
 	go func() {
 		_ = synthesis.NewToolPromoter(nil)
 	}()
+
+	marketClient := marketplace.NewClient(getenvOrDefault("AEROLLM_MARKETPLACE_URL", "https://registry.aerollm.io"))
+	_ = marketClient
+	royaltyRecorder := marketplace.NewRoyaltyRecorder(webhookDispatcher, webhooks.BudgetWebhookConfig{
+		URL:     getenvOrDefault("AEROLLM_ROYALTY_WEBHOOK_URL", "http://localhost:8080/webhooks/royalty"),
+		Timeout: 2 * time.Second,
+	})
+	_ = royaltyRecorder
 
 	tuner := aiops.NewMetaAgentTuner(aiops.NewDefaultMetricsSource(telemetry.RequestCount, telemetry.ErrorCount, func() float64 { return telemetry.AvgLatency() }), 30*time.Second, 5*time.Minute)
 	go tuner.Run(ctx)
