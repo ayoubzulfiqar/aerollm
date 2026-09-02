@@ -196,3 +196,8 @@ curl -X POST http://localhost:8080/mcp \
 - **Multimodal**: Audio/image preprocessing with transcription/vision hooks
 - **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
 - **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline
+
+### Phase 5: Cognitive OS & Decentralized Action Fabric
+- **Embedded State Store**: bbolt-backed KV with flat vector index for zero-latency agent memory
+- **Dynamic Agent Swarms**: Sub-agent spawning with shared hive-mind context and lifecycle orchestration
+- **Red-Teaming & Self-Healing**: Adversarial prompt generation from the ledger, automatic guardrail patch proposal and local patch emission
