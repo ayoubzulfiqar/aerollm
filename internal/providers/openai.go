@@ -14,21 +14,21 @@ import (
 
 // OpenAIProvider calls OpenAI-compatible /v1/chat/completions.
 type OpenAIProvider struct {
-	name      string
+	name         string
 	providerType ProviderType
-	apiKey    string
-	baseURL   string
-	http      *http.Client
+	apiKey       string
+	baseURL      string
+	http         *http.Client
 }
 
 // NewOpenAIProvider creates a new OpenAIProvider.
 func NewOpenAIProvider(name, apiKey, baseURL string) *OpenAIProvider {
 	return &OpenAIProvider{
-		name:       name,
+		name:         name,
 		providerType: ProviderOpenAI,
-		apiKey:     apiKey,
-		baseURL:    baseURL,
-		http:       &http.Client{Timeout: 60 * time.Second},
+		apiKey:       apiKey,
+		baseURL:      baseURL,
+		http:         &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
