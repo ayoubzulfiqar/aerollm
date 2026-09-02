@@ -32,10 +32,27 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **Immutable Ledger**: Cryptographic audit chain for request/response integrity
 - **WASM Sandbox**: Zero-trust isolated tool execution runtime
 
-### Provider Support
-- **OpenAI**: GPT-4, GPT-3.5-turbo, and compatible APIs
-- **Anthropic**: Claude 3 models (Sonnet, Opus, Haiku)
-- **Local**: Local LLM providers (Ollama, llama.cpp)
+### Phase 4: AI-Native Edge Fabric & Data Flywheel
+- **Realtime WebSocket**: Bidirectional streaming via `/ws`
+  - Text control: `{"type":"ping"}` -> `{"event":"pong"}`, `{"type":"barge-in"}` or `{"action":"cancel"}` cancels generation and returns `{"event":"barge-in"}`
+  - Binary frames: non-empty binary WebSocket messages are treated as barge-in/cancel by default
+- **Barge-in/VAD**: Cancel provider generation on user voice activity or explicit cancel event
+- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
+- **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
+- **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline
+
+### Phase 5: Cognitive OS & Decentralized Action Fabric
+- **Embedded State Store**: bbolt-backed KV with flat vector index for zero-latency agent memory
+- **Dynamic Agent Swarms**: Sub-agent spawning with shared hive-mind context and lifecycle orchestration
+- **Red-Teaming & Self-Healing**: Adversarial prompt generation from the ledger, automatic guardrail patch proposal and local patch emission
+
+### Phase 6: The Definitive AI Platform
+- **Universal Protocol Fabric**: Dynamic provider registry with adapters for Google Gemini, AWS Bedrock, Azure OpenAI, Groq, Cohere, DeepSeek, plus OpenAI-compatible stream normalization
+- **Adaptive Intelligence**: Heuristic intent classifier, auto model selector, and multi-armed bandit router with Thompson Sampling
+- **Multi-Tenant SaaS Core**: Hierarchical tenant model, tenant middleware, and tenant-scoped service wrappers
+- **Plugin Ecosystem**: WASM-compatible plugin interface with lifecycle hooks, in-memory registry, and plugin host
+- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner for quality assurance
+- **Compliance-as-Code**: OPA-backed policy engine with HTTP 451 enforcement middleware
 
 ## Quick Start
 
@@ -103,10 +120,25 @@ Key packages:
 - `internal/orchestrator` — DAG execution with `errgroup` concurrency
 - `internal/mcp` — Model Context Protocol HTTP/SSE server
 - `internal/rag` — hybrid retrieval, RRF fusion, context injection
-- `internal/context` — token counting, auto-summarization
+- `internal/contextmgr` — token counting, auto-summarization
 - `internal/gitops` — git-backed prompt template polling store
 - `internal/ledger` — chained-hash append-only audit log
 - `internal/sandbox` — WASM tool execution interface
+- `internal/realtime` — WebSocket hub with barge-in support
+- `internal/multimodal` — audio/image transcription and vision preprocessing
+- `internal/flywheel` — feedback ingestion and dataset export
+- `internal/k8s` — lightweight K8s reconciler interfaces
+- `internal/state` — embedded bbolt state store with vector index
+- `internal/swarm` — dynamic sub-agent orchestration, consensus, federated learning
+- `internal/redteam` — adversarial worker and self-healing patch proposal
+- `internal/evolution` — self-evolution proposal queue and scoring
+- `internal/learning` — autonomous fine-tuning pipeline from flywheel datasets
+- `internal/providers/universal` — provider registry and unified adapter/stream normalizer
+- `internal/intelligence` — intent classification, model selection, bandit routing
+- `internal/tenant` — multi-tenant models and context propagation
+- `internal/plugins` — plugin hooks, registry, and WASM host
+- `internal/eval` — judge pipeline, regression detection, benchmark runner
+- `internal/compliance` — policy engine and HTTP 451 middleware
 
 ## API
 
@@ -116,7 +148,7 @@ Send an OpenAI-compatible chat completion request.
 Example:
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-dev-1" \
+  -H "Authorization: Bearer $AEROLLM_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
 ```
@@ -159,6 +191,15 @@ curl -X POST http://localhost:8080/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
+### POST /v1/feedback
+Submit feedback for the data flywheel.
+
+```bash
+curl -X POST http://localhost:8080/v1/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"req-123","score":0.9,"metadata":{"model":"gpt-4"}}'
+```
+
 ## Middleware Chain
 
 `/v1/chat/completions` is composed as:
@@ -176,6 +217,26 @@ curl -X POST http://localhost:8080/mcp \
 11. Agent tool execution loop
 12. Usage recording + webhook dispatch on failure
 
+## Phases
+
+### Phase 1: Foundation
+Multi-provider routing, agentic tool execution, Redis caching, rate limiting, and OpenTelemetry observability.
+
+### Phase 2: Enterprise Extensions
+Guardrails, FinOps, HITL approvals, memory, shadow traffic, and webhooks.
+
+### Phase 3: Autonomous AI Control Plane
+DAG orchestration, MCP Hub, Hybrid RAG, context manager, GitOps, immutable ledger, and WASM sandbox.
+
+### Phase 4: AI-Native Edge Fabric & Data Flywheel
+Realtime WebSocket, barge-in, multimodal preprocessing, K8s operator, flywheel feedback, and dataset export.
+
+### Phase 5: Cognitive OS & Decentralized Action Fabric
+Embedded state store, dynamic agent swarms, consensus, federated learning, red-team self-healing, and autonomous evolution.
+
+### Phase 6: The Definitive AI Platform
+Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin ecosystem, evaluation engine, and compliance-as-code.
+
 ## FinOps
 
 - Budget checks happen before routing.
@@ -187,17 +248,3 @@ curl -X POST http://localhost:8080/mcp \
 - Injection shield returns `HTTP 403`.
 - PII redaction rewrites the request body with placeholders; original body is preserved in request context for downstream handlers that need restoration.
 - API key scoping enforces `AllowedModels` and `IPAllowlist`.
-
-### Phase 4: AI-Native Edge Fabric & Data Flywheel
-- **Realtime WebSocket**: Bidirectional streaming via `/ws`
-  - Text control: `{"type":"ping"}` -> `{"event":"pong"}`, `{"type":"barge-in"}` or `{"action":"cancel"}` cancels generation and returns `{"event":"barge-in"}`
-  - Binary frames: non-empty binary WebSocket messages are treated as barge-in/cancel by default
-- **Barge-in/VAD**: Cancel provider generation on user voice activity or explicit cancel event
-- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
-- **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
-- **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline
-
-### Phase 5: Cognitive OS & Decentralized Action Fabric
-- **Embedded State Store**: bbolt-backed KV with flat vector index for zero-latency agent memory
-- **Dynamic Agent Swarms**: Sub-agent spawning with shared hive-mind context and lifecycle orchestration
-- **Red-Teaming & Self-Healing**: Adversarial prompt generation from the ledger, automatic guardrail patch proposal and local patch emission
