@@ -70,6 +70,9 @@ func (p *ToolPromoter) Promote(ctx context.Context, manifest plugins.Metadata) e
 	if manifest.ID == "" || manifest.Name == "" {
 		return fmt.Errorf("manifest id and name are required")
 	}
+	if p.registry == nil {
+		return nil
+	}
 	return p.registry.Register(manifest)
 }
 

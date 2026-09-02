@@ -1,11 +1,13 @@
 package graphrag
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -265,8 +267,13 @@ func (w *AutoOntologyWorker) Run(ctx context.Context, ledger interface{}) error 
 func (m *GraphRAGMiddleware) Middleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		var r models.LLMRequest
-		if err := json.NewDecoder(req.Body).Decode(&r); err == nil && r.RagEnabled {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		if err := json.Unmarshal(body, &r); err == nil && r.RagEnabled {
 			_ = m.MaybeInject(req.Context(), &r)
+			if newBody, err := json.Marshal(r); err == nil {
+				req.Body = io.NopCloser(bytes.NewReader(newBody))
+			}
 		}
 		next.ServeHTTP(w, req)
 	}
