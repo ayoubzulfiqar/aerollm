@@ -39,5 +39,3 @@ func MetricsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
-// TODO: implement actual metrics collection in telemetry package.
