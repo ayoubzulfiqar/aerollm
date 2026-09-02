@@ -15,17 +15,19 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
+	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
-	"github.com/ayoubzulfiqar/aerollm/internal/router"
-	"github.com/ayoubzulfiqar/aerollm/internal/rag"
+	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
+	"github.com/ayoubzulfiqar/aerollm/internal/rag"
+	"github.com/ayoubzulfiqar/aerollm/internal/router"
+	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
-	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -195,6 +197,12 @@ func main() {
 
 	mux.HandleFunc("/ws", realtime.ServeWS(realtime.NewHub(), &realtimeProvider{}))
 
+	stateStore, _ := state.OpenBboltStateStore(getenvOrDefault("AEROLLM_STATE_DIR", "./aerollm-state"))
+	_ = stateStore
+	go func() {
+		redteam.NewWorker(redteam.DefaultConfig(), ledgerStore).Start(ctx)
+	}()
+
 	feedbackExporter := flywheel.NewFeedbackExporter(ledgerStore)
 	mux.HandleFunc("/v1/feedback", feedbackExporter.FeedbackHandler)
 	go func() {
@@ -236,6 +244,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "server forced to shutdown: %v\n", err)
 	}
 	webhookWg.Wait()
+	if stateStore != nil {
+		_ = stateStore.Close()
+	}
 	fmt.Println("server gracefully stopped")
 }
 
