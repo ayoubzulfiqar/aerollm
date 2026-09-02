@@ -204,6 +204,31 @@ func (w *SyncWorker) Start(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
+	events := make(chan PeerDescriptor, 64)
+	if w.discovery != nil {
+		go func() {
+			for {
+				select {
+				case peer, ok := <-w.discovery.Updates():
+					if !ok {
+						return
+					}
+					select {
+					case events <- peer:
+					case <-ctx.Done():
+						return
+					case <-w.done:
+						return
+					}
+				case <-ctx.Done():
+					return
+				case <-w.done:
+					return
+				}
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -211,14 +236,16 @@ func (w *SyncWorker) Start(ctx context.Context) {
 			return
 		case <-w.done:
 			return
-		case peer, ok := <-w.discovery.Updates():
+		case peer, ok := <-events:
 			if !ok {
 				continue
 			}
 			w.syncPeer(ctx, peer)
 		case <-ticker.C:
-			for _, peer := range w.discovery.Peers() {
-				w.syncPeer(ctx, peer)
+			if w.discovery != nil {
+				for _, peer := range w.discovery.Peers() {
+					w.syncPeer(ctx, peer)
+				}
 			}
 		}
 	}

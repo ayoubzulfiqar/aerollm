@@ -10,7 +10,6 @@ import (
 
 // inMemoryTransport is a simple local transport that satisfies SecureTransport.
 // It is suitable for single-process or test environments.
-// TODO: replace with libp2p-backed transport for real P2P mesh.
 type inMemoryTransport struct {
 	mu      sync.RWMutex
 	conns   map[PeerID]*inMemoryConn
@@ -38,22 +37,28 @@ func (t *inMemoryTransport) Dial(ctx context.Context, peerDesc PeerDescriptor) (
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if t.conns == nil {
+		return nil, io.ErrClosedPipe
+	}
+
 	remote, ok := t.conns[peerDesc.ID]
-	if !ok {
+	if !ok || (ok && remote.isClosed()) {
 		localCh := make(chan Envelope, 64)
 		remoteCh := make(chan Envelope, 64)
 		remote = &inMemoryConn{
-			peer:     peerDesc.ID,
+			peer:    peerDesc.ID,
 			outbound: localCh,
-			inbound:  remoteCh,
+			inbound: remoteCh,
 		}
 		t.conns[peerDesc.ID] = remote
 	}
 
+	remote.ref()
 	localConn := &inMemoryConn{
 		peer:     t.peerID,
 		outbound: remote.inbound,
 		inbound:  remote.outbound,
+		remote:   remote,
 	}
 	return localConn, nil
 }
@@ -68,8 +73,9 @@ func (t *inMemoryTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, c := range t.conns {
-		close(c.outbound)
-		close(c.inbound)
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
 	}
 	t.conns = nil
 	return nil
@@ -81,6 +87,43 @@ type inMemoryConn struct {
 	inbound  chan Envelope
 	mu       sync.Mutex
 	closed   bool
+	refs     int32
+	remote   *inMemoryConn
+}
+
+func (c *inMemoryConn) ref() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refs++
+}
+
+func (c *inMemoryConn) unref() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refs <= 0 {
+		return
+	}
+	c.refs--
+	if c.refs == 0 && c.closed {
+		close(c.outbound)
+		if c.remote != nil {
+			c.remote.closeLocked()
+		}
+	}
+}
+
+func (c *inMemoryConn) closeLocked() {
+	if c.closed {
+		return
+	}
+	c.closed = true
+	close(c.outbound)
 }
 
 func (c *inMemoryConn) Send(_ context.Context, env Envelope) error {
@@ -104,13 +147,16 @@ func (c *inMemoryConn) Receive(_ context.Context) (<-chan Envelope, error) {
 
 func (c *inMemoryConn) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil
-	}
 	c.closed = true
-	close(c.outbound)
+	c.mu.Unlock()
+	c.unref()
 	return nil
+}
+
+func (c *inMemoryConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 type inMemoryListener struct {
@@ -126,8 +172,8 @@ func (l *inMemoryListener) Close() error { return nil }
 
 // StreamConn is a simple text-based envelope stream used for debugging.
 type StreamConn struct {
-	r *bufio.Reader
-	w io.Writer
+	Reader *bufio.Reader
+	Writer io.Writer
 }
 
 // WriteEnvelope writes a newline-delimited JSON envelope.
@@ -136,13 +182,13 @@ func (s *StreamConn) WriteEnvelope(env Envelope) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.w.Write(append(b, '\n'))
+	_, err = s.Writer.Write(append(b, '\n'))
 	return err
 }
 
 // ReadEnvelope reads a newline-delimited JSON envelope.
 func (s *StreamConn) ReadEnvelope() (Envelope, error) {
-	line, err := s.r.ReadBytes('\n')
+	line, err := s.Reader.ReadBytes('\n')
 	if err != nil {
 		return Envelope{}, err
 	}
