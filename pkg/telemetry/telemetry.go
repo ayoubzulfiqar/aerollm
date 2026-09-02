@@ -11,6 +11,13 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 )
 
+// ProviderMetric holds per-provider telemetry aggregates.
+type ProviderMetric struct {
+	Name      string  `json:"name"`
+	Requests  int64   `json:"requests"`
+	LatencyMs float64 `json:"avg_latency_ms"`
+}
+
 // Provider holds the OpenTelemetry provider instance.
 type Provider struct {
 	TracerProvider *sdktrace.TracerProvider
@@ -113,7 +120,44 @@ var (
 	errorCount   int64
 	totalLatency int64
 	latencyCount int64
+
+	providerRequests map[string]int64
+	providerLatency  map[string]int64
+	providerCount    map[string]int64
 )
+
+func init() {
+	providerRequests = make(map[string]int64)
+	providerLatency = make(map[string]int64)
+	providerCount = make(map[string]int64)
+}
+
+// RecordProviderMetrics records request/latency for a named provider.
+func RecordProviderMetrics(name string, latencyMs float64) {
+	if name == "" {
+		name = "unknown"
+	}
+	providerRequests[name]++
+	providerLatency[name] += int64(latencyMs)
+	providerCount[name]++
+}
+
+// ProviderMetrics returns per-provider request/latency aggregates.
+func ProviderMetrics() []ProviderMetric {
+	out := make([]ProviderMetric, 0, len(providerRequests))
+	for name, reqs := range providerRequests {
+		avg := 0.0
+		if providerCount[name] > 0 {
+			avg = float64(providerLatency[name]) / float64(providerCount[name])
+		}
+		out = append(out, ProviderMetric{
+			Name:      name,
+			Requests:  reqs,
+			LatencyMs: avg,
+		})
+	}
+	return out
+}
 
 // RecordRequestCount increments request counter.
 func RecordRequestCount(provider string, count int64) {
