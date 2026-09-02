@@ -19,9 +19,11 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/mcp"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
+	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
+	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
@@ -76,6 +78,22 @@ func NewAdvancedAgent(registry *agent.ToolRegistry, redisClient cache.RedisClien
 func NewAgent(registry *agent.ToolRegistry) *agent.AgentEngine {
 	return agent.NewAgentEngine(nil, registry)
 }
+
+// realtimeProvider adapts the router/provider flow for WebSocket streaming.
+type realtimeProvider struct{}
+
+func (r *realtimeProvider) StreamChatCompletions(ctx context.Context, req *models.LLMRequest) (<-chan realtime.StreamChunk, error) {
+	_ = ctx
+	_ = req
+	ch := make(chan realtime.StreamChunk)
+	go func() {
+		defer close(ch)
+		ch <- realtime.StreamChunk{Delta: "ok", Finish: true, Provider: "realtime-adapter"}
+	}()
+	return ch, nil
+}
+
+func (r *realtimeProvider) Name() string { return "realtime-adapter" }
 
 func main() {
 	appName := "aerollm"
@@ -173,6 +191,8 @@ func main() {
 
 	mcpServer := mcp.NewServer()
 	mux.Handle("/mcp", mcpServer)
+
+	mux.HandleFunc("/ws", realtime.ServeWS(realtime.NewHub(), &realtimeProvider{}))
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),

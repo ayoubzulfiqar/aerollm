@@ -187,3 +187,10 @@ curl -X POST http://localhost:8080/mcp \
 - Injection shield returns `HTTP 403`.
 - PII redaction rewrites the request body with placeholders; original body is preserved in request context for downstream handlers that need restoration.
 - API key scoping enforces `AllowedModels` and `IPAllowlist`.
+
+### Phase 4: AI-Native Edge Fabric & Data Flywheel
+- **Realtime WebSocket**: Bidirectional streaming via `/ws`
+- **Barge-in/VAD**: Cancel provider generation on user voice activity
+- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
+- **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
+- **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline
