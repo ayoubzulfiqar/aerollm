@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 )
@@ -61,4 +62,49 @@ func (d *DatasetExporter) ExportJSONL(ctx context.Context, minRating string) (st
 		return "", nil
 	}
 	return "", nil
+}
+
+// FeedbackHandler serves POST /v1/feedback.
+func (f *FeedbackExporter) FeedbackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if err := f.Ingest(r.Context(), r); err != nil {
+		http.Error(w, `{"error":"invalid feedback"}`, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+}
+
+// BackgroundExportWorker periodically exports high-rated samples.
+type BackgroundExportWorker struct {
+	Exporter   *FeedbackExporter
+	Dataset    *DatasetExporter
+	Interval   time.Duration
+	UploadFunc func(ctx context.Context, payload string) error
+}
+
+// Start runs the worker until the context is canceled.
+func (w *BackgroundExportWorker) Start(ctx context.Context) {
+	if w == nil || w.Exporter == nil || w.Dataset == nil {
+		return
+	}
+	ticker := time.NewTicker(w.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			payload, _ := w.Dataset.ExportJSONL(ctx, "up")
+			if payload == "" {
+				continue
+			}
+			if w.UploadFunc != nil {
+				_ = w.UploadFunc(ctx, payload)
+			}
+		}
+	}
 }

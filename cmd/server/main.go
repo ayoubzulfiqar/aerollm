@@ -25,6 +25,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
+	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -193,6 +194,21 @@ func main() {
 	mux.Handle("/mcp", mcpServer)
 
 	mux.HandleFunc("/ws", realtime.ServeWS(realtime.NewHub(), &realtimeProvider{}))
+
+	feedbackExporter := flywheel.NewFeedbackExporter(ledgerStore)
+	mux.HandleFunc("/v1/feedback", feedbackExporter.FeedbackHandler)
+	go func() {
+		_ = &flywheel.BackgroundExportWorker{
+			Exporter:  feedbackExporter,
+			Dataset:   &flywheel.DatasetExporter{Ledger: ledgerStore},
+			Interval:  5 * time.Minute,
+			UploadFunc: func(ctx context.Context, payload string) error {
+				_ = ctx
+				_ = payload
+				return nil
+			},
+		}
+	}()
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", appCfg.Server.Port),
