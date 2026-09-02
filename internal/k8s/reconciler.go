@@ -23,7 +23,6 @@ type ApplyResult struct {
 }
 
 // ResourceApplyFunc applies control-plane changes to the gateway runtime.
-// Implementations may update Redis, a gRPC control plane, or a Kubernetes CRD.
 type ResourceApplyFunc func(ctx context.Context, kind ResourceKind, name string, spec map[string]interface{}) (ApplyResult, error)
 
 // Reconciler watches control-plane resources and applies routing/config changes.
@@ -40,7 +39,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, kind ResourceKind, name stri
 }
 
 // SetupManager is a placeholder for controller-runtime registration.
-// It preserves the extension point without requiring kubebuilder imports in this package.
 func SetupManager() error {
 	return nil
 }
