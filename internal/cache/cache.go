@@ -23,6 +23,7 @@ type RedisClient interface {
 type RedisCache struct {
 	client RedisClient
 	ttl    time.Duration
+	sem    *SemanticCache
 }
 
 // NewRedisCache creates a new RedisCache.
@@ -30,6 +31,7 @@ func NewRedisCache(client RedisClient, ttl time.Duration) *RedisCache {
 	return &RedisCache{
 		client: client,
 		ttl:    ttl,
+		sem:    NewSemanticCache("sem"),
 	}
 }
 
@@ -78,10 +80,25 @@ func (c *RedisCache) SetExact(key string, resp []byte, tokenCount int) error {
 
 // GetSemantic retrieves a semantically similar cached response.
 func (c *RedisCache) GetSemantic(key string, threshold float64) (*CacheEntry, error) {
-	return &CacheEntry{}, nil
+	if c == nil || c.sem == nil {
+		return nil, nil
+	}
+	hit, err := c.sem.Search(key, threshold)
+	if err != nil || hit == nil {
+		return nil, err
+	}
+	return &CacheEntry{
+		Key:      hit.Key,
+		Response: hit.Response,
+		Semantic: true,
+	}, nil
 }
 
 // SetSemantic stores a response in the semantic cache.
 func (c *RedisCache) SetSemantic(key string, resp []byte, tokenCount int) error {
-	return nil
+	if c == nil || c.sem == nil {
+		return nil
+	}
+	_ = tokenCount
+	return c.sem.Upsert(key, key, resp, c.ttl)
 }

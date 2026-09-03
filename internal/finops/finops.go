@@ -2,11 +2,13 @@ package finops
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/redis/go-redis/v9"
@@ -201,4 +203,25 @@ func (c *CostTracker) SetBudgetWebhookConfig(dispatcher dispatcherInterface, cfg
 	if d, ok := dispatcher.(*webhooks.WebhookDispatcher); ok {
 		c.dispatcher = d
 	}
+}
+
+// AppendUsage stores usage entries for downstream billing consumers.
+func (c *CostTracker) AppendUsage(ctx context.Context, entries ...billing.MeterEntry) error {
+	if c == nil || len(entries) == 0 {
+		return nil
+	}
+	for _, entry := range entries {
+		if c.redis == nil {
+			continue
+		}
+		key := fmt.Sprintf("usage:%s:%s:%d", entry.CustomerID, entry.EventName, time.Now().UnixNano())
+		b, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		if err := c.redis.Set(ctx, key, string(b), 7*24*time.Hour).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
