@@ -191,3 +191,20 @@ func TestServerBillingWorkerEmitsUsage(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestPqcKeysListsAlgorithms(t *testing.T) {
+	output := captureOutput(t, []string{"pqc", "keys"})
+	if !strings.Contains(output, "hybrid-ed25519+mldsa-65") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestSpatialParse(t *testing.T) {
+	output := captureOutput(t, []string{"spatial", "parse", "-t", `{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}`})
+	if !strings.Contains(output, `"x"`) {
+		t.Fatalf("unexpected output: %s", output)
+	}
+	if !strings.Contains(output, `"anchors"`) {
+		t.Fatalf("expected WebXR translation output, got: %s", output)
+	}
+}
