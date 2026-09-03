@@ -25,6 +25,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newTraceCmd())
 	root.AddCommand(newHealthCmd())
 	root.AddCommand(newResilienceCmd())
+	root.AddCommand(newTrafficCmd())
+	root.AddCommand(newSloCmd())
 
 	return root
 }

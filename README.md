@@ -454,6 +454,26 @@ CLI:
 aerollm traffic shadow --model shadow-model
 ```
 
+## Phase 16: SLO Budgets & Error Budget Tracking
+
+Service-level objectives and error budget enforcement.
+
+- `Budget` defines `Objective` and `Window` for an endpoint or provider
+- `Window` supports `5m`, `1h`, `24h`
+- `ErrorBudget` tracks remaining budget from `AllowedErrors`
+- Returns `HTTP 429` when budget is exhausted with `{"error":"budget exceeded"}`
+- Fits alongside `internal/middleware` and existing retry/backoff
+
+```bash
+curl -H 'x-slo-target: latency' http://localhost:8080/v1/slo/budget
+```
+
+CLI:
+
+```bash
+aerollm slo budget --target latency
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.

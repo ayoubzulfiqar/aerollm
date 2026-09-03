@@ -267,3 +267,17 @@ func TestResilienceOutput(t *testing.T) {
 		t.Fatalf("expected resilience output, got: %s", output)
 	}
 }
+
+func TestTrafficShadowOutput(t *testing.T) {
+	output := captureOutput(t, []string{"traffic", "shadow"})
+	if !strings.Contains(output, "shadow") {
+		t.Fatalf("expected shadow output, got: %s", output)
+	}
+}
+
+func TestSloBudgetOutput(t *testing.T) {
+	output := captureOutput(t, []string{"slo", "budget"})
+	if !strings.Contains(output, "target") {
+		t.Fatalf("expected slo output, got: %s", output)
+	}
+}
