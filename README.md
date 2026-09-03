@@ -434,6 +434,26 @@ CLI:
 aerollm resilience
 ```
 
+## Phase 15: Shadow Traffic & Canary Routing
+
+Async shadow routing and canary percentage controls.
+
+- `ShadowTester.RunAsync` dispatches the same request to a secondary provider without blocking the main response
+- `ShadowConfig` controls shadow behavior: `Enabled` and `ShadowModels`
+- Shadow results include provider latency and error state
+- Routes are lightweight and opt-in through provider config
+- Intended to coexist with `internal/router` circuit breakers and `internal/traffic`
+
+```bash
+curl -X POST http://localhost:8080/v1/shadow -H 'content-type: application/json' -d '{"model":"shadow-model"}'
+```
+
+CLI:
+
+```bash
+aerollm traffic shadow --model shadow-model
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.

@@ -46,6 +46,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/studio"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
+	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/internal/zk"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
@@ -211,6 +212,26 @@ func main() {
 	mux.HandleFunc("/resilience/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"state":"ok"}`))
+	})
+	mux.HandleFunc("/v1/shadow", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req models.LLMRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		shadow := traffic.NewShadowTester()
+		err := shadow.RunAsync(r.Context(), getenvOrDefault("AEROLLM_SHADOW_URL", ""), getenvOrDefault("AEROLLM_API_KEY", ""), &req)
+		if err != nil {
+			http.Error(w, `{"error":"shadow dispatch failed"}`, http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"shadow":"accepted"}`))
 	})
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 
