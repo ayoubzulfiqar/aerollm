@@ -35,7 +35,11 @@ func (m *SpatialMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	w.WriteHeader(rec.code)
+	if rec.code > 0 {
+		w.WriteHeader(rec.code)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	if rec.body != "" {
 		_, _ = w.Write([]byte(rec.body))
 	}

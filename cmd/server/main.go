@@ -269,9 +269,25 @@ func main() {
 	_ = autoscale.NewMetaAgentInfraLoop(awsProvisioner, 0.2)
 
 	mux.HandleFunc("/v1/autoscale/evaluate", func(w http.ResponseWriter, r *http.Request) {
-		_ = w
-		_ = r
-		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req struct {
+			Deficit float64 `json:"deficit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		node, err := awsProvisioner.ProvisionGPU(r.Context(), autoscale.NodeSpec{InstanceType: "A100", GPUCount: 1, Region: "us-east-1"})
+		if err != nil {
+			http.Error(w, `{"error":"provision failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"node": node, "deficit": req.Deficit})
 	})
 
 	fedAgg := federated.NewFedAvgAggregator()
