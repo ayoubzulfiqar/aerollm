@@ -276,6 +276,7 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Hardware Routing**: `internal/hardware` adds silicon detection for CUDA/Metal/ROCm/Vulkan/Ollama/CPU and `HardwareAwareSelector` for privacy-first/cost-zero routing
 - **SaaS Billing**: `internal/billing` adds `InMemoryProvider` + `StripeProvider` using `stripe-go/v80` `billing/meterevent`, plus `InvoiceGenerator` and CLI `aerollm billing generate`
 - **Server Billing Worker**: `cmd/server/main.go` starts a background invoice worker, using Stripe when `AEROLLM_STRIPE_SECRET_KEY` is set
+- **Open Standard Spec**: `internal/marketplace/openstandard.go` defines `CapabilityManifest` and `BillingReceipt` structures, with validation and canonical JSON; server + edge expose `/v1/marketplace/openstandard/capability` and `/v1/marketplace/openstandard/receipt`, plus edge self endpoints at `/v1/marketplace/openstandard/capability/self` and `/v1/marketplace/openstandard/receipt/self`
 
 ## FinOps
 

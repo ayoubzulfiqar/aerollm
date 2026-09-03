@@ -96,6 +96,8 @@ func NewRegistryService(client *Client, store Store) *RegistryService {
 func (s *RegistryService) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/marketplace/plugins", s.handlePlugins)
 	mux.HandleFunc("/v1/marketplace/plugins/", s.handlePluginByID)
+	mux.HandleFunc("/v1/marketplace/openstandard/capability", s.handleCapabilityManifest)
+	mux.HandleFunc("/v1/marketplace/openstandard/receipt", s.handleBillingReceipt)
 }
 
 // PluginsHandler returns the raw list/publish handler.
@@ -103,6 +105,12 @@ func (s *RegistryService) PluginsHandler() http.HandlerFunc { return s.handlePlu
 
 // PluginByIDHandler returns the raw get-by-id handler.
 func (s *RegistryService) PluginByIDHandler() http.HandlerFunc { return s.handlePluginByID }
+
+// CapabilityManifestHandler returns the raw capability handler.
+func (s *RegistryService) CapabilityManifestHandler() http.HandlerFunc { return s.handleCapabilityManifest }
+
+// BillingReceiptHandler returns the raw receipt handler.
+func (s *RegistryService) BillingReceiptHandler() http.HandlerFunc { return s.handleBillingReceipt }
 
 func (s *RegistryService) handlePlugins(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -212,4 +220,44 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", b), nil
+}
+
+func (s *RegistryService) handleCapabilityManifest(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var m CapabilityManifest
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+		m.UpdatedAt = time.Now()
+		if err := m.Validate(); err != nil {
+			http.Error(w, fmt.Sprintf("invalid manifest: %v", err), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(m)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *RegistryService) handleBillingReceipt(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var rec BillingReceipt
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+		rec.RecordedAt = time.Now()
+		if err := rec.Validate(); err != nil {
+			http.Error(w, fmt.Sprintf("invalid receipt: %v", err), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(rec)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
