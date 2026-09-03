@@ -357,6 +357,8 @@ curl -X POST http://localhost:8080/v1/federated/aggregate \
 - `/v1/trace/metrics` returns JSON metrics with service name, request count, error count, and avg latency.
 - Trace middleware emits `X-Trace-Id` and `X-Span-Id` headers for downstream debugging.
 - CLI: `aerollm trace metrics` prints a local metrics snapshot.
+- `/v1/federated/verify` supports ed25519-backed signed aggregation verification from `internal/federated`.
+- `/v1/edge/realtime/ws` exposes edge realtime streaming over WebSocket for low-latency clients.
 
 ```bash
 curl http://localhost:8080/v1/trace/metrics
