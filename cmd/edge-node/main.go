@@ -16,6 +16,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
+	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
 	"github.com/ayoubzulfiqar/aerollm/internal/sandbox"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
 	"go.etcd.io/bbolt"
@@ -157,6 +158,7 @@ func main() {
 		}
 		spatial.NewVideo3DStreamHandler().StreamResponse(w, r, r.Body)
 	})
+	mux.HandleFunc("/v1/edge/realtime/ws", realtime.ServeWS(realtime.NewHub(), newEdgeRealtimeProvider()))
 
 	addr := ":7910"
 	if env := strings.TrimSpace(os.Getenv("EDGE_LISTEN")); env != "" { addr = env }
