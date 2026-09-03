@@ -208,6 +208,10 @@ func main() {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("/readyz", readiness)
+	mux.HandleFunc("/resilience/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"state":"ok"}`))
+	})
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 
 	graphStore := graphrag.NewBboltGraphStore()

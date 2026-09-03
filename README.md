@@ -397,9 +397,42 @@ CLI:
 aerollm health
 ```
 
+- `/resilience/status` returns current resilience state with circuit breaker status
+- `internal/resilience` provides `CircuitBreaker`, `Bulkhead`, `Handler`, and `Middleware` for degraded mode handling
+
+```bash
+curl http://localhost:8080/resilience/status
+```
+
+CLI:
+
+```bash
+aerollm resilience
+```
+
 - Budget checks happen before routing.
 - If `BudgetChecker.CheckBudget` returns an error, the handler returns `HTTP 402` with body `{"error":"budget exceeded"}`.
 - Set `AEROLLM_BUDGET_WEBHOOK_URL` and `AEROLLM_BUDGET_WEBHOOK_SECRET` to receive `budget_exceeded` events.
+
+## Phase 14: Resilience & Degraded Mode
+
+Circuit breaker, bulkhead concurrency control, and graceful degradation primitives.
+
+- `CircuitBreaker` trips after threshold failures and transitions to recovering after reset timeout
+- `Bulkhead` limits concurrent requests via semaphore-based concurrency control
+- `/resilience/status` exposes current resilience state for monitoring
+- `resilience.Middleware` enforces bulkhead limits on HTTP handlers
+- Designed to work with existing retry/backoff in `internal/agent` and circuit config in `internal/config`
+
+```bash
+curl http://localhost:8080/resilience/status
+```
+
+CLI:
+
+```bash
+aerollm resilience
+```
 
 ## Guardrails
 

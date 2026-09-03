@@ -260,3 +260,10 @@ func TestHealthOutput(t *testing.T) {
 		t.Fatalf("expected health output, got: %s", output)
 	}
 }
+
+func TestResilienceOutput(t *testing.T) {
+	output := captureOutput(t, []string{"resilience"})
+	if !strings.Contains(output, "state") {
+		t.Fatalf("expected resilience output, got: %s", output)
+	}
+}

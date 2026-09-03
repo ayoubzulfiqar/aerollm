@@ -24,6 +24,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newFederatedCmd())
 	root.AddCommand(newTraceCmd())
 	root.AddCommand(newHealthCmd())
+	root.AddCommand(newResilienceCmd())
 
 	return root
 }
