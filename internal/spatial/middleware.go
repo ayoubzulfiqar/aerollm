@@ -7,11 +7,11 @@ import (
 
 // SpatialMiddleware scans responses for spatial anchors and transforms them.
 type SpatialMiddleware struct {
-	next http.Handler
+	next http.HandlerFunc
 }
 
 // NewSpatialMiddleware creates a new spatial middleware.
-func NewSpatialMiddleware(next http.Handler) *SpatialMiddleware {
+func NewSpatialMiddleware(next http.HandlerFunc) *SpatialMiddleware {
 	return &SpatialMiddleware{next: next}
 }
 
