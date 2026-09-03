@@ -39,7 +39,7 @@ func (a *LegacyProviderAdapter) Stream(ctx context.Context, req *models.LLMReque
 	}
 	ch := make(chan AeroStreamChunk)
 	close(ch)
-	return ch, fmt.Errorf("stream not implemented for legacy adapter %s", a.inner.Name())
+	return ch, fmt.Errorf("streaming unavailable for legacy adapter %s; set StreamFunc to enable", a.inner.Name())
 }
 
 // AsProvider exposes the legacy provider interface for router compatibility.
