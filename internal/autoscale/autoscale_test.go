@@ -2,6 +2,7 @@ package autoscale
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -54,12 +55,46 @@ func TestMetaAgentInfraLoopNoTrigger(t *testing.T) {
 	if called { t.Fatalf("expected no provisioning below threshold") }
 }
 
+func TestServerMetaAgentLoopFallback(t *testing.T) {
+	primary := &stubProvisioner{onProvision: func(ctx context.Context, spec NodeSpec) (*Node, error) {
+		return nil, fmt.Errorf("aws down")
+	}}
+	fallback := &stubProvisioner{onProvision: func(ctx context.Context, spec NodeSpec) (*Node, error) {
+		return &Node{ID: "gcp-1", Provider: "gcp", InstanceType: spec.InstanceType}, nil
+	}}
+	loop := NewServerMetaAgentLoopWith(primary, fallback, 0.1)
+	node, err := loop.Evaluate(context.Background(), 0.3)
+	if err != nil { t.Fatalf("evaluate failed: %v", err) }
+	if node == nil || node.Provider != "gcp" { t.Fatalf("expected fallback provider, got %v", node) }
+}
+
+func TestServerMetaAgentLoopTerminateUsesFallback(t *testing.T) {
+	primary := &stubProvisioner{onProvision: func(ctx context.Context, spec NodeSpec) (*Node, error) {
+		return nil, fmt.Errorf("aws down")
+	}}
+	fallback := &stubProvisioner{}
+	loop := NewServerMetaAgentLoopWith(primary, fallback, 0.1)
+	_, _ = loop.Evaluate(context.Background(), 0.3)
+	fp := loop.provisioner.(*failoverProvisioner)
+	if err := fp.Terminate(context.Background(), "n1"); err != nil {
+		t.Fatalf("terminate failed: %v", err)
+	}
+	if !fallback.terminateCalled { t.Fatalf("expected fallback terminate") }
+}
+
 type stubProvisioner struct {
-	onProvision func(ctx context.Context, spec NodeSpec) (*Node, error)
+	onProvision    func(ctx context.Context, spec NodeSpec) (*Node, error)
+	terminateCalled bool
 }
 
 func (s *stubProvisioner) ProvisionGPU(ctx context.Context, spec NodeSpec) (*Node, error) {
-	return s.onProvision(ctx, spec)
+	if s.onProvision != nil {
+		return s.onProvision(ctx, spec)
+	}
+	return &Node{}, nil
 }
-func (s *stubProvisioner) Terminate(ctx context.Context, nodeID string) error { return nil }
+func (s *stubProvisioner) Terminate(ctx context.Context, nodeID string) error {
+	s.terminateCalled = true
+	return nil
+}
 func (s *stubProvisioner) List(ctx context.Context) ([]Node, error) { return nil, nil }

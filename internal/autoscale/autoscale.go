@@ -147,11 +147,17 @@ func (l *MetaAgentInfraLoop) Evaluate(ctx context.Context, deficit float64) (*No
 
 // NewServerMetaAgentLoop creates a loop with AWS primary and GCP fallback.
 func NewServerMetaAgentLoop() *MetaAgentInfraLoop {
-	aws := NewAWSProvisioner()
-	gcp := NewGCPProvisioner()
+	return NewServerMetaAgentLoopWith(NewAWSProvisioner(), NewGCPProvisioner(), 0.2)
+}
+
+// NewServerMetaAgentLoopWith creates a loop with explicit provisioners.
+func NewServerMetaAgentLoopWith(primary, fallback InfraProvisioner, threshold float64) *MetaAgentInfraLoop {
+	if threshold <= 0 {
+		threshold = 0.2
+	}
 	return &MetaAgentInfraLoop{
-		provisioner: &failoverProvisioner{primary: aws, fallback: gcp},
-		threshold:   0.2,
+		provisioner: &failoverProvisioner{primary: primary, fallback: fallback},
+		threshold:   threshold,
 	}
 }
 
