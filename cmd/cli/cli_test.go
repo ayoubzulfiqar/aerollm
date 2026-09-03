@@ -231,3 +231,18 @@ func TestFederatedVerify(t *testing.T) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }
+
+func TestEdgeSpatialStream(t *testing.T) {
+	output := captureOutput(t, []string{"edge", "spatial", "stream", "--anchor", `{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}`})
+	if !strings.Contains(output, "parsed anchors=1") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestEdgeFederatedAggregate(t *testing.T) {
+	updates := `[{"Rows":1,"Cols":2,"Data":[1,2],"Owner":"e1"},{"Rows":1,"Cols":2,"Data":[3,4],"Owner":"e2"}]`
+	output := captureOutput(t, []string{"edge", "federated", "aggregate", "--input", updates})
+	if !strings.Contains(output, "received 2 updates") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
