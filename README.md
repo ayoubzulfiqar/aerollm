@@ -310,6 +310,26 @@ curl -X POST http://localhost:8080/v1/autoscale/evaluate \
   -d '{"deficit":0.6}'
 ```
 
+```bash
+# Stream 3D spatial payload
+curl -X POST http://localhost:8080/v1/spatial/stream \
+  -H "Content-Type: application/json" \
+  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
+```
+
+```bash
+# Edge PQC handshake
+curl -X POST http://localhost:7910/v1/edge/pqc/handshake \
+  -H "Content-Type: application/json"
+```
+
+```bash
+# Edge spatial stream
+curl -X POST http://localhost:7910/v1/edge/spatial/stream \
+  -H "Content-Type: application/json" \
+  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
+```
+
 ### Open Standard Examples
 
 ```bash
