@@ -249,7 +249,7 @@ Embedded state store, dynamic agent swarms, consensus, federated learning, red-t
 Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin ecosystem, evaluation engine, and compliance-as-code.
 
 ### Phase 7: The Sentient Mesh
-- **Generative API Synthesis**: `internal/synthesis` with tool deficit detection, LLM-backed code generation stub, WASM compilation stub, and tool promotion into the plugin registry
+- **Generative API Synthesis**: `internal/synthesis` with tool deficit detection, LLM-backed code generation, WASM placeholder compilation, and tool promotion into the plugin registry
 - **Temporal GraphRAG**: `internal/graphrag` with temporal nodes/edges, BFS neighbor traversal, tokenized query ranking, and HTTP middleware that injects graph context when `rag_enabled=true`
 - **Self-Optimizing AIOps**: `internal/aiops` with `MetaAgentTuner`, configurable `MetricsSource`, and tuner actions with cooldown semantics; wired to live telemetry in `cmd/server/main.go`
 - **Advanced Agent Loop**: `internal/agent/advanced_loop.go` adds `LoopHook` lifecycle hooks, `ExecuteToolsWithRetry`, unknown-tool deficit detection, and `ToolDeficitHandler`
