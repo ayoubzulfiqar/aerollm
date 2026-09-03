@@ -253,3 +253,10 @@ func TestTraceMetricsOutput(t *testing.T) {
 		t.Fatalf("expected service metric key, got: %s", output)
 	}
 }
+
+func TestHealthOutput(t *testing.T) {
+	output := captureOutput(t, []string{"health"})
+	if !strings.Contains(output, "status") {
+		t.Fatalf("expected health output, got: %s", output)
+	}
+}

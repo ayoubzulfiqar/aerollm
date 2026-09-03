@@ -353,18 +353,49 @@ curl -X POST http://localhost:8080/v1/federated/aggregate \
 
 ## Phase 12: Observability, Distributed Tracing & Global Federation
 
-- `internal/trace` provides lightweight trace spans, request/error counting, and avg latency metrics.
-- `/v1/trace/metrics` returns JSON metrics with service name, request count, error count, and avg latency.
-- Trace middleware emits `X-Trace-Id` and `X-Span-Id` headers for downstream debugging.
-- CLI: `aerollm trace metrics` prints a local metrics snapshot.
-- `/v1/federated/verify` supports ed25519-backed signed aggregation verification from `internal/federated`.
-- `/v1/edge/realtime/ws` exposes edge realtime streaming over WebSocket for low-latency clients.
+Lightweight observability without external dependencies: `internal/trace` provides lightweight trace spans, request/error counting, and avg latency metrics. `/v1/trace/metrics` returns JSON metrics with service name, request count, error count, and avg latency.
+
+Global federation includes signed aggregation verification and edge realtime streaming:
+
+- `/v1/federated/aggregate` accepts signed LoRA update arrays and returns averaged output
+- `/v1/federated/verify` verifies aggregate payloads against an ed25519 public key
+- `/v1/edge/realtime/ws` exposes edge realtime streaming over WebSocket for low-latency clients
+
+Trace middleware emits `X-Trace-Id` and `X-Span-Id` headers for downstream debugging.
+
+CLI:
+
+```bash
+aerollm trace metrics
+```
+
+### Phase 12 Server Routes
 
 ```bash
 curl http://localhost:8080/v1/trace/metrics
+curl -X POST http://localhost:8080/v1/federated/aggregate
+curl -X POST http://localhost:8080/v1/federated/verify
+curl -X POST http://localhost:7910/v1/edge/realtime/ws
 ```
 
-## FinOps
+## Phase 13: Health & Resilience
+
+Operational health checks and readiness reporting for server and edge companion.
+
+- `/healthz` returns HTTP 200 with `{"status":"ok"}`
+- `/readyz` evaluates registered dependency checkers and returns readiness status
+- `internal/health` provides a `Registry` with `Register`, `Checks`, `LivenessResponse`, and `ReadinessResponse`
+
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+```
+
+CLI:
+
+```bash
+aerollm health
+```
 
 - Budget checks happen before routing.
 - If `BudgetChecker.CheckBudget` returns an error, the handler returns `HTTP 402` with body `{"error":"budget exceeded"}`.

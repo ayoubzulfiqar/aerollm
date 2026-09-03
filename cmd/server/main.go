@@ -203,6 +203,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.Handle("/readyz", readiness)
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 
 	graphStore := graphrag.NewBboltGraphStore()
