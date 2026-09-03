@@ -281,7 +281,11 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 
 ### Phase 11: The Spatial Reality, Autonomous Cloud & Post-Quantum Fabric
 - **Spatial Reality Fabric**: `internal/spatial` adds chunked video/3D streaming via zero-buffer HTTP chunk writers, plus a WebXR spatial translator that scans LLM outputs for spatial anchors and converts them into standardized AR/VR payloads
+- **Spatial Middleware**: `internal/spatial/middleware.go` adds `SpatialMiddleware` that rewrites responses containing spatial anchors into WebXR JSON; server exposes `/v1/spatial/parse`
 - **Post-Quantum Cryptography**: `internal/pqc` adds `QuantumSafeKeyManager` with ML-KEM-768 encapsulation and ML-DSA-65 signatures, plus hybrid Ed25519/ML-DSA fallback for mesh peer attestation; includes stream encryptors for secure weight/channel transport
+- **PQC Handshake Middleware**: `internal/pqc/middleware.go` adds `HandshakeHandler` returning hybrid key material; server exposes `/v1/pqc/keys`
+- **Autonomous Cloud Provisioning**: `internal/autoscale` adds `InfraProvisioner` interface with `AWSProvisioner`/`GCPProvisioner`, `BootstrapScript` cloud-init generator, and `MetaAgentInfraLoop` for threshold-based GPU provisioning; server exposes `/v1/autoscale/evaluate`
+- **Federated Learning**: `internal/federated` adds `FedAvgAggregator` for secure LoRA weight averaging, invalid-update skipping, and Inf/NaN clamping; `internal/learning` wires federated aggregation into the trainer
 - **Integration Points**: PQC key management is additive to existing `internal/ledger` and `internal/marketplace` flows; spatial middleware can wrap existing provider handlers without changing upstream routing
 
 ### Open Standard Examples
