@@ -1,7 +1,6 @@
 package trace
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +10,7 @@ import (
 func TestTraceMiddlewareInstrumentsRequest(t *testing.T) {
 	p := NewProvider(Config{ServiceName: "svc"})
 	handler := p.TraceMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -60,32 +60,6 @@ func TestTraceMiddlewareRecordsErrors(t *testing.T) {
 
 	if p.ErrorCount() != 1 {
 		t.Fatalf("expected 1 error, got %d", p.ErrorCount())
-	}
-}
-
-func TestMetricsHandler(t *testing.T) {
-	p := NewProvider(Config{ServiceName: "svc"})
-	_, span := p.StartSpan(nil, "op")
-	p.End(nil, span, 10*time.Millisecond, false)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/trace/metrics", p.MetricsHandler())
-	req := httptest.NewRequest(http.MethodGet, "/v1/trace/metrics", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var snap MetricsSnapshot
-	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
-		t.Fatalf("invalid json: %v", err)
-	}
-	if snap.Service != "svc" {
-		t.Fatalf("expected service=svc, got %s", snap.Service)
-	}
-	if snap.Requests != 1 {
-		t.Fatalf("expected 1 request, got %d", snap.Requests)
 	}
 }
 

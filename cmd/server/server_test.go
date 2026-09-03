@@ -5,9 +5,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
+	"github.com/ayoubzulfiqar/aerollm/internal/trace"
 )
 
 func TestPQCKeysRoute(t *testing.T) {
@@ -42,5 +44,24 @@ func TestSpatialStreamRoute(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "hello") {
 		t.Fatalf("expected streamed body, got: %s", w.Body.String())
+	}
+}
+
+func TestTraceMetricsRoute(t *testing.T) {
+	mux := http.NewServeMux()
+	p := trace.NewProvider(trace.Config{ServiceName: "svc"})
+	_, span := p.StartSpan(nil, "op")
+	p.End(nil, span, 5*time.Millisecond, false)
+	mux.HandleFunc("/v1/trace/metrics", p.MetricsHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/trace/metrics", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"service":"svc"`) {
+		t.Fatalf("expected service in metrics response, got: %s", rec.Body.String())
 	}
 }

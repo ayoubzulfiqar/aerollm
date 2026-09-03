@@ -351,6 +351,17 @@ curl -X POST http://localhost:8080/v1/federated/aggregate \
   -d '[{"Rows":1,"Cols":2,"Data":[1,2],"Owner":"e1"},{"Rows":1,"Cols":2,"Data":[3,4],"Owner":"e2"}]'
 ```
 
+## Phase 12: Observability, Distributed Tracing & Global Federation
+
+- `internal/trace` provides lightweight trace spans, request/error counting, and avg latency metrics.
+- `/v1/trace/metrics` returns JSON metrics with service name, request count, error count, and avg latency.
+- Trace middleware emits `X-Trace-Id` and `X-Span-Id` headers for downstream debugging.
+- CLI: `aerollm trace metrics` prints a local metrics snapshot.
+
+```bash
+curl http://localhost:8080/v1/trace/metrics
+```
+
 ## FinOps
 
 - Budget checks happen before routing.
