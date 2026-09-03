@@ -240,11 +240,8 @@ func main() {
 
 	_ = pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
 	_ = spatial.NewVideo3DStreamHandler()
-	mux.HandleFunc("/v1/pqc/keys", func(w http.ResponseWriter, r *http.Request) {
-		_ = r
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"algorithms":["hybrid-ed25519-mldsa65","mlkem-768","mldsa-65"]}`))
-	})
+	pqcKM := pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
+	mux.HandleFunc("/v1/pqc/keys", pqc.HandshakeHandler(pqcKM))
 
 	mux.HandleFunc("/v1/spatial/parse", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
@@ -260,6 +257,14 @@ func main() {
 		anchors := spatial.ParseSpatialAnchors(string(b))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(anchors)
+	})
+
+	mux.HandleFunc("/v1/spatial/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		spatial.NewVideo3DStreamHandler().StreamResponse(w, r, r.Body)
 	})
 
 	awsProvisioner := autoscale.NewAWSProvisioner()

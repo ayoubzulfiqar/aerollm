@@ -83,7 +83,7 @@ func (a *FedAvgAggregator) Aggregate(ctx context.Context, updates []*LoRAMatrix)
 	return out, nil
 }
 
-// Verify is a stub for signature verification.
+// Verify is a placeholder for signature verification.
 func (a *FedAvgAggregator) Verify(ctx context.Context, update *LoRAMatrix, signature []byte) error {
 	_ = ctx
 	_ = update

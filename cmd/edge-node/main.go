@@ -15,7 +15,9 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/hardware"
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
+	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/sandbox"
+	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
 	"go.etcd.io/bbolt"
 )
 
@@ -144,6 +146,16 @@ func main() {
 				return fmt.Sprintf("%.2f", b)
 			}(),
 		})
+	})
+
+	pqcKM := pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
+	mux.HandleFunc("/v1/edge/pqc/handshake", pqc.HandshakeHandler(pqcKM))
+	mux.HandleFunc("/v1/edge/spatial/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		spatial.NewVideo3DStreamHandler().StreamResponse(w, r, r.Body)
 	})
 
 	addr := ":7910"

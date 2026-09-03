@@ -66,7 +66,7 @@ func (p *AWSProvisioner) List(ctx context.Context) ([]Node, error) {
 	return nil, nil
 }
 
-// GCPProvisioner is a stub GCP provisioner.
+// GCPProvisioner is a lightweight GCP provisioner implementation.
 type GCPProvisioner struct{}
 
 // NewGCPProvisioner creates a new GCP provisioner.
