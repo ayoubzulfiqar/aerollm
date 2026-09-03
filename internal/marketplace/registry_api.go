@@ -98,6 +98,12 @@ func (s *RegistryService) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/marketplace/plugins/", s.handlePluginByID)
 }
 
+// PluginsHandler returns the raw list/publish handler.
+func (s *RegistryService) PluginsHandler() http.HandlerFunc { return s.handlePlugins }
+
+// PluginByIDHandler returns the raw get-by-id handler.
+func (s *RegistryService) PluginByIDHandler() http.HandlerFunc { return s.handlePluginByID }
+
 func (s *RegistryService) handlePlugins(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

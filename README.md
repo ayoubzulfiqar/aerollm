@@ -266,6 +266,8 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests and POSTs to `/v1/marketplace/plugins`
 - **Marketplace Registry API**: `internal/marketplace/registry_api.go` adds durable registry store interfaces plus HTTP handlers for `/v1/marketplace/plugins` list/publish and `/v1/marketplace/plugins/{id}` get
 - **Redis Registry Persistence**: `internal/marketplace/redis_store.go` adds a `RedisStore` backed by `go-redis/v9`; server uses Redis for registry state when available, otherwise falls back to in-memory store
+- **Marketplace Auth Middleware**: `/v1/marketplace/*` routes now require API key auth via existing middleware; `internal/marketplace/middleware.go` provides reusable marketplace requester middleware
+- **Local Redis Compose**: `docker-compose.yml` defines a local Redis service with healthchecks and AeroLLM wiring
 - **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
 - **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events; chat responses now opt into GenUI when requested
 

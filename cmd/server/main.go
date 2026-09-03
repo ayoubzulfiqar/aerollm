@@ -256,7 +256,13 @@ func main() {
 	_ = registryStore
 	registryService := marketplace.NewRegistryService(marketClient, registryStore)
 	_ = registryService
-	registryService.RegisterRoutes(mux)
+
+	marketPlugins := http.HandlerFunc(registryService.PluginsHandler())
+	marketPlugin := http.HandlerFunc(registryService.PluginByIDHandler())
+	marketPlugins = middleware.NewAuthMiddleware(marketPlugins).Next
+	marketPlugin = middleware.NewAuthMiddleware(marketPlugin).Next
+	mux.Handle("/v1/marketplace/plugins", marketPlugins)
+	mux.Handle("/v1/marketplace/plugins/", marketPlugin)
 	royaltyRecorder := marketplace.NewRoyaltyRecorder(webhookDispatcher, webhooks.BudgetWebhookConfig{
 		URL:     getenvOrDefault("AEROLLM_ROYALTY_WEBHOOK_URL", "http://localhost:8080/webhooks/royalty"),
 		Timeout: 2 * time.Second,
