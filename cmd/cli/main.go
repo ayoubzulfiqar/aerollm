@@ -22,6 +22,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPqcCmd())
 	root.AddCommand(newSpatialCmd())
 	root.AddCommand(newFederatedCmd())
+	root.AddCommand(newTraceCmd())
 
 	return root
 }

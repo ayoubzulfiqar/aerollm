@@ -246,3 +246,10 @@ func TestEdgeFederatedAggregate(t *testing.T) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }
+
+func TestTraceMetricsOutput(t *testing.T) {
+	output := captureOutput(t, []string{"trace", "metrics"})
+	if !strings.Contains(output, "service") {
+		t.Fatalf("expected service metric key, got: %s", output)
+	}
+}
