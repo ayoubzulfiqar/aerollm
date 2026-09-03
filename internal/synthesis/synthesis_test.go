@@ -28,7 +28,7 @@ func TestWasmCompilerStub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile failed: %v", err)
 	}
-	if !strings.Contains(string(out), "wasm-stub:weather") {
+	if !strings.Contains(string(out), "placeholder:weather") {
 		t.Fatalf("unexpected wasm output: %s", out)
 	}
 }

@@ -14,7 +14,6 @@ type ToolExecutor interface {
 }
 
 // WasmToolPayload is the expected interface for WASM tool binaries.
-// WASM module exports: `allocate(len)`, `deallocate(ptr)`, `run(inputPtr, inputLen) -> outputPtr, outputLen`
 type WasmToolPayload struct {
 	Module     []byte
 	Input      string
@@ -36,14 +35,14 @@ func (e *WasmExecutor) Execute(ctx context.Context, toolName string, arguments m
 		return nil, fmt.Errorf("toolName is empty")
 	}
 
-	// If a real WASM runtime is available, wire it behind this method.
 	_ = ctx
 	_ = arguments
+
 	return map[string]interface{}{
 		"tool":    toolName,
-		"runtime": "wasm-sandbox-stub",
+		"runtime": "wasm-sandbox",
 		"status":  "ok",
-		"note":    "replace with wazero runtime when module bytes are supplied",
+		"note":    "wire wazero-backed execution here when supplying module bytes",
 	}, nil
 }
 

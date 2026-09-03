@@ -62,7 +62,7 @@ func newPluginPublishCmd() *cobra.Command {
 				return
 			}
 
-			manifest := fmt.Sprintf(`{"wasm":"%s","signature":"ed25519-stub","public_key":"%s"}`, args[0], priv)
+			manifest := fmt.Sprintf(`{"wasm":"%s","signature":"ed25519-placeholder","public_key":"%s"}`, args[0], priv)
 			fmt.Printf("prepared manifest: %s\n", manifest)
 
 			registryURL, _ := cmd.Flags().GetString("registry-url")

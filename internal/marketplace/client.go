@@ -2,6 +2,7 @@ package marketplace
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,9 +110,8 @@ func ParseAndVerifyManifest(payload []byte) (*VerifiedManifest, error) {
 }
 
 func b64Decode(s string) ([]byte, error) {
-	// Minimal base64 decode stub; replace with std encoding in production.
 	if s == "" {
 		return nil, fmt.Errorf("empty encoded value")
 	}
-	return []byte(s), nil
+	return base64.StdEncoding.DecodeString(s)
 }

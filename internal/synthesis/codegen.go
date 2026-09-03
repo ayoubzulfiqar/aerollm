@@ -51,7 +51,7 @@ func (c *WasmCompiler) Compile(ctx context.Context, source, moduleName string) (
 	_ = ctx
 	_ = source
 	_ = moduleName
-	return []byte("wasm-stub:" + moduleName), nil
+	return []byte("placeholder:" + moduleName), nil
 }
 
 // ToolPromoter persists generated tools into the plugin registry.

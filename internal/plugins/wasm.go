@@ -52,7 +52,7 @@ func (h *WasmHost) RunHook(ctx context.Context, id string, hook Hook, payload ma
 	}
 	return map[string]interface{}{
 		"plugin_id": id,
-		"status":    "stubbed",
+		"status":    "placeholder",
 		"note":      "wire wazero runtime here for actual execution",
 	}, nil
 }

@@ -3,7 +3,7 @@ package universal
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"strings"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 )
@@ -46,9 +46,29 @@ func (n *StreamNormalizer) Normalize(provider string, data []byte) (AeroStreamCh
 	return chunk, nil
 }
 
-// HealthByIntent uses an empty context to classify intent in a simple heuristic.
+// HealthByIntent classifies the likely intent from an LLM request using a lightweight heuristic.
 func HealthByIntent(ctx context.Context, req *models.LLMRequest) (string, error) {
 	_ = ctx
-	_ = req
-	return "", fmt.Errorf("not implemented")
+	if req == nil || len(req.Messages) == 0 {
+		return "unknown", nil
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role == "tool" || len(last.ToolCalls) > 0 {
+		return "tool_use", nil
+	}
+	content := ""
+	if last.Content != nil {
+		content = *last.Content
+	}
+	lower := strings.ToLower(content)
+	switch {
+	case strings.Contains(lower, "code") || strings.Contains(lower, "function") || strings.Contains(lower, "implement"):
+		return "coding", nil
+	case strings.Contains(lower, "summarize") || strings.Contains(lower, "summary") || strings.Contains(lower, "tl;dr"):
+		return "summarization", nil
+	case strings.Contains(lower, "translate") || strings.Contains(lower, "language"):
+		return "translation", nil
+	default:
+		return "chat", nil
+	}
 }
