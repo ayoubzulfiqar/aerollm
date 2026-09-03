@@ -227,8 +227,8 @@ func TestFederatedAggregate(t *testing.T) {
 func TestFederatedVerify(t *testing.T) {
 	matrix := `{"Rows":1,"Cols":1,"Data":[1],"Owner":"e1"}`
 	output := captureOutput(t, []string{"federated", "verify", "-m", matrix, "-s", "abc"})
-	if !strings.Contains(output, "ok") {
-		t.Fatalf("unexpected output: %s", output)
+	if !strings.Contains(output, "error") {
+		t.Fatalf("expected signature verification error, got: %s", output)
 	}
 }
 

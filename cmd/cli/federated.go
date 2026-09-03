@@ -1,9 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/spf13/cobra"
@@ -79,10 +79,15 @@ func newFederatedVerifyCmd() *cobra.Command {
 				fmt.Println("error: " + err.Error())
 				return
 			}
-			agg := federated.NewFedAvgAggregator()
+			_, priv, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				fmt.Println("error: " + err.Error())
+				return
+			}
+			agg := federated.NewFedAvgAggregatorWithVerify(priv)
 			if err := agg.Verify(nil, &m, []byte(signature)); err != nil {
 				fmt.Println("error: " + err.Error())
-				os.Exit(1)
+				return
 			}
 			fmt.Println("ok")
 		},
