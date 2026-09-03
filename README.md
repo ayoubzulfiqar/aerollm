@@ -277,6 +277,21 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **SaaS Billing**: `internal/billing` adds `InMemoryProvider` + `StripeProvider` using `stripe-go/v80` `billing/meterevent`, plus `InvoiceGenerator` and CLI `aerollm billing generate`
 - **Server Billing Worker**: `cmd/server/main.go` starts a background invoice worker, using Stripe when `AEROLLM_STRIPE_SECRET_KEY` is set
 - **Open Standard Spec**: `internal/marketplace/openstandard.go` defines `CapabilityManifest` and `BillingReceipt` structures, with validation and canonical JSON; server + edge expose `/v1/marketplace/openstandard/capability` and `/v1/marketplace/openstandard/receipt`, plus edge self endpoints at `/v1/marketplace/openstandard/capability/self` and `/v1/marketplace/openstandard/receipt/self`
+- **Edge CLI**: `aerollm edge status/capability/receipt` commands interact with local edge-node endpoints; set `EDGE_LISTEN` if edge runs on a different host/port
+
+### Open Standard Examples
+
+```bash
+curl -X POST http://localhost:7910/v1/marketplace/openstandard/capability \
+  -H "Content-Type: application/json" \
+  -d '{"version":"1.0","hardware":{"has_local_gpu":true,"os":"linux","memory_gb":16},"billing":{"supports_metered":true,"currency":"USD"},"capabilities":["mesh","wasm"]}'
+```
+
+```bash
+curl -X POST http://localhost:7910/v1/marketplace/openstandard/receipt \
+  -H "Content-Type: application/json" \
+  -d '{"receipt_id":"r-1","customer_id":"c1","provider_id":"p1","event_name":"token","value":1,"currency":"USD"}'
+```
 
 ## FinOps
 

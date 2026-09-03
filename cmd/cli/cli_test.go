@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +80,78 @@ func TestGitOpsSync(t *testing.T) {
 func TestBillingGenerate(t *testing.T) {
 	output := captureOutput(t, []string{"billing", "generate"})
 	if !strings.Contains(output, "generated invoice") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+type testEdgeTransport struct {
+	base *http.ServeMux
+}
+
+func newTestEdgeTransport() *testEdgeTransport {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/marketplace/openstandard/capability/self", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"1.0"}`))
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("/v1/marketplace/openstandard/capability", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
+		var m map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil { http.Error(w, "invalid request", http.StatusBadRequest); return }
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(m)
+	})
+	mux.HandleFunc("/v1/marketplace/openstandard/receipt", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
+		var rec map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil { http.Error(w, "invalid request", http.StatusBadRequest); return }
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(rec)
+	})
+	return &testEdgeTransport{base: mux}
+}
+
+func (t *testEdgeTransport) Start() *httptest.Server { return httptest.NewServer(t.base) }
+
+func TestEdgeStatus(t *testing.T) {
+	transport := newTestEdgeTransport()
+	server := transport.Start()
+	defer server.Close()
+
+	_ = os.Setenv("EDGE_LISTEN", strings.TrimPrefix(server.URL, "http://"))
+	defer os.Unsetenv("EDGE_LISTEN")
+	output := captureOutput(t, []string{"edge", "status"})
+	if !strings.Contains(output, `"version":"1.0"`) {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestEdgeCapability(t *testing.T) {
+	transport := newTestEdgeTransport()
+	server := transport.Start()
+	defer server.Close()
+
+	_ = os.Setenv("EDGE_LISTEN", strings.TrimPrefix(server.URL, "http://"))
+	defer os.Unsetenv("EDGE_LISTEN")
+	output := captureOutput(t, []string{"edge", "capability"})
+	if !strings.Contains(output, `"version":"1.0"`) {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestEdgeReceipt(t *testing.T) {
+	transport := newTestEdgeTransport()
+	server := transport.Start()
+	defer server.Close()
+
+	_ = os.Setenv("EDGE_LISTEN", strings.TrimPrefix(server.URL, "http://"))
+	defer os.Unsetenv("EDGE_LISTEN")
+	output := captureOutput(t, []string{"edge", "receipt", "--customer", "c1", "--event", "token", "--value", "1"})
+	if !strings.Contains(output, `"event_name":"token"`) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }

@@ -17,6 +17,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newPluginCmd())
 	root.AddCommand(newGitOpsCmd())
 	root.AddCommand(newBillingCmd())
+	root.AddCommand(newEdgeCmd())
 
 	return root
 }
