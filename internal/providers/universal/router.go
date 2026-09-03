@@ -10,7 +10,8 @@ import (
 
 // LegacyProviderAdapter bridges a legacy providers.Provider into the universal registry.
 type LegacyProviderAdapter struct {
-	inner providers.Provider
+	inner      providers.Provider
+	StreamFunc func(ctx context.Context, req *models.LLMRequest) (<-chan AeroStreamChunk, error)
 }
 
 // NewLegacyProviderAdapter wraps a legacy provider.
@@ -33,8 +34,9 @@ func (a *LegacyProviderAdapter) ChatCompletions(ctx context.Context, req *models
 }
 
 func (a *LegacyProviderAdapter) Stream(ctx context.Context, req *models.LLMRequest) (<-chan AeroStreamChunk, error) {
-	_ = ctx
-	_ = req
+	if a.StreamFunc != nil {
+		return a.StreamFunc(ctx, req)
+	}
 	ch := make(chan AeroStreamChunk)
 	close(ch)
 	return ch, fmt.Errorf("stream not implemented for legacy adapter %s", a.inner.Name())
