@@ -288,6 +288,27 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Federated Learning**: `internal/federated` adds `FedAvgAggregator` for secure LoRA weight averaging, invalid-update skipping, and Inf/NaN clamping; `internal/learning` wires federated aggregation into the trainer
 - **Integration Points**: PQC key management is additive to existing `internal/ledger` and `internal/marketplace` flows; spatial middleware can wrap existing provider handlers without changing upstream routing
 
+### Phase 11 Server Routes
+
+```bash
+# List supported PQC algorithms
+curl http://localhost:8080/v1/pqc/keys
+```
+
+```bash
+# Parse spatial anchors from JSON payload
+curl -X POST http://localhost:8080/v1/spatial/parse \
+  -H "Content-Type: application/json" \
+  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
+```
+
+```bash
+# Evaluate autoscale deficit
+curl -X POST http://localhost:8080/v1/autoscale/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{"deficit":0.6}'
+```
+
 ### Open Standard Examples
 
 ```bash
