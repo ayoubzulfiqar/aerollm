@@ -93,6 +93,8 @@ func RecordRequestResponse(store LedgerStore, prevHash, requestPayload, response
 		ResponseHash: hex.EncodeToString(respHashBytes[:]),
 		ChainHash:    chainHash,
 		Metadata:     metadata,
+		RequestPayload:  requestPayload,
+		ResponsePayload: responsePayload,
 	}
 	if err := store.Append(nil, record); err != nil {
 		return "", err

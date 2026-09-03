@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
+	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
@@ -43,6 +44,7 @@ type Handler struct {
 		Append(ctx context.Context, record ledger.LedgerRecord) error
 		Latest(ctx context.Context) (*ledger.LedgerRecord, error)
 	}
+	UsageSink chan<- billing.MeterEntry
 }
 
 // NewHandler creates a new Handler with dependency injection.

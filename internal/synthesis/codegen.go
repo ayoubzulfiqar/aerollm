@@ -27,7 +27,7 @@ func NewLLMCodeGenerator(model, baseURL string) *LLMCodeGenerator {
 	return &LLMCodeGenerator{model: model, baseURL: baseURL}
 }
 
-// Generate emits a Go tool implementation stub from a description.
+// Generate emits a Go tool implementation from a description.
 func (g *LLMCodeGenerator) Generate(ctx context.Context, description string) (string, error) {
 	_ = ctx
 	if description == "" {
