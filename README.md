@@ -278,6 +278,7 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Server Billing Worker**: `cmd/server/main.go` starts a background invoice worker, using Stripe when `AEROLLM_STRIPE_SECRET_KEY` is set
 - **Open Standard Spec**: `internal/marketplace/openstandard.go` defines `CapabilityManifest` and `BillingReceipt` structures, with validation and canonical JSON; server + edge expose `/v1/marketplace/openstandard/capability` and `/v1/marketplace/openstandard/receipt`, plus edge self endpoints at `/v1/marketplace/openstandard/capability/self` and `/v1/marketplace/openstandard/receipt/self`
 - **Edge CLI**: `aerollm edge status/capability/receipt` commands interact with local edge-node endpoints; set `EDGE_LISTEN` if edge runs on a different host/port
+- **Edge Phase 11 CLI**: `aerollm edge pqc handshake`, `aerollm edge spatial stream --anchor ...`, and `aerollm edge federated aggregate --input ...` expose PQC, spatial, and federated workflows from the local edge companion
 
 ### Phase 11: The Spatial Reality, Autonomous Cloud & Post-Quantum Fabric
 - **Spatial Reality Fabric**: `internal/spatial` adds chunked video/3D streaming via zero-buffer HTTP chunk writers, plus a WebXR spatial translator that scans LLM outputs for spatial anchors and converts them into standardized AR/VR payloads

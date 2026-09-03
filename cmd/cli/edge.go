@@ -18,6 +18,9 @@ func newEdgeCmd() *cobra.Command {
 	cmd.AddCommand(newEdgeStatusCmd())
 	cmd.AddCommand(newEdgeCapabilityCmd())
 	cmd.AddCommand(newEdgeReceiptCmd())
+	cmd.AddCommand(newEdgePqcCmd())
+	cmd.AddCommand(newEdgeSpatialCmd())
+	cmd.AddCommand(newEdgeFederatedCmd())
 	return cmd
 }
 
