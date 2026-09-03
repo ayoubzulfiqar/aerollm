@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 )
@@ -22,25 +23,35 @@ type FineTuneJob struct {
 	UpdatedAt time.Time
 }
 
-// Trainer orchestrates dataset export and fine-tuning jobs.
+// Trainer orchestrates dataset export, fine-tuning jobs, and federated aggregation.
 type Trainer struct {
-	mu       sync.Mutex
-	jobs     map[string]FineTuneJob
-	exporter *flywheel.DatasetExporter
-	ledger   ledger.LedgerStore
-	outputDir string
+	mu         sync.Mutex
+	jobs       map[string]FineTuneJob
+	exporter   *flywheel.DatasetExporter
+	ledger     ledger.LedgerStore
+	outputDir  string
+	aggregator federated.FederatedAggregator
 }
 
-// NewTrainer creates a new trainer.
+// NewTrainer creates a new trainer with a default FedAvg aggregator.
 func NewTrainer(exporter *flywheel.DatasetExporter, ledgerStore ledger.LedgerStore, outputDir string) *Trainer {
+	return NewTrainerWithAggregator(exporter, ledgerStore, outputDir, federated.NewFedAvgAggregator())
+}
+
+// NewTrainerWithAggregator creates a new trainer with a custom federated aggregator.
+func NewTrainerWithAggregator(exporter *flywheel.DatasetExporter, ledgerStore ledger.LedgerStore, outputDir string, aggregator federated.FederatedAggregator) *Trainer {
 	if outputDir == "" {
 		outputDir = "./fine-tune-jobs"
 	}
+	if aggregator == nil {
+		aggregator = federated.NewFedAvgAggregator()
+	}
 	return &Trainer{
-		jobs:     make(map[string]FineTuneJob),
-		exporter: exporter,
-		ledger:   ledgerStore,
-		outputDir: outputDir,
+		jobs:       make(map[string]FineTuneJob),
+		exporter:   exporter,
+		ledger:     ledgerStore,
+		outputDir:  outputDir,
+		aggregator: aggregator,
 	}
 }
 
@@ -105,4 +116,12 @@ func (t *Trainer) WriteDataset(ctx context.Context, minRating, filename string) 
 		return "", err
 	}
 	return path, nil
+}
+
+// FederatedAggregate aggregates LoRA updates using the configured aggregator.
+func (t *Trainer) FederatedAggregate(ctx context.Context, updates []*federated.LoRAMatrix) (*federated.LoRAMatrix, error) {
+	if t == nil || t.aggregator == nil {
+		return nil, fmt.Errorf("aggregator not configured")
+	}
+	return t.aggregator.Aggregate(ctx, updates)
 }

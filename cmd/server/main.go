@@ -13,9 +13,11 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/api"
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/aiops"
+	"github.com/ayoubzulfiqar/aerollm/internal/autoscale"
 	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
+	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/internal/genui"
@@ -28,9 +30,11 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
+	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
 	"github.com/ayoubzulfiqar/aerollm/internal/evolution"
 	"github.com/ayoubzulfiqar/aerollm/internal/learning"
 	"github.com/ayoubzulfiqar/aerollm/internal/swarm"
@@ -231,6 +235,34 @@ func main() {
 	mux.Handle("/mcp", mcpServer)
 
 	mux.HandleFunc("/ws", realtime.ServeWS(realtime.NewHub(), &realtimeProvider{}))
+
+	_ = pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
+	_ = spatial.NewVideo3DStreamHandler()
+	mux.HandleFunc("/v1/pqc/keys", func(w http.ResponseWriter, r *http.Request) {
+		_ = w
+		_ = r
+		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+	})
+
+	mux.HandleFunc("/v1/spatial/parse", func(w http.ResponseWriter, r *http.Request) {
+		_ = w
+		_ = r
+		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+	})
+
+	awsProvisioner := autoscale.NewAWSProvisioner()
+	_ = awsProvisioner
+	gcpProvisioner := autoscale.NewGCPProvisioner()
+	_ = gcpProvisioner
+	_ = autoscale.NewMetaAgentInfraLoop(awsProvisioner, 0.2)
+
+	mux.HandleFunc("/v1/autoscale/evaluate", func(w http.ResponseWriter, r *http.Request) {
+		_ = w
+		_ = r
+		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+	})
+
+	_ = federated.NewFedAvgAggregator()
 
 	stateStore, _ := state.OpenBboltStateStore(getenvOrDefault("AEROLLM_STATE_DIR", "./aerollm-state"))
 	_ = stateStore
