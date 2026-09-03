@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.19.0
 	go.etcd.io/bbolt v1.3.8
 	go.opentelemetry.io/otel v1.46.0
@@ -32,8 +33,8 @@ require (
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/spf13/cast v1.6.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/stripe/stripe-go/v80 v80.2.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.46.0 // indirect
