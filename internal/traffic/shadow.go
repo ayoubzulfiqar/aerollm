@@ -4,13 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/ayoubzulfiqar/aerollm/internal/models"
-	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 )
 
 // ShadowConfig holds shadow testing configuration.
@@ -38,23 +34,36 @@ func NewShadowTester() *ShadowTester {
 }
 
 // RunAsync sends the same payload to a shadow provider asynchronously.
-func (s *ShadowTester) RunAsync(ctx context.Context, shadowURL, apiKey string, req *models.LLMRequest) {
+func (s *ShadowTester) RunAsync(ctx context.Context, shadowURL, apiKey string, req interface{}) error {
+	var (
+		latency time.Duration
+		err     error
+	)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		start := time.Now()
 		body, _ := json.Marshal(req)
 		httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, shadowURL+"/v1/chat/completions", bytes.NewReader(body))
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := s.client.Do(httpReq)
-		latency := time.Since(start)
+		resp, e := s.client.Do(httpReq)
+		latency = time.Since(start)
 		if resp != nil {
 			resp.Body.Close()
 		}
-
-		result := ShadowResult{Provider: shadowURL, Latency: latency, Error: err}
-		telemetry.RecordError()
-		_ = result
-		fmt.Printf("shadow test completed: provider=%s latency=%s error=%v\n", shadowURL, latency, err)
+		err = e
 	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	result := ShadowResult{Provider: shadowURL, Latency: latency, Error: err}
+	s.mu.Lock()
+	_ = result
+	s.mu.Unlock()
+	return err
 }
