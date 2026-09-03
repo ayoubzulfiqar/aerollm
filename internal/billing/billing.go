@@ -51,6 +51,14 @@ func (p *InMemoryProvider) SyncMeter(_ context.Context, entries []MeterEntry) er
 	return nil
 }
 
+// AppendMeter adds metering entries to the in-memory provider.
+func (p *InMemoryProvider) AppendMeter(_ context.Context, entries ...MeterEntry) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.entries = append(p.entries, entries...)
+	return nil
+}
+
 // Snapshot returns a copy of recorded meter entries.
 func (p *InMemoryProvider) Snapshot() []MeterEntry {
 	p.mu.RLock()

@@ -133,6 +133,19 @@ func main() {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	})
 
+	mux.HandleFunc("/v1/edge/capabilities", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"peer_id": string(peerID),
+			"hardware": hardware.AdvertisedCapabilities(caps),
+			"wallet": func() string {
+				b, _ := wallet.Balance(ctx)
+				return fmt.Sprintf("%.2f", b)
+			}(),
+		})
+	})
+
 	addr := ":7910"
 	if env := strings.TrimSpace(os.Getenv("EDGE_LISTEN")); env != "" { addr = env }
 	go func() {
