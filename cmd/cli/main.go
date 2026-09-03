@@ -19,6 +19,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newBillingCmd())
 	root.AddCommand(newEdgeCmd())
 	root.AddCommand(newOpenStandardCmd())
+	root.AddCommand(newPqcCmd())
+	root.AddCommand(newSpatialCmd())
 
 	return root
 }
