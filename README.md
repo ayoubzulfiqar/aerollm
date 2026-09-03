@@ -279,6 +279,11 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Open Standard Spec**: `internal/marketplace/openstandard.go` defines `CapabilityManifest` and `BillingReceipt` structures, with validation and canonical JSON; server + edge expose `/v1/marketplace/openstandard/capability` and `/v1/marketplace/openstandard/receipt`, plus edge self endpoints at `/v1/marketplace/openstandard/capability/self` and `/v1/marketplace/openstandard/receipt/self`
 - **Edge CLI**: `aerollm edge status/capability/receipt` commands interact with local edge-node endpoints; set `EDGE_LISTEN` if edge runs on a different host/port
 
+### Phase 11: The Spatial Reality, Autonomous Cloud & Post-Quantum Fabric
+- **Spatial Reality Fabric**: `internal/spatial` adds chunked video/3D streaming via zero-buffer HTTP chunk writers, plus a WebXR spatial translator that scans LLM outputs for spatial anchors and converts them into standardized AR/VR payloads
+- **Post-Quantum Cryptography**: `internal/pqc` adds `QuantumSafeKeyManager` with ML-KEM-768 encapsulation and ML-DSA-65 signatures, plus hybrid Ed25519/ML-DSA fallback for mesh peer attestation; includes stream encryptors for secure weight/channel transport
+- **Integration Points**: PQC key management is additive to existing `internal/ledger` and `internal/marketplace` flows; spatial middleware can wrap existing provider handlers without changing upstream routing
+
 ### Open Standard Examples
 
 ```bash
