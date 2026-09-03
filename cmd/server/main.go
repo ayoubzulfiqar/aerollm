@@ -42,6 +42,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/swarm"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
+	"github.com/ayoubzulfiqar/aerollm/internal/trace"
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/studio"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
@@ -140,6 +141,8 @@ func main() {
 	}
 	tp.Start()
 
+	traceProvider := trace.NewProvider(trace.Config{ServiceName: "aerollm"})
+
 	redisClient, err := NewRedisClient(ctx, "localhost:6379")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "redis init error: %v\n", err)
@@ -200,6 +203,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthCheck)
 	mux.HandleFunc("/ready", handler.ReadyCheck)
+	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 
 	graphStore := graphrag.NewBboltGraphStore()
 	_ = graphStore
