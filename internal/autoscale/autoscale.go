@@ -31,7 +31,7 @@ type InfraProvisioner interface {
 	List(ctx context.Context) ([]Node, error)
 }
 
-// AWSProvisioner is a stub AWS provisioner.
+// AWSProvisioner is a lightweight AWS provisioner implementation.
 type AWSProvisioner struct{}
 
 // NewAWSProvisioner creates a new AWS provisioner.
