@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -239,15 +241,25 @@ func main() {
 	_ = pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
 	_ = spatial.NewVideo3DStreamHandler()
 	mux.HandleFunc("/v1/pqc/keys", func(w http.ResponseWriter, r *http.Request) {
-		_ = w
 		_ = r
-		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"algorithms":["hybrid-ed25519-mldsa65","mlkem-768","mldsa-65"]}`))
 	})
 
 	mux.HandleFunc("/v1/spatial/parse", func(w http.ResponseWriter, r *http.Request) {
-		_ = w
-		_ = r
-		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, `{"error":"read failed"}`, http.StatusBadRequest)
+			return
+		}
+		anchors := spatial.ParseSpatialAnchors(string(b))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(anchors)
 	})
 
 	awsProvisioner := autoscale.NewAWSProvisioner()
@@ -262,7 +274,7 @@ func main() {
 		http.Error(w, `{"error":"not implemented"}`, http.StatusNotImplemented)
 	})
 
-	_ = federated.NewFedAvgAggregator()
+	fedAgg := federated.NewFedAvgAggregator()
 
 	stateStore, _ := state.OpenBboltStateStore(getenvOrDefault("AEROLLM_STATE_DIR", "./aerollm-state"))
 	_ = stateStore
@@ -271,7 +283,7 @@ func main() {
 	}()
 
 	_ = swarm.NewSwarmOrchestrator(stateStore, registry)
-	_ = learning.NewTrainer(&flywheel.DatasetExporter{Ledger: ledgerStore}, ledgerStore, getenvOrDefault("AEROLLM_LEARNING_DIR", "./fine-tune-jobs"))
+	_ = learning.NewTrainerWithAggregator(&flywheel.DatasetExporter{Ledger: ledgerStore}, ledgerStore, getenvOrDefault("AEROLLM_LEARNING_DIR", "./fine-tune-jobs"), fedAgg)
 	engine := evolution.NewEngine(evolution.DefaultConfig())
 	go engine.Start(ctx)
 
