@@ -297,6 +297,26 @@ func main() {
 
 	fedAgg := federated.NewFedAvgAggregator()
 
+	mux.HandleFunc("/v1/federated/aggregate", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var updates []*federated.LoRAMatrix
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		out, err := fedAgg.Aggregate(r.Context(), updates)
+		if err != nil {
+			http.Error(w, `{"error":"aggregate failed"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+
 	stateStore, _ := state.OpenBboltStateStore(getenvOrDefault("AEROLLM_STATE_DIR", "./aerollm-state"))
 	_ = stateStore
 	go func() {

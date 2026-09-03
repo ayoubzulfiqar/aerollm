@@ -208,3 +208,26 @@ func TestSpatialParse(t *testing.T) {
 		t.Fatalf("expected WebXR translation output, got: %s", output)
 	}
 }
+
+func TestFederatedList(t *testing.T) {
+	output := captureOutput(t, []string{"federated", "list"})
+	if !strings.Contains(output, "fedavg") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestFederatedAggregate(t *testing.T) {
+	updates := `[{"Rows":1,"Cols":2,"Data":[1,2],"Owner":"e1"},{"Rows":1,"Cols":2,"Data":[3,4],"Owner":"e2"}]`
+	output := captureOutput(t, []string{"federated", "aggregate", "-i", updates})
+	if !strings.Contains(output, "aggregated") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestFederatedVerify(t *testing.T) {
+	matrix := `{"Rows":1,"Cols":1,"Data":[1],"Owner":"e1"}`
+	output := captureOutput(t, []string{"federated", "verify", "-m", matrix, "-s", "abc"})
+	if !strings.Contains(output, "ok") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}

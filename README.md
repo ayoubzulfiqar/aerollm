@@ -323,6 +323,13 @@ curl -X POST http://localhost:7910/v1/marketplace/openstandard/receipt \
   -d '{"receipt_id":"r-1","customer_id":"c1","provider_id":"p1","event_name":"token","value":1,"currency":"USD"}'
 ```
 
+```bash
+# Aggregate federated LoRA updates
+curl -X POST http://localhost:8080/v1/federated/aggregate \
+  -H "Content-Type: application/json" \
+  -d '[{"Rows":1,"Cols":2,"Data":[1,2],"Owner":"e1"},{"Rows":1,"Cols":2,"Data":[3,4],"Owner":"e2"}]'
+```
+
 ## FinOps
 
 - Budget checks happen before routing.
