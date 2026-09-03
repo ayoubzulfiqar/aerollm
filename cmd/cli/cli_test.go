@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 )
 
 func captureOutput(t *testing.T, args []string) string {
@@ -154,4 +159,35 @@ func TestEdgeReceipt(t *testing.T) {
 	if !strings.Contains(output, `"event_name":"token"`) {
 		t.Fatalf("unexpected output: %s", output)
 	}
+}
+
+func TestOpenStandardCapability(t *testing.T) {
+	cmd := newOpenStandardCmd()
+	_, _, _ = cmd.Find([]string{"capability"})
+}
+
+func TestServerBillingWorkerEmitsUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping short-mode ticker test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		provider := billing.NewInMemoryProvider()
+		gen := billing.NewInvoiceGenerator(provider)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_, _ = gen.Generate(ctx, []billing.MeterEntry{{CustomerID: "worker", EventName: "token", Value: 1}})
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
