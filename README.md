@@ -271,6 +271,12 @@ Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin
 - **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
 - **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events; chat responses now opt into GenUI when requested
 
+### Phase 10: The Edge Companion, Hardware Fabric & Open Standard
+- **Edge Companion**: `cmd/edge-node` is a local-first binary using bbolt for offline state, in-memory mesh discovery/transport, hardware detection, wallet initialization, and WASM sandbox execution
+- **Hardware Routing**: `internal/hardware` adds silicon detection for CUDA/Metal/ROCm/Vulkan/Ollama/CPU and `HardwareAwareSelector` for privacy-first/cost-zero routing
+- **SaaS Billing**: `internal/billing` adds `InMemoryProvider` + `StripeProvider` using `stripe-go/v80` `billing/meterevent`, plus `InvoiceGenerator` and CLI `aerollm billing generate`
+- **Server Billing Worker**: `cmd/server/main.go` starts a background invoice worker, using Stripe when `AEROLLM_STRIPE_SECRET_KEY` is set
+
 ## FinOps
 
 - Budget checks happen before routing.

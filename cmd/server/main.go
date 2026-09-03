@@ -13,6 +13,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/api"
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/aiops"
+	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
@@ -268,6 +269,22 @@ func main() {
 		Timeout: 2 * time.Second,
 	})
 	_ = royaltyRecorder
+
+	var invoiceProvider billing.Provider = billing.NewInMemoryProvider()
+	if k := os.Getenv("AEROLLM_STRIPE_SECRET_KEY"); k != "" {
+		invoiceProvider = billing.NewStripeProvider(k)
+	}
+	invoiceGen := billing.NewInvoiceGenerator(invoiceProvider)
+	_ = invoiceGen
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			_, _ = invoiceGen.Generate(ctx, []billing.MeterEntry{
+				{CustomerID: "acme", EventName: "token", Value: 100},
+			})
+		}
+	}()
 
 	tuner := aiops.NewMetaAgentTuner(aiops.NewDefaultMetricsSource(telemetry.RequestCount, telemetry.ErrorCount, func() float64 { return telemetry.AvgLatency() }), 30*time.Second, 5*time.Minute)
 	go tuner.Run(ctx)

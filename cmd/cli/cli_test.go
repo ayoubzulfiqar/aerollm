@@ -73,3 +73,10 @@ func TestGitOpsSync(t *testing.T) {
 		t.Fatalf("unexpected output: %s", output)
 	}
 }
+
+func TestBillingGenerate(t *testing.T) {
+	output := captureOutput(t, []string{"billing", "generate"})
+	if !strings.Contains(output, "generated invoice") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
