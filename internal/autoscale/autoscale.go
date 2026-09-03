@@ -145,6 +145,56 @@ func (l *MetaAgentInfraLoop) Evaluate(ctx context.Context, deficit float64) (*No
 	return l.provisioner.ProvisionGPU(ctx, NodeSpec{InstanceType: "A100", GPUCount: 1, Region: "us-east-1"})
 }
 
+// NewServerMetaAgentLoop creates a loop with AWS primary and GCP fallback.
+func NewServerMetaAgentLoop() *MetaAgentInfraLoop {
+	aws := NewAWSProvisioner()
+	gcp := NewGCPProvisioner()
+	return &MetaAgentInfraLoop{
+		provisioner: &failoverProvisioner{primary: aws, fallback: gcp},
+		threshold:   0.2,
+	}
+}
+
+type failoverProvisioner struct {
+	primary   InfraProvisioner
+	fallback  InfraProvisioner
+	usedFallback bool
+}
+
+func (f *failoverProvisioner) ProvisionGPU(ctx context.Context, spec NodeSpec) (*Node, error) {
+	if f.primary != nil {
+		n, err := f.primary.ProvisionGPU(ctx, spec)
+		if err == nil && n != nil {
+			return n, nil
+		}
+	}
+	f.usedFallback = true
+	if f.fallback != nil {
+		return f.fallback.ProvisionGPU(ctx, spec)
+	}
+	return nil, fmt.Errorf("no provisioner available")
+}
+
+func (f *failoverProvisioner) Terminate(ctx context.Context, nodeID string) error {
+	if !f.usedFallback && f.primary != nil {
+		return f.primary.Terminate(ctx, nodeID)
+	}
+	if f.fallback != nil {
+		return f.fallback.Terminate(ctx, nodeID)
+	}
+	return nil
+}
+
+func (f *failoverProvisioner) List(ctx context.Context) ([]Node, error) {
+	if !f.usedFallback && f.primary != nil {
+		return f.primary.List(ctx)
+	}
+	if f.fallback != nil {
+		return f.fallback.List(ctx)
+	}
+	return nil, nil
+}
+
 func timeNow() int64 {
 	return time.Now().Unix()
 }

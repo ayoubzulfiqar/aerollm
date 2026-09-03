@@ -266,7 +266,7 @@ func main() {
 	_ = awsProvisioner
 	gcpProvisioner := autoscale.NewGCPProvisioner()
 	_ = gcpProvisioner
-	_ = autoscale.NewMetaAgentInfraLoop(awsProvisioner, 0.2)
+	infraLoop := autoscale.NewServerMetaAgentLoop()
 
 	mux.HandleFunc("/v1/autoscale/evaluate", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
@@ -281,7 +281,7 @@ func main() {
 			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 			return
 		}
-		node, err := awsProvisioner.ProvisionGPU(r.Context(), autoscale.NodeSpec{InstanceType: "A100", GPUCount: 1, Region: "us-east-1"})
+		node, err := infraLoop.Evaluate(r.Context(), req.Deficit)
 		if err != nil {
 			http.Error(w, `{"error":"provision failed"}`, http.StatusInternalServerError)
 			return
