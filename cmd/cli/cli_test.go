@@ -36,7 +36,9 @@ func captureOutput(t *testing.T, args []string) string {
 func TestInitCmd(t *testing.T) {
 	dir := t.TempDir()
 	absDir, _ := filepath.Abs(dir)
+	oldWd, _ := os.Getwd()
 	_ = os.Chdir(absDir)
+	defer os.Chdir(oldWd)
 	output := captureOutput(t, []string{"init", "--dir", absDir})
 	if !strings.Contains(output, "created config.yaml, docker-compose.yml, and plugin.go") {
 		t.Fatalf("unexpected output: %s", output)
