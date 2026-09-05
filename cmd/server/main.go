@@ -46,6 +46,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/studio"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
+	"github.com/ayoubzulfiqar/aerollm/internal/tenant"
 	"github.com/ayoubzulfiqar/aerollm/internal/backpressure"
 	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
 	"github.com/ayoubzulfiqar/aerollm/internal/slo"
@@ -239,6 +240,25 @@ func main() {
 	})
 	mux.HandleFunc("/v1/slo/budget", slo.Handler(slo.NewErrorBudget(100), "latency"))
 	mux.HandleFunc("/backpressure/status", backpressureController.Handler())
+	mux.HandleFunc("/v1/quota", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req tenant.Quota
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		store := tenant.NewInMemoryQuotaStore()
+		if _, err := store.Enforce(r.Context(), &req, 0); err != nil {
+			http.Error(w, `{"error":"quota not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(req)
+	})
 	mux.HandleFunc("/v1/chaos/fault", chaos.Handler(chaos.NewInjector(chaos.Config{})))
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 

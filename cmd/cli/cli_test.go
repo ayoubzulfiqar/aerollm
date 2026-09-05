@@ -284,6 +284,13 @@ func TestBackpressureOutput(t *testing.T) {
 	}
 }
 
+func TestQuotaOutput(t *testing.T) {
+	output := captureOutput(t, []string{"quota"})
+	if !strings.Contains(output, "Limit") {
+		t.Fatalf("expected quota output, got: %s", output)
+	}
+}
+
 func TestTrafficShadowOutput(t *testing.T) {
 	output := captureOutput(t, []string{"traffic", "shadow"})
 	if !strings.Contains(output, "shadow") {
