@@ -786,3 +786,27 @@ aerollm notification --resource channel
 aerollm notification --resource subscription
 ```
 
+
+## Phase 29: Scheduled Tasks & Automation
+
+Automation scheduling for operational tasks.
+
+- `ScheduledTask` captures `ID`, `Name`, `Type`, `Schedule`, `Payload`, `Status`, timestamps
+- `TaskType` supports cron, interval, and onetime tasks
+- `TaskStatus` tracks pending/running/completed/failed
+- `Store` manages tasks with CRUD operations
+- `/v1/schedule` accepts POST for create, GET for listing, PUT for status update
+
+```bash
+curl -X POST http://localhost:8080/v1/schedule -H 'content-type: application/json' -d '{"name":"backup","type":"cron","schedule":"0 0 * * *","payload":"{}"}'
+curl http://localhost:8080/v1/schedule
+curl -X PUT "http://localhost:8080/v1/schedule?id=task_123" -H 'content-type: application/json' -d '{"status":"running"}'
+```
+
+CLI:
+
+```bash
+aerollm schedule --name "backup" --schedule "0 0 * * *"
+aerollm schedule
+```
+

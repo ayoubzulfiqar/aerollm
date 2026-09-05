@@ -39,6 +39,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newRetentionCmd())
 	root.AddCommand(newIncidentCmd())
 	root.AddCommand(newNotificationCmd())
+	root.AddCommand(newScheduleCmd())
 
 	return root
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/retention"
+	"github.com/ayoubzulfiqar/aerollm/internal/schedule"
 	"github.com/ayoubzulfiqar/aerollm/internal/incident"
 	"github.com/ayoubzulfiqar/aerollm/internal/notification"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
@@ -268,6 +269,8 @@ func main() {
 	notificationStore := notification.NewStore()
 	mux.HandleFunc("/v1/notification/channels", notification.WebhookHandler(notificationStore))
 	mux.HandleFunc("/v1/notification/subscriptions", notification.WebhookHandler(notificationStore))
+	scheduleStore := schedule.NewStore()
+	mux.HandleFunc("/v1/schedule", schedule.WebhookHandler(scheduleStore))
 	mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
