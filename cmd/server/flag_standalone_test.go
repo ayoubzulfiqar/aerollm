@@ -23,7 +23,7 @@ func TestFeatureFlags(t *testing.T) {
 		wantCode int
 	}{
 		{"create flag", http.MethodPost, "/v1/flags/darkmode", `{"key":"darkmode","enabled":true,"strategy":"global"}`, http.StatusOK},
-		{"get flag", http.MethodGet, "/v1/flags/darkmode", "", http.StatusOK},
+		{"get flag query", http.MethodGet, "/v1/flags/?key=darkmode", "", http.StatusOK},
 		{"list flags", http.MethodGet, "/v1/flags", "", http.StatusOK},
 	}
 
@@ -38,7 +38,7 @@ func TestFeatureFlags(t *testing.T) {
 			if rec.Code != tc.wantCode {
 				t.Fatalf("expected %d, got %d: %s", tc.wantCode, rec.Code, rec.Body.String())
 			}
-			if tc.name == "get flag" && !strings.Contains(rec.Body.String(), `"enabled":true`) {
+			if tc.name == "get flag query" && !strings.Contains(rec.Body.String(), `"enabled":true`) {
 				t.Fatalf("expected enabled true in body, got: %s", rec.Body.String())
 			}
 		})

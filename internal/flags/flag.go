@@ -160,8 +160,11 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(f)
 		case http.MethodGet:
-			key := strings.TrimPrefix(r.URL.Path, "/v1/flags/")
-			key = strings.TrimPrefix(key, "/v1/flags")
+			key := r.URL.Query().Get("key")
+			if key == "" {
+				key = strings.TrimPrefix(r.URL.Path, "/v1/flags/")
+				key = strings.TrimPrefix(key, "/v1/flags")
+			}
 			if key == "" || key == "/" {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(store.List())
