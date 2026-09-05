@@ -4,27 +4,25 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 
 ## Features
 
-### Core Features
-- **Multi-Provider Routing**: Route requests to OpenAI, Anthropic, or local providers
-- **Intelligent Routing Strategies**: Round-robin, latency-based, cost-based, and fallback routing
-- **Circuit Breaker**: Automatic failover with circuit breaker pattern
+### Core
+- **Multi-Provider Routing**: OpenAI, Anthropic, Google Gemini, AWS Bedrock, Azure OpenAI, Groq, Cohere, DeepSeek, and OpenAI-compatible providers
+- **Routing Strategies**: Round-robin, latency-based, cost-based, fallback, and circuit breaker
 - **Agentic Tool Execution**: Built-in agent engine for tool use and multi-step reasoning
-- **Redis Caching**: Exact-match and semantic caching for responses
+- **Caching**: Exact-match and semantic caching with Redis
 - **Rate Limiting**: Token bucket-based rate limiting per API key
-- **OpenTelemetry**: Distributed tracing with OTLP exporter support
+- **Observability**: OpenTelemetry distributed tracing with OTLP exporter
 - **Structured Logging**: JSON-formatted structured logging
 - **Graceful Shutdown**: Proper signal handling and resource cleanup
 
-### Enterprise Extensions
+### Enterprise & Security
 - **Guardrails**: PII redaction, prompt injection shield, API key scoping
-- **FinOps**: Per-model cost tracking, budget enforcement, and `budget_exceeded` webhooks
-- **Advanced Agent**: HITL approval flows with Redis-backed state and `POST /v1/agents/approvals/{id}`
+- **FinOps**: Per-model cost tracking, budget enforcement, and webhook alerts
+- **HITL Approvals**: Human-in-the-loop approval flows with Redis-backed state
 - **Memory**: Short-term message memory plus long-term vector memory interfaces
 - **Shadow Traffic**: Async shadow routing for provider comparison
-- **Webhook Dispatcher**: Async retry-capable webhook delivery with exponential backoff
-- **Advanced Agent Loop**: Hookable execution loop with retry, deficit detection, and tool error recovery
+- **Webhooks**: Async retry-capable webhook delivery with exponential backoff
 
-### Phase 3: Autonomous AI Control Plane
+### Advanced
 - **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
 - **MCP Hub**: Native Model Context Protocol server for external tool integration
 - **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
@@ -32,28 +30,29 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **GitOps**: Git-backed prompt template versioning and delivery
 - **Immutable Ledger**: Cryptographic audit chain for request/response integrity
 - **WASM Sandbox**: Zero-trust isolated tool execution runtime
-
-### Phase 4: AI-Native Edge Fabric & Data Flywheel
-- **Realtime WebSocket**: Bidirectional streaming via `/ws`
-  - Text control: `{"type":"ping"}` -> `{"event":"pong"}`, `{"type":"barge-in"}` or `{"action":"cancel"}` cancels generation and returns `{"event":"barge-in"}`
-  - Binary frames: non-empty binary WebSocket messages are treated as barge-in/cancel by default
-- **Barge-in/VAD**: Cancel provider generation on user voice activity or explicit cancel event
+- **Realtime**: Bidirectional WebSocket streaming with barge-in support
 - **Multimodal**: Audio/image preprocessing with transcription/vision hooks
-- **Kubernetes Operator**: Control-plane reconciliation via `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
-- **Flywheel**: Feedback ingestion (`POST /v1/feedback`), dataset export, and fine-tuning pipeline
-
-### Phase 5: Cognitive OS & Decentralized Action Fabric
-- **Embedded State Store**: bbolt-backed KV with flat vector index for zero-latency agent memory
-- **Dynamic Agent Swarms**: Sub-agent spawning with shared hive-mind context and lifecycle orchestration
-- **Red-Teaming & Self-Healing**: Adversarial prompt generation from the ledger, automatic guardrail patch proposal and local patch emission
-
-### Phase 6: The Definitive AI Platform
-- **Universal Protocol Fabric**: Dynamic provider registry with adapters for Google Gemini, AWS Bedrock, Azure OpenAI, Groq, Cohere, DeepSeek, plus OpenAI-compatible stream normalization
-- **Adaptive Intelligence**: Heuristic intent classifier, auto model selector, and multi-armed bandit router with Thompson Sampling
-- **Multi-Tenant SaaS Core**: Hierarchical tenant model, tenant middleware, and tenant-scoped service wrappers
-- **Plugin Ecosystem**: WASM-compatible plugin interface with lifecycle hooks, in-memory registry, and plugin host
-- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner for quality assurance
-- **Compliance-as-Code**: OPA-backed policy engine with HTTP 451 enforcement middleware
+- **Kubernetes Operator**: Control-plane reconciliation for routes, budgets, and agent pipelines
+- **Flywheel**: Feedback ingestion, dataset export, and fine-tuning pipeline
+- **Embedded State**: bbolt-backed KV with flat vector index for zero-latency agent memory
+- **Agent Swarms**: Dynamic sub-agent spawning with shared hive-mind context
+- **Red-Teaming**: Adversarial prompt generation and self-healing patch proposal
+- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner
+- **Compliance-as-Code**: Policy engine with HTTP 451 enforcement
+- **Multi-Tenant**: Hierarchical tenant model with tenant-scoped service wrappers
+- **Plugins**: WASM-compatible plugin interface with lifecycle hooks and registry
+- **Marketplace**: Signed manifest verification, registry client, micro-royalty tracking
+- **Post-Quantum Crypto**: ML-KEM/ML-DSA hybrid key management and stream encryptors
+- **Spatial Fabric**: Chunked video/3D streaming and WebXR spatial translation
+- **Federated Learning**: FedAvg aggregation for secure LoRA weight averaging
+- **Edge Companion**: Local-first binary with bbolt, hardware detection, and WASM sandbox
+- **Policy Engine**: HTTP policy evaluation with rule-based access control
+- **Data Retention**: TTL and max-items retention policies
+- **Incident Management**: Incident lifecycle with severity and status tracking
+- **Notifications**: Multi-channel notification routing (webhook, email, Slack, SMS)
+- **Scheduled Tasks**: Cron, interval, and onetime automation tasks
+- **Secrets Management**: In-memory secret storage with metadata
+- **Multi-Region**: Region-aware routing and data residency controls
 
 ## Quick Start
 
@@ -75,12 +74,6 @@ go build -o aerollm ./cmd/server
 
 AeroLLM uses Viper for configuration via `config.yaml` or environment variables with `AEROLLM_` prefix.
 
-Key env vars:
-- `AEROLLM_WEBHOOK_URL`
-- `AEROLLM_WEBHOOK_SECRET`
-- `AEROLLM_BUDGET_WEBHOOK_URL`
-- `AEROLLM_BUDGET_WEBHOOK_SECRET`
-
 ### Running
 
 ```bash
@@ -91,6 +84,323 @@ Key env vars:
 
 ```bash
 docker-compose up -d
+```
+
+## Usage Guides
+
+### Chat Completions
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Health Checks
+
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
+```
+
+### Resilience Status
+
+```bash
+curl http://localhost:8080/resilience/status
+```
+
+### Shadow Traffic
+
+```bash
+curl -X POST http://localhost:8080/v1/shadow \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"openai","model":"gpt-4"}'
+```
+
+### SLO Budgets
+
+```bash
+curl http://localhost:8080/v1/slo/budget
+```
+
+### Chaos Fault Injection
+
+```bash
+curl -X POST http://localhost:8080/v1/chaos/fault \
+  -H "Content-Type: application/json" \
+  -d '{"type":"latency","percent":50}'
+```
+
+### Backpressure
+
+```bash
+curl http://localhost:8080/backpressure/status
+```
+
+### Quota Enforcement
+
+```bash
+curl -X POST http://localhost:8080/v1/quota \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"api_key","key":"k1","limit":1000}'
+```
+
+### Audit Events
+
+```bash
+curl http://localhost:8080/v1/audit/events
+```
+
+### Admission Control
+
+```bash
+curl -X POST http://localhost:8080/v1/admission/validate \
+  -H "Content-Type: application/json" \
+  -d '{"resource":"models","path":"/v1/models","method":"POST"}'
+```
+
+### Usage Metering
+
+```bash
+curl -X POST http://localhost:8080/v1/meter/usage \
+  -H "Content-Type: application/json" \
+  -d '{"api_key":"k1","provider":"p1","model":"m1","tokens_in":10,"tokens_out":20,"latency_ms":100}'
+```
+
+### Feature Flags
+
+```bash
+# Create/update flag
+curl -X POST http://localhost:8080/v1/flags \
+  -H "Content-Type: application/json" \
+  -d '{"key":"darkmode","enabled":true,"strategy":"global"}'
+
+# Get flag
+curl "http://localhost:8080/v1/flags?key=darkmode"
+
+# List flags
+curl http://localhost:8080/v1/flags
+```
+
+### Evaluation Engine
+
+```bash
+# Judge scoring
+curl -X POST http://localhost:8080/v1/eval/judge \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"hi","response":"hello","model":"m1","provider":"p1","prompt_version":"v1"}'
+
+# Regression detection
+curl http://localhost:8080/v1/eval/regression
+
+# Benchmark
+curl -X POST http://localhost:8080/v1/eval/benchmark \
+  -H "Content-Type: application/json" \
+  -d '{"dataset":"{\"prompt\":\"hello\"}\n","model":"m1","provider":"p1","rubric":"general"}'
+```
+
+### Policy Engine
+
+```bash
+# Create policy
+curl -X POST http://localhost:8080/v1/policy \
+  -H "Content-Type: application/json" \
+  -d '{"id":"deny-post","expression":"deny-post","severity":"high"}'
+
+# List policies
+curl http://localhost:8080/v1/policy
+
+# Block middleware
+curl -X POST http://localhost:8080/v1/policy/block \
+  -H "Content-Type: application/json" \
+  -d '{"method":"POST"}'
+```
+
+### Data Retention
+
+```bash
+curl -X POST http://localhost:8080/v1/retention \
+  -H "Content-Type: application/json" \
+  -d '{"id":"logs","resource":"logs","ttl":24,"max_items":1000}'
+```
+
+### Incidents
+
+```bash
+# Create incident
+curl -X POST http://localhost:8080/v1/incidents \
+  -H "Content-Type: application/json" \
+  -d '{"title":"outage","severity":"high","status":"open"}'
+
+# List incidents
+curl http://localhost:8080/v1/incidents
+
+# Update incident
+curl -X PUT "http://localhost:8080/v1/incidents?id=inc_123" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"resolved"}'
+```
+
+### Notifications
+
+```bash
+# Create channel
+curl -X POST http://localhost:8080/v1/notification/channels \
+  -H "Content-Type: application/json" \
+  -d '{"id":"c1","name":"ops","type":"webhook","target":"https://example.com/alerts","enabled":true}'
+
+# List channels
+curl http://localhost:8080/v1/notification/channels
+
+# Create subscription
+curl -X POST http://localhost:8080/v1/notification/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{"id":"s1","alert_id":"a1","channel_id":"c1","enabled":true}'
+```
+
+### Scheduled Tasks
+
+```bash
+# Create task
+curl -X POST http://localhost:8080/v1/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"name":"backup","type":"cron","schedule":"0 0 * * *","payload":"{}"}'
+
+# List tasks
+curl http://localhost:8080/v1/schedule
+
+# Update status
+curl -X PUT "http://localhost:8080/v1/schedule?id=task_123" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"running"}'
+```
+
+### Secrets
+
+```bash
+# Create secret
+curl -X POST http://localhost:8080/v1/secrets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"api-key","value":"secret123","type":"token"}'
+
+# List secrets
+curl http://localhost:8080/v1/secrets
+
+# Delete secret
+curl -X DELETE "http://localhost:8080/v1/secrets?id=sec_api-key"
+```
+
+### Multi-Region
+
+```bash
+# Create region
+curl -X POST http://localhost:8080/v1/region/regions \
+  -H "Content-Type: application/json" \
+  -d '{"id":"us-east-1","name":"US East","endpoint":"https://us.example.com","primary":true}'
+
+# Create residency policy
+curl -X POST http://localhost:8080/v1/region/residency \
+  -H "Content-Type: application/json" \
+  -d '{"id":"p1","region":"us-east-1","data_type":"pii","required":true}'
+
+# Create route rule
+curl -X POST http://localhost:8080/v1/region/routes \
+  -H "Content-Type: application/json" \
+  -d '{"id":"r1","region":"us-east-1","providers":["openai"],"priority":1,"enabled":true}'
+```
+
+### MCP Server
+
+```bash
+# Initialize
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+
+# List tools
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+## CLI
+
+AeroLLM includes a CLI for common operations:
+
+```bash
+# Initialize config
+aerollm init
+
+# Build plugin
+aerollm plugin build plugin.go -o plugin.wasm
+
+# Publish plugin
+aerollm plugin publish plugin.wasm
+
+# GitOps sync
+aerollm sync
+
+# Health checks
+aerollm health
+
+# Resilience status
+aerollm resilience
+
+# Shadow traffic
+aerollm traffic shadow
+
+# SLO budget
+aerollm slo budget
+
+# Chaos fault
+aerollm chaos fault
+
+# Backpressure
+aerollm backpressure
+
+# Quota
+aerollm quota
+
+# Audit events
+aerollm audit events
+
+# Admission validate
+aerollm admission validate
+
+# Meter usage
+aerollm meter usage
+
+# Feature flags
+aerollm flags --key darkmode
+aerollm flags --set '{"key":"darkmode","enabled":true,"strategy":"global"}' --key darkmode
+
+# Evaluation
+aerollm eval --kind judge --prompt hi --response hello --model m1 --provider p1 --prompt-version v1
+aerollm eval --kind regression
+aerollm eval --kind benchmark --dataset '{"prompt":"hello"}\n' --model m1 --provider p1
+
+# Policy
+aerollm policy --id allow --expr allow --severity low
+
+# Retention
+aerollm retention --id logs --resource logs --ttl 24 --max-items 1000
+
+# Incidents
+aerollm incident --title "outage" --severity high
+
+# Notifications
+aerollm notification --resource channel
+aerollm notification --resource subscription
+
+# Schedule
+aerollm schedule --name "backup" --schedule "0 0 * * *"
+
+# Secrets
+aerollm secrets --name "api-key" --value "secret123" --type token
+
+# Region
+aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
 ```
 
 ## Architecture
@@ -112,7 +422,8 @@ Request path for `/v1/chat/completions`:
 13. AIOps self-optimization
 14. Usage recording + webhook dispatch on failure
 
-Key packages:
+## Key Packages
+
 - `internal/middleware` — HTTP middleware primitives
 - `internal/guardrails` — PII, injection shield, API key scoping
 - `internal/finops` — cost tracking and budget enforcement
@@ -146,758 +457,28 @@ Key packages:
 - `internal/graphrag` — temporal graph store, BFS neighbors, token query, GraphRAG middleware
 - `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
 - `internal/providers/universal` — universal model registry for capability cards
-- `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers, and an in-memory transport stub used for local tests
+- `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers
 - `internal/marketplace` — signed manifest verification, registry client, micro-royalty tracking
 - `internal/economy` — agent wallets, micro-transaction billing for tool calls, and SLA-aware selection
 - `internal/zk` — zero-knowledge encrypted payload middleware and confidential compute stubs
-
-## API
-
-### POST /v1/chat/completions
-Send an OpenAI-compatible chat completion request.
-
-Example:
-```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer $AEROLLM_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
-```
-
-### GET /health
-Liveness probe.
-
-### GET /ready
-Readiness probe.
-
-### POST /v1/agents/approvals/{id}
-Resume a paused HITL approval flow.
-
-```bash
-curl -X POST http://localhost:8080/v1/agents/approvals/approval-123 \
-  -H "Content-Type: application/json" \
-  -d '{"approved":true}'
-```
-
-### MCP Server
-AeroLLM exposes a native MCP endpoint at `/mcp`.
-
-Supported methods:
-- `POST /mcp` with JSON-RPC `initialize`
-- `POST /mcp` with JSON-RPC `tools/list`
-- `POST /mcp` with JSON-RPC `tools/call`
-- `GET /mcp` for SSE event stream
-
-Example JSON-RPC calls:
-
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-```
-
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-```
-
-### POST /v1/feedback
-Submit feedback for the data flywheel.
-
-```bash
-curl -X POST http://localhost:8080/v1/feedback \
-  -H "Content-Type: application/json" \
-  -d '{"request_id":"req-123","score":0.9,"metadata":{"model":"gpt-4"}}'
-```
-
-## Middleware Chain
-
-`/v1/chat/completions` is composed as:
-
-1. Recovery
-2. Logging
-3. Authentication
-4. Rate limiting
-5. Injection shield
-6. PII redaction
-7. API key scoping
-8. Budget pre-check
-9. Exact-match cache lookup
-10. Provider routing
-11. Agent tool execution loop
-12. Usage recording + webhook dispatch on failure
-
-## Phases
-
-### Phase 1: Foundation
-Multi-provider routing, agentic tool execution, Redis caching, rate limiting, and OpenTelemetry observability.
-
-### Phase 2: Enterprise Extensions
-Guardrails, FinOps, HITL approvals, memory, shadow traffic, and webhooks.
-
-### Phase 3: Autonomous AI Control Plane
-DAG orchestration, MCP Hub, Hybrid RAG, context manager, GitOps, immutable ledger, and WASM sandbox.
-
-### Phase 4: AI-Native Edge Fabric & Data Flywheel
-Realtime WebSocket, barge-in, multimodal preprocessing, K8s operator, flywheel feedback, and dataset export.
-
-### Phase 5: Cognitive OS & Decentralized Action Fabric
-Embedded state store, dynamic agent swarms, consensus, federated learning, red-team self-healing, and autonomous evolution.
-
-### Phase 6: The Definitive AI Platform
-Universal protocol fabric, adaptive intelligence, multi-tenant SaaS core, plugin ecosystem, evaluation engine, and compliance-as-code.
-
-### Phase 7: The Sentient Mesh
-- **Generative API Synthesis**: `internal/synthesis` with tool deficit detection, LLM-backed code generation, WASM placeholder compilation, and tool promotion into the plugin registry
-- **Temporal GraphRAG**: `internal/graphrag` with temporal nodes/edges, BFS neighbor traversal, tokenized query ranking, and HTTP middleware that injects graph context when `rag_enabled=true`
-- **Self-Optimizing AIOps**: `internal/aiops` with `MetaAgentTuner`, configurable `MetricsSource`, and tuner actions with cooldown semantics; wired to live telemetry in `cmd/server/main.go`
-- **Advanced Agent Loop**: `internal/agent/advanced_loop.go` adds `LoopHook` lifecycle hooks, `ExecuteToolsWithRetry`, unknown-tool deficit detection, and `ToolDeficitHandler`
-- **Universal Model Registry**: `internal/providers/universal/model_registry.go` for model capability cards, provider-indexed lookup, and registration validation
-
-### Phase 8: The Global Cognitive Mesh & Zero-Knowledge Fabric
-- **Global Edge Mesh**: `internal/mesh` with CRDT-backed state, peer discovery, and gossip sync for bandit weights and plugin registries
-- **Marketplace & Royalties**: `internal/marketplace` with signed manifest verification, registry client, and micro-royalty tracking via webhook dispatch
-- **Zero-Knowledge Guardrails**: `internal/zk` with `ConfidentialCompute` middleware stubs for encrypted payload handling
-
-### Phase 9: Visual Control Plane, Developer CLI & Agent Economy
-- **AeroLLM Studio Backend**: `internal/studio` exposes `/v1/studio/topology`, `/v1/studio/analytics/cost`, and `/v1/studio/dags` under existing licensing middleware
-- **Developer CLI**: `cmd/cli` uses Cobra; `aerollm init` scaffolds `config.yaml`, `docker-compose.yml`, and `plugin.go`
-- **Plugin Build/Publish**: `aerollm plugin build` compiles Go/WASM plugins; `aerollm plugin publish` prepares signed marketplace manifests and POSTs to `/v1/marketplace/plugins`
-- **Marketplace Registry API**: `internal/marketplace/registry_api.go` adds durable registry store interfaces plus HTTP handlers for `/v1/marketplace/plugins` list/publish and `/v1/marketplace/plugins/{id}` get
-- **Redis Registry Persistence**: `internal/marketplace/redis_store.go` adds a `RedisStore` backed by `go-redis/v9`; server uses Redis for registry state when available, otherwise falls back to in-memory store
-- **Marketplace Auth Middleware**: `/v1/marketplace/*` routes now require API key auth via existing middleware; `internal/marketplace/middleware.go` provides reusable marketplace requester middleware
-- **Local Redis Compose**: `docker-compose.yml` defines a local Redis service with healthchecks and AeroLLM wiring
-- **Agent Economy**: `internal/economy` provides wallet interfaces, in-memory ledger store, tool-call billing interceptor, and SLA-aware selector extension in `internal/intelligence`
-- **Generative UI Streaming**: `internal/genui` intercepts `aerollm_ui` JSON schemas in LLM output and normalizes them into SSE-friendly UI events; chat responses now opt into GenUI when requested
-
-### Phase 10: The Edge Companion, Hardware Fabric & Open Standard
-- **Edge Companion**: `cmd/edge-node` is a local-first binary using bbolt for offline state, in-memory mesh discovery/transport, hardware detection, wallet initialization, and WASM sandbox execution
-- **Hardware Routing**: `internal/hardware` adds silicon detection for CUDA/Metal/ROCm/Vulkan/Ollama/CPU and `HardwareAwareSelector` for privacy-first/cost-zero routing
-- **SaaS Billing**: `internal/billing` adds `InMemoryProvider` + `StripeProvider` using `stripe-go/v80` `billing/meterevent`, plus `InvoiceGenerator` and CLI `aerollm billing generate`
-- **Server Billing Worker**: `cmd/server/main.go` starts a background invoice worker, using Stripe when `AEROLLM_STRIPE_SECRET_KEY` is set
-- **Open Standard Spec**: `internal/marketplace/openstandard.go` defines `CapabilityManifest` and `BillingReceipt` structures, with validation and canonical JSON; server + edge expose `/v1/marketplace/openstandard/capability` and `/v1/marketplace/openstandard/receipt`, plus edge self endpoints at `/v1/marketplace/openstandard/capability/self` and `/v1/marketplace/openstandard/receipt/self`
-- **Edge CLI**: `aerollm edge status/capability/receipt` commands interact with local edge-node endpoints; set `EDGE_LISTEN` if edge runs on a different host/port
-- **Edge Phase 11 CLI**: `aerollm edge pqc handshake`, `aerollm edge spatial stream --anchor ...`, and `aerollm edge federated aggregate --input ...` expose PQC, spatial, and federated workflows from the local edge companion
-
-### Phase 11: The Spatial Reality, Autonomous Cloud & Post-Quantum Fabric
-- **Spatial Reality Fabric**: `internal/spatial` adds chunked video/3D streaming via zero-buffer HTTP chunk writers, plus a WebXR spatial translator that scans LLM outputs for spatial anchors and converts them into standardized AR/VR payloads
-- **Spatial Middleware**: `internal/spatial/middleware.go` adds `SpatialMiddleware` that rewrites responses containing spatial anchors into WebXR JSON; server exposes `/v1/spatial/parse`
-- **Post-Quantum Cryptography**: `internal/pqc` adds `QuantumSafeKeyManager` with ML-KEM-768 encapsulation and ML-DSA-65 signatures, plus hybrid Ed25519/ML-DSA fallback for mesh peer attestation; includes stream encryptors for secure weight/channel transport
-- **PQC Handshake Middleware**: `internal/pqc/middleware.go` adds `HandshakeHandler` returning hybrid key material; server exposes `/v1/pqc/keys`
-- **Autonomous Cloud Provisioning**: `internal/autoscale` adds `InfraProvisioner` interface with `AWSProvisioner`/`GCPProvisioner`, `BootstrapScript` cloud-init generator, and `MetaAgentInfraLoop` for threshold-based GPU provisioning; server exposes `/v1/autoscale/evaluate`
-- **Federated Learning**: `internal/federated` adds `FedAvgAggregator` for secure LoRA weight averaging, invalid-update skipping, and Inf/NaN clamping; `internal/learning` wires federated aggregation into the trainer
-- **Integration Points**: PQC key management is additive to existing `internal/ledger` and `internal/marketplace` flows; spatial middleware can wrap existing provider handlers without changing upstream routing
-
-### Phase 11 Server Routes
-
-```bash
-# List supported PQC algorithms
-curl http://localhost:8080/v1/pqc/keys
-```
-
-```bash
-# Parse spatial anchors from JSON payload
-curl -X POST http://localhost:8080/v1/spatial/parse \
-  -H "Content-Type: application/json" \
-  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
-```
-
-```bash
-# Evaluate autoscale deficit
-curl -X POST http://localhost:8080/v1/autoscale/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{"deficit":0.6}'
-```
-
-```bash
-# Stream 3D spatial payload
-curl -X POST http://localhost:8080/v1/spatial/stream \
-  -H "Content-Type: application/json" \
-  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
-```
-
-```bash
-# Edge PQC handshake
-curl -X POST http://localhost:7910/v1/edge/pqc/handshake \
-  -H "Content-Type: application/json"
-```
-
-```bash
-# Edge spatial stream
-curl -X POST http://localhost:7910/v1/edge/spatial/stream \
-  -H "Content-Type: application/json" \
-  -d '{"type":"spatial_anchor","x":1.2,"y":0.5,"z":0.1}'
-```
-
-### Open Standard Examples
-
-```bash
-curl -X POST http://localhost:7910/v1/marketplace/openstandard/capability \
-  -H "Content-Type: application/json" \
-  -d '{"version":"1.0","hardware":{"has_local_gpu":true,"os":"linux","memory_gb":16},"billing":{"supports_metered":true,"currency":"USD"},"capabilities":["mesh","wasm"]}'
-```
-
-```bash
-curl -X POST http://localhost:7910/v1/marketplace/openstandard/receipt \
-  -H "Content-Type: application/json" \
-  -d '{"receipt_id":"r-1","customer_id":"c1","provider_id":"p1","event_name":"token","value":1,"currency":"USD"}'
-```
-
-```bash
-# Aggregate federated LoRA updates
-curl -X POST http://localhost:8080/v1/federated/aggregate \
-  -H "Content-Type: application/json" \
-  -d '[{"Rows":1,"Cols":2,"Data":[1,2],"Owner":"e1"},{"Rows":1,"Cols":2,"Data":[3,4],"Owner":"e2"}]'
-```
-
-## Phase 12: Observability, Distributed Tracing & Global Federation
-
-Lightweight observability without external dependencies: `internal/trace` provides lightweight trace spans, request/error counting, and avg latency metrics. `/v1/trace/metrics` returns JSON metrics with service name, request count, error count, and avg latency.
-
-Global federation includes signed aggregation verification and edge realtime streaming:
-
-- `/v1/federated/aggregate` accepts signed LoRA update arrays and returns averaged output
-- `/v1/federated/verify` verifies aggregate payloads against an ed25519 public key
-- `/v1/edge/realtime/ws` exposes edge realtime streaming over WebSocket for low-latency clients
-
-Trace middleware emits `X-Trace-Id` and `X-Span-Id` headers for downstream debugging.
-
-CLI:
-
-```bash
-aerollm trace metrics
-```
-
-### Phase 12 Server Routes
-
-```bash
-curl http://localhost:8080/v1/trace/metrics
-curl -X POST http://localhost:8080/v1/federated/aggregate
-curl -X POST http://localhost:8080/v1/federated/verify
-curl -X POST http://localhost:7910/v1/edge/realtime/ws
-```
-
-## Phase 13: Health & Resilience
-
-Operational health checks and readiness reporting for server and edge companion.
-
-- `/healthz` returns HTTP 200 with `{"status":"ok"}`
-- `/readyz` evaluates registered dependency checkers and returns readiness status
-- `internal/health` provides a `Registry` with `Register`, `Checks`, `LivenessResponse`, and `ReadinessResponse`
-
-```bash
-curl http://localhost:8080/healthz
-curl http://localhost:8080/readyz
-```
-
-CLI:
-
-```bash
-aerollm health
-```
-
-- `/resilience/status` returns current resilience state with circuit breaker status
-- `internal/resilience` provides `CircuitBreaker`, `Bulkhead`, `Handler`, and `Middleware` for degraded mode handling
-
-```bash
-curl http://localhost:8080/resilience/status
-```
-
-CLI:
-
-```bash
-aerollm resilience
-```
-
-- Budget checks happen before routing.
-- If `BudgetChecker.CheckBudget` returns an error, the handler returns `HTTP 402` with body `{"error":"budget exceeded"}`.
-- Set `AEROLLM_BUDGET_WEBHOOK_URL` and `AEROLLM_BUDGET_WEBHOOK_SECRET` to receive `budget_exceeded` events.
-
-## Phase 14: Resilience & Degraded Mode
-
-Circuit breaker, bulkhead concurrency control, and graceful degradation primitives.
-
-- `CircuitBreaker` trips after threshold failures and transitions to recovering after reset timeout
-- `Bulkhead` limits concurrent requests via semaphore-based concurrency control
-- `/resilience/status` exposes current resilience state for monitoring
-- `resilience.Middleware` enforces bulkhead limits on HTTP handlers
-- Designed to work with existing retry/backoff in `internal/agent` and circuit config in `internal/config`
-
-```bash
-curl http://localhost:8080/resilience/status
-```
-
-CLI:
-
-```bash
-aerollm resilience
-```
-
-## Phase 15: Shadow Traffic & Canary Routing
-
-Async shadow routing and canary percentage controls.
-
-- `ShadowTester.RunAsync` dispatches the same request to a secondary provider without blocking the main response
-- `ShadowConfig` controls shadow behavior: `Enabled` and `ShadowModels`
-- Shadow results include provider latency and error state
-- Routes are lightweight and opt-in through provider config
-- Intended to coexist with `internal/router` circuit breakers and `internal/traffic`
-
-```bash
-curl -X POST http://localhost:8080/v1/shadow -H 'content-type: application/json' -d '{"model":"shadow-model"}'
-```
-
-CLI:
-
-```bash
-aerollm traffic shadow --model shadow-model
-```
-
-## Phase 16: SLO Budgets & Error Budget Tracking
-
-Service-level objectives and error budget enforcement.
-
-- `Budget` defines `Objective` and `Window` for an endpoint or provider
-- `Window` supports `5m`, `1h`, `24h`
-- `ErrorBudget` tracks remaining budget from `AllowedErrors`
-- Returns `HTTP 429` when budget is exhausted with `{"error":"budget exceeded"}`
-- Fits alongside `internal/middleware` and existing retry/backoff
-
-```bash
-curl -H 'x-slo-target: latency' http://localhost:8080/v1/slo/budget
-```
-
-CLI:
-
-```bash
-aerollm slo budget --target latency
-```
-
-## Phase 17: Chaos Fault Injection & Resilience Testing
-
-Configurable fault injection endpoints for chaos engineering.
-
-- `Config` supports `latency`, `error`, and `panic` fault types
-- `Injector.ShouldFault` samples randomized percentage to apply faults
-- `Handler` on `/v1/chaos/fault` accepts JSON config and returns status
-- `RecoverPanic` middleware catches injected panics and returns `HTTP 500`
-- Intended for integration with `internal/middleware` and `/v1/chat/completions` flows
-
-```bash
-curl -X POST http://localhost:8080/v1/chaos/fault -H 'content-type: application/json' -d '{"type":"error","percent":100}'
-```
-
-CLI:
-
-```bash
-aerollm chaos fault
-```
-
-## Phase 17 Server Routes
-
-- `POST /v1/chaos/fault` accepts JSON config and returns fault status with HTTP 202
-- `GET /resilience/status` returns current resilience state
-- `GET /healthz` returns liveness
-- `GET /readyz` returns readiness from registered checkers
-
-```bash
-curl http://localhost:8080/resilience/status
-```
-
-## Phase 18: Backpressure Control & Load Shedding
-
-Flow control and load shedding primitives for high-load paths.
-
-- `BackpressureController.Allow` gates requests against `MaxInflight`
-- `Metrics` exposes `inflight`, `dropped`, `total`, `drop_rate`, and rolling window info
-- `/backpressure/status` returns current controller metrics as JSON
-- `Middleware` drops requests with `HTTP 503` when controller is saturated
-- Windowed reset prevents stale counters from masking throughput regressions
-
-```bash
-curl http://localhost:8080/backpressure/status
-```
-
-CLI:
-
-```bash
-aerollm backpressure
-```
-
-## Phase 18 Server Routes
-
-- `GET /backpressure/status` returns current controller metrics
-- `POST /v1/chaos/fault` updates fault injection config
-- `GET /resilience/status` returns resilience state
-- `GET /readyz` returns readiness status
-
-```bash
-curl http://localhost:8080/backpressure/status
-```
-
-## Phase 19: Quota Enforcement & Tenant Store
-
-Per-tenant, team, and user quota tracking with usage enforcement.
-
-- `Quota` defines `Limit`, `Used`, `Burst`, `Scope`, and `Window`
-- `InMemoryQuotaStore` provides `Upsert`, `Get`, `ForScope`, and `Enforce`
-- `Enforce` returns `QuotaEnforcedError` when usage exceeds limit
-- `InMemoryStore` in `tenant` package handles org, team, user, and API key CRUD
-- Designed to integrate with `internal/middleware` for request-time enforcement
-
-```bash
-curl -X POST http://localhost:8080/v1/quota -H 'content-type: application/json' -d '{"id":"q1","scope":"tenant","target_id":"t1","limit":100,"used":25}'
-```
-
-CLI:
-
-```bash
-aerollm quota
-```
-
-## Phase 19 Server Routes
-
-- `POST /v1/quota` inspects quota limits and usage
-- `GET /backpressure/status` returns backpressure metrics
-- `GET /v1/chaos/fault` returns chaos fault config
-- `GET /resilience/status` returns resilience state
-
-```bash
-curl -X POST http://localhost:8080/v1/quota -H 'content-type: application/json' -d '{"id":"q1","scope":"tenant","target_id":"t1","limit":100,"used":25}'
-```
-
-## Phase 20: Audit Logging & Compliance Pipeline
-
-Structured audit events with append-only storage and replay.
-
-- `AuditEvent` captures actor, action, target, metadata, and timestamp
-- `MemoryAuditLogger` stores events in memory for testing
-- `PolicyRegistry` loads named policies for compliance checks
-- `/v1/audit/events` endpoint streams JSON audit records
-- `internal/compliance` exposes `AuditLogger` interface for durable backends
-
-```bash
-curl http://localhost:8080/v1/audit/events
-```
-
-CLI:
-
-```bash
-aerollm audit events --limit 20
-```
-
-## Phase 20 Server Routes
-
-- `POST /v1/audit/events` streams JSON audit records
-- `POST /v1/quota` inspects quota state
-- `GET /backpressure/status` returns backpressure metrics
-- `GET /resilience/status` returns resilience state
-- `GET /healthz` returns liveness
-- `GET /readyz` returns readiness
-
-```bash
-curl http://localhost:8080/v1/audit/events
-```
-
-## Phase 21: Admission Control & Webhook Validation
-
-Request validation and admission webhook framework.
-
-- `AdmissionRequest` captures `Kind`, `Resource`, `Path`, `Method`, `Headers`, `Body`
-- `AdmissionResponse` carries `Allowed` and `Reason`
-- `Validator` interface for pluggable validation logic
-- `WebhookHandler` exposes `/v1/admission/validate` for JSON admission reviews
-- `KindFromHTTPMethod` maps HTTP verbs to create/update/delete kinds
-
-```bash
-curl -X POST http://localhost:8080/v1/admission/validate -H 'content-type: application/json' -d '{"resource":"models","path":"/v1/models","method":"POST"}'
-```
-
-CLI:
-
-```bash
-aerollm admission validate
-```
-
-## Guardrails
-
-- Injection shield returns `HTTP 403`.
-- PII redaction rewrites the request body with placeholders; original body is preserved in request context for downstream handlers that need restoration.
-- API key scoping enforces `AllowedModels` and `IPAllowlist`.
-
-## Phase 22: Usage Metering & Telemetry Export
-
-Usage recording and telemetry export for observability pipelines.
-
-- `UsageRecord` captures `APIKey`, `Provider`, `Model`, `TokensIn`, `TokensOut`, `LatencyMs`
-- `Recorder` stores usage events in memory with thread-safe access
-- `/v1/meter/usage` accepts usage records and returns recorded metrics
-- Intended to integrate with `pkg/telemetry` and billing providers
-
-```bash
-curl -X POST http://localhost:8080/v1/meter/usage -H 'content-type: application/json' -d '{"api_key":"k1","provider":"p1","model":"m1","tokens_in":10,"tokens_out":20,"latency_ms":100}'
-```
-
-CLI:
-
-```bash
-aerollm meter usage
-```
-
-## Phase 23: Feature Flags & Rollout Engine
-
-Pluggable feature flag store with rollout strategies.
-
-- `FeatureFlag` captures `Key`, `Enabled`, `Strategy`, `Percentage`, `AllowList`, `DenyList`, `Metadata`
-- `Store` supports `Upsert`, `Get`, `List`, `SetRollout`, and `Enabled` evaluation
-- `RolloutStrategy` supports global, percentage, allowlist, and denylist modes
-- `/v1/flags` accepts POST for create/update and GET for listing
-- `/v1/flags/{key}` returns a specific flag
-- CLI: `aerollm flags --key <flag>` and `aerollm flags --set '{"key":"x","enabled":true}'
-
-```bash
-curl -X POST http://localhost:8080/v1/flags/darkmode -H 'content-type: application/json' -d '{"key":"darkmode","enabled":true,"strategy":"global"}'
-curl http://localhost:8080/v1/flags/darkmode
-```
-
-```bash
-aerollm flags --set '{"key":"darkmode","enabled":true,"strategy":"global"}' --key darkmode
-```
-
-
-## Phase 24: Evaluation Engine & Judge Pipeline
-
-Automated scoring and regression detection for LLM outputs.
-
-- `JudgePipeline` scores requests against a judge model rubric and persists results
-- `RegressionDetector` identifies prompt-version score regressions
-- `BenchmarkRunner` runs JSONL datasets and returns aggregate scores
-- `InMemoryScoreStore` stores scores in memory
-- `/v1/eval/judge` accepts scoring requests and returns scores
-- `/v1/eval/regression` detects score regressions
-- `/v1/eval/benchmark` runs datasets and returns aggregates
-
-```bash
-curl -X POST http://localhost:8080/v1/eval/judge -H 'content-type: application/json' -d '{"prompt":"hi","response":"hello","model":"m1","provider":"p1","prompt_version":"v1"}'
-curl http://localhost:8080/v1/eval/regression
-curl -X POST http://localhost:8080/v1/eval/benchmark -H 'content-type: application/json' -d '{"dataset":"{\"prompt\":\"hello\"}\n","model":"m1","provider":"p1","rubric":"general"}'
-```
-
-CLI:
-
-```bash
-aerollm eval --kind judge --prompt hi --response hello --model m1 --provider p1 --prompt-version v1
-aerollm eval --kind regression
-aerollm eval --kind benchmark --dataset '{"prompt":"hello"}\n' --model m1 --provider p1
-```
-
-
-## Phase 25: Policy Engine & Compliance Guardrails
-
-HTTP policy evaluation with rule-based access control.
-
-- `HTTPPolicyRule` describes web-exposed compliance rules
-- `HTTPPolicyStore` stores rules with CRUD operations
-- `PolicyDecision` captures evaluation result with severity and allowed state
-- `HTTPBlockHandler` returns middleware that blocks disallowed requests with `HTTP 451`
-- `/v1/policy` accepts POST for create/update and GET for listing
-- `/v1/policy/block` enforces policy middleware and returns blocked decisions
-
-```bash
-curl -X POST http://localhost:8080/v1/policy -H 'content-type: application/json' -d '{"id":"deny-post","expression":"deny-post","severity":"high"}'
-curl http://localhost:8080/v1/policy
-curl -X POST http://localhost:8080/v1/policy/block -H 'content-type: application/json' -d '{"method":"POST"}'
-```
-
-CLI:
-
-```bash
-aerollm policy --id allow --expr allow --severity low
-aerollm policy
-```
-
-
-## Phase 26: Data Retention & Lifecycle Management
-
-Data retention policies for managing resource lifecycles.
-
-- `RetentionPolicy` captures `ID`, `Resource`, `TTL`, `MaxItems`, `CreatedAt`
-- `RetentionStore` manages retention policies with CRUD operations
-- `/v1/retention` accepts POST for create/update and GET for listing
-
-```bash
-curl -X POST http://localhost:8080/v1/retention -H 'content-type: application/json' -d '{"id":"logs","resource":"logs","ttl":24,"max_items":1000}'
-curl http://localhost:8080/v1/retention
-```
-
-CLI:
-
-```bash
-aerollm retention --id logs --resource logs --ttl 24 --max-items 1000
-aerollm retention
-```
-
-
-## Phase 27: Incident Management & Alerting
-
-Incident lifecycle management for operational response.
-
-- `Incident` captures `ID`, `Title`, `Description`, `Severity`, `Status`, `Source`, timestamps
-- `Store` manages incidents with `Create`, `Get`, `List`, `Update`, and `Resolve`
-- `Severity` supports low/medium/high/critical levels
-- `Status` tracks open/investigating/resolved/closed
-- `/v1/incidents` accepts POST for create, GET for list/get, PUT for update
-- `/v1/incidents?id={id}&resolve=true` resolves an incident
-
-```bash
-curl -X POST http://localhost:8080/v1/incidents -H 'content-type: application/json' -d '{"title":"outage","severity":"high","status":"open"}'
-curl http://localhost:8080/v1/incidents
-curl -X PUT "http://localhost:8080/v1/incidents?id=inc_123" -H 'content-type: application/json' -d '{"status":"resolved"}'
-```
-
-CLI:
-
-```bash
-aerollm incident --title "outage" --severity high
-aerollm incident
-```
-
-
-## Phase 28: Notification Channels & Subscriptions
-
-Multi-channel notification routing for alerts and incidents.
-
-- `Channel` captures `ID`, `Name`, `Type`, `Target`, `Enabled`, `Metadata`
-- `Subscription` links `AlertID` to `ChannelID`
-- `Store` manages channels and subscriptions in memory
-- `/v1/notification/channels` accepts POST for create and GET for listing
-- `/v1/notification/subscriptions` accepts POST for create and GET for listing
-
-```bash
-curl -X POST http://localhost:8080/v1/notification/channels -H 'content-type: application/json' -d '{"id":"c1","name":"ops","type":"webhook","target":"https://example.com/alerts","enabled":true}'
-curl http://localhost:8080/v1/notification/channels
-```
-
-CLI:
-
-```bash
-aerollm notification --resource channel
-aerollm notification --resource subscription
-```
-
-
-## Phase 29: Scheduled Tasks & Automation
-
-Automation scheduling for operational tasks.
-
-- `ScheduledTask` captures `ID`, `Name`, `Type`, `Schedule`, `Payload`, `Status`, timestamps
-- `TaskType` supports cron, interval, and onetime tasks
-- `TaskStatus` tracks pending/running/completed/failed
-- `Store` manages tasks with CRUD operations
-- `/v1/schedule` accepts POST for create, GET for listing, PUT for status update
-
-```bash
-curl -X POST http://localhost:8080/v1/schedule -H 'content-type: application/json' -d '{"name":"backup","type":"cron","schedule":"0 0 * * *","payload":"{}"}'
-curl http://localhost:8080/v1/schedule
-curl -X PUT "http://localhost:8080/v1/schedule?id=task_123" -H 'content-type: application/json' -d '{"status":"running"}'
-```
-
-CLI:
-
-```bash
-aerollm schedule --name "backup" --schedule "0 0 * * *"
-aerollm schedule
-```
-
-
-## Phase 30: Secrets Management & Vault Integration
-
-In-memory secret storage with metadata and lifecycle management.
-
-- `Secret` captures `ID`, `Name`, `Value`, `Type`, `Metadata`, `CreatedAt`
-- `Store` manages secrets with `Upsert`, `Get`, `List`, and `Delete`
-- `/v1/secrets` accepts POST for create, GET for list/get, and DELETE for removal
-
-```bash
-curl -X POST http://localhost:8080/v1/secrets -H 'content-type: application/json' -d '{"name":"api-key","value":"secret123","type":"token"}'
-curl http://localhost:8080/v1/secrets
-curl -X DELETE "http://localhost:8080/v1/secrets?id=sec_api-key"
-```
-
-CLI:
-
-```bash
-aerollm secrets --name "api-key" --value "secret123" --type token
-aerollm secrets
-```
-
-
-## Phase 31: Multi-Region Routing & Data Residency
-
-Region-aware routing and data residency controls.
-
-- `Region` captures `ID`, `Name`, `Endpoint`, `Primary`
-- `ResidencyPolicy` defines data residency requirements by region
-- `RouteRule` defines routing rules by region with provider and priority
-- `Store` manages regions, policies, and rules in memory
-- `/v1/region/regions` accepts POST for create and GET for listing
-- `/v1/region/residency` accepts POST for create and GET for listing
-- `/v1/region/routes` accepts POST for create and GET for listing
-
-```bash
-curl -X POST http://localhost:8080/v1/region/regions -H 'content-type: application/json' -d '{"id":"us-east-1","name":"US East","endpoint":"https://us.example.com","primary":true}'
-curl http://localhost:8080/v1/region/regions
-curl -X POST http://localhost:8080/v1/region/residency -H 'content-type: application/json' -d '{"id":"p1","region":"us-east-1","data_type":"pii","required":true}'
-curl http://localhost:8080/v1/region/routes -H 'content-type: application/json' -d '{"id":"r1","region":"us-east-1","providers":["openai"],"priority":1,"enabled":true}'
-```
-
-CLI:
-
-```bash
-aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
-aerollm region
-```
-
-
-## Implementation Status
-
-All phases 12-31 are fully implemented, tested, documented, and pushed.
-
-- Phase 12: Observability, Distributed Tracing & Global Federation
-- Phase 13: Health & Resilience
-- Phase 14: Resilience & Degraded Mode
-- Phase 15: Shadow Traffic & Canary Routing
-- Phase 16: SLO Budgets & Error Budget Tracking
-- Phase 17: Chaos Fault Injection & Resilience Testing
-- Phase 18: Backpressure Control & Load Shedding
-- Phase 19: Quota Enforcement & Tenant Store
-- Phase 20: Audit Logging & Compliance Pipeline
-- Phase 21: Admission Control & Webhook Validation
-- Phase 22: Usage Metering & Telemetry Export
-- Phase 23: Feature Flags & Rollout Engine
-- Phase 24: Evaluation Engine & Judge Pipeline
-- Phase 25: Policy Engine & Compliance Guardrails
-- Phase 26: Data Retention & Lifecycle Management
-- Phase 27: Incident Management & Alerting
-- Phase 28: Notification Channels & Subscriptions
-- Phase 29: Scheduled Tasks & Automation
-- Phase 30: Secrets Management & Vault Integration
-- Phase 31: Multi-Region Routing & Data Residency
-
-All tests pass (`go test ./...`), all builds pass (`go build ./...`), and all changes are committed and pushed to origin/main.
-
-## Community Standards
-
-This project includes the following community standards:
-
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) - Community code of conduct
-- [CONTRIBUTING.md](CONTRIBUTING.md) - Contributing guidelines
-- [LICENSE](LICENSE) - License and copyright
-- [SECURITY.md](SECURITY.md) - Security policy
-- [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md) - Bug report template
-- [.github/ISSUE_TEMPLATE/feature_request.md](.github/ISSUE_TEMPLATE/feature_request.md) - Feature request template
-- [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) - Pull request template
+- `internal/pqc` — post-quantum key management and hybrid attestation
+- `internal/spatial` — chunked media streaming and WebXR spatial translation
+- `internal/federated` — federated learning aggregation and verification
+- `internal/hardware` — silicon detection and hardware-aware routing
+- `internal/billing` — provider billing, invoice generation, and Stripe integration
+- `internal/licensing` — license validation and feature gating
+- `internal/studio` — topology, analytics, and DAG visualization APIs
+- `internal/genui` — generative UI SSE streaming and normalization
+- `internal/marketplace` — plugin marketplace, registry, and royalty tracking
+- `internal/zk` — zero-knowledge guardrails and confidential compute stubs
+
+## Community
+
+- **Code of Conduct**: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Security Policy**: [SECURITY.md](SECURITY.md)
+- **Issue Templates**: [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md), [.github/ISSUE_TEMPLATE/feature_request.md](.github/ISSUE_TEMPLATE/feature_request.md)
+- **Pull Request Template**: [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md)
 
 ## Author
 
@@ -906,6 +487,12 @@ Website: https://ayoubzulfiqar.com
 Contact: contact@ayoubzulfiqar.com  
 GitHub: https://github.com/ayoubzulfiqar
 
+## License
+
 Copyright (c) 2026 Ayoub Zulfiqar. All rights reserved.
 
-This repository and its contents are the intellectual property of Ayoub Zulfiqar. Permission is NOT granted for personal use, reproduction, modification, distribution, or any other use of this work without explicit written permission from the author.
+This repository and its contents are the intellectual property of Ayoub Zulfiqar (https://ayoubzulfiqar.com, contact@ayoubzulfiqar.com).
+
+Permission is NOT granted for personal use, reproduction, modification, distribution, or any other use of this work without explicit written permission from the author.
+
+Unauthorized use is prohibited.
