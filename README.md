@@ -1,5 +1,7 @@
 # AeroLLM
 
+![Logo](assets/aero.png)
+
 AeroLLM is a high-performance, intelligent LLM routing and proxy server written in Go. It provides intelligent routing between multiple LLM providers, agentic tool execution, Redis caching, rate limiting, and OpenTelemetry observability.
 
 ## Features
