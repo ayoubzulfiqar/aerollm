@@ -692,3 +692,28 @@ aerollm eval --kind regression
 aerollm eval --kind benchmark --dataset '{"prompt":"hello"}\n' --model m1 --provider p1
 ```
 
+
+## Phase 25: Policy Engine & Compliance Guardrails
+
+HTTP policy evaluation with rule-based access control.
+
+- `HTTPPolicyRule` describes web-exposed compliance rules
+- `HTTPPolicyStore` stores rules with CRUD operations
+- `PolicyDecision` captures evaluation result with severity and allowed state
+- `HTTPBlockHandler` returns middleware that blocks disallowed requests with `HTTP 451`
+- `/v1/policy` accepts POST for create/update and GET for listing
+- `/v1/policy/block` enforces policy middleware and returns blocked decisions
+
+```bash
+curl -X POST http://localhost:8080/v1/policy -H 'content-type: application/json' -d '{"id":"deny-post","expression":"deny-post","severity":"high"}'
+curl http://localhost:8080/v1/policy
+curl -X POST http://localhost:8080/v1/policy/block -H 'content-type: application/json' -d '{"method":"POST"}'
+```
+
+CLI:
+
+```bash
+aerollm policy --id allow --expr allow --severity low
+aerollm policy
+```
+

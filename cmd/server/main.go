@@ -247,6 +247,17 @@ func main() {
 	flagStore := flags.NewStore()
 	mux.HandleFunc("/v1/flags", flags.WebhookHandler(flagStore))
 	mux.HandleFunc("/v1/flags/", flags.WebhookHandler(flagStore))
+	mux.HandleFunc("/v1/eval/judge", newEvalJudgeHandler())
+	mux.HandleFunc("/v1/eval/regression", newEvalRegressionHandler())
+	mux.HandleFunc("/v1/eval/benchmark", newEvalBenchmarkHandler())
+	policyStore := compliance.NewHTTPPolicyStore()
+	mux.HandleFunc("/v1/policy", compliance.HTTPPolicyHandler(policyStore))
+	mux.HandleFunc("/v1/policy/block", func(w http.ResponseWriter, r *http.Request) {
+		compliance.HTTPBlockHandler(policyStore)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status":"ok"})
+		})).ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
