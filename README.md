@@ -738,3 +738,28 @@ aerollm retention --id logs --resource logs --ttl 24 --max-items 1000
 aerollm retention
 ```
 
+
+## Phase 27: Incident Management & Alerting
+
+Incident lifecycle management for operational response.
+
+- `Incident` captures `ID`, `Title`, `Description`, `Severity`, `Status`, `Source`, timestamps
+- `Store` manages incidents with `Create`, `Get`, `List`, `Update`, and `Resolve`
+- `Severity` supports low/medium/high/critical levels
+- `Status` tracks open/investigating/resolved/closed
+- `/v1/incidents` accepts POST for create, GET for list/get, PUT for update
+- `/v1/incidents?id={id}&resolve=true` resolves an incident
+
+```bash
+curl -X POST http://localhost:8080/v1/incidents -H 'content-type: application/json' -d '{"title":"outage","severity":"high","status":"open"}'
+curl http://localhost:8080/v1/incidents
+curl -X PUT "http://localhost:8080/v1/incidents?id=inc_123" -H 'content-type: application/json' -d '{"status":"resolved"}'
+```
+
+CLI:
+
+```bash
+aerollm incident --title "outage" --severity high
+aerollm incident
+```
+

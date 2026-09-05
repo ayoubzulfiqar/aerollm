@@ -37,6 +37,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newEvalCmd())
 	root.AddCommand(newPolicyCmd())
 	root.AddCommand(newRetentionCmd())
+	root.AddCommand(newIncidentCmd())
 
 	return root
 }
