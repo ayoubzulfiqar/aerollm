@@ -50,6 +50,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/backpressure"
 	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
 	"github.com/ayoubzulfiqar/aerollm/internal/compliance"
+	"github.com/ayoubzulfiqar/aerollm/internal/admission"
 	"github.com/ayoubzulfiqar/aerollm/internal/slo"
 	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
@@ -241,6 +242,9 @@ func main() {
 	})
 	mux.HandleFunc("/v1/slo/budget", slo.Handler(slo.NewErrorBudget(100), "latency"))
 	mux.HandleFunc("/backpressure/status", backpressureController.Handler())
+	mux.HandleFunc("/v1/admission/validate", admission.WebhookHandler(admission.ValidatorFunc(func(req admission.AdmissionRequest) admission.AdmissionResponse {
+		return admission.AdmissionResponse{Allowed: true, Reason: "admission allow"}
+	})))
 	mux.HandleFunc("/v1/audit/events", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)

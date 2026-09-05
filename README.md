@@ -600,6 +600,26 @@ aerollm audit events --limit 20
 curl http://localhost:8080/v1/audit/events
 ```
 
+## Phase 21: Admission Control & Webhook Validation
+
+Request validation and admission webhook framework.
+
+- `AdmissionRequest` captures `Kind`, `Resource`, `Path`, `Method`, `Headers`, `Body`
+- `AdmissionResponse` carries `Allowed` and `Reason`
+- `Validator` interface for pluggable validation logic
+- `WebhookHandler` exposes `/v1/admission/validate` for JSON admission reviews
+- `KindFromHTTPMethod` maps HTTP verbs to create/update/delete kinds
+
+```bash
+curl -X POST http://localhost:8080/v1/admission/validate -H 'content-type: application/json' -d '{"resource":"models","path":"/v1/models","method":"POST"}'
+```
+
+CLI:
+
+```bash
+aerollm admission validate
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.

@@ -31,6 +31,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newBackpressureCmd())
 	root.AddCommand(newQuotaCmd())
 	root.AddCommand(newAuditCmd())
+	root.AddCommand(newAdmissionCmd())
 
 	return root
 }

@@ -298,6 +298,13 @@ func TestAuditEventsOutput(t *testing.T) {
 	}
 }
 
+func TestAdmissionValidateOutput(t *testing.T) {
+	output := captureOutput(t, []string{"admission", "validate"})
+	if !strings.Contains(output, "allowed") {
+		t.Fatalf("expected admission output, got: %s", output)
+	}
+}
+
 func TestTrafficShadowOutput(t *testing.T) {
 	output := captureOutput(t, []string{"traffic", "shadow"})
 	if !strings.Contains(output, "shadow") {
