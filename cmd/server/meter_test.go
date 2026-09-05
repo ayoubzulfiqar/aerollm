@@ -47,7 +47,7 @@ func TestMeterUsageRoute(t *testing.T) {
 	buf := make([]byte, 4096)
 	n, _ := resp.Body.Read(buf)
 	output := string(buf[:n])
-	if !strings.Contains(output, `"APIKey":"k1"`) {
-		t.Fatalf("expected APIKey in output, got: %s", output)
+	if !strings.Contains(output, `"api_key":"k1"`) {
+		t.Fatalf("expected api_key in output, got: %s", output)
 	}
 }

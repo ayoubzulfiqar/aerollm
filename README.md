@@ -644,3 +644,24 @@ CLI:
 ```bash
 aerollm meter usage
 ```
+
+## Phase 23: Feature Flags & Rollout Engine
+
+Pluggable feature flag store with rollout strategies.
+
+- `FeatureFlag` captures `Key`, `Enabled`, `Strategy`, `Percentage`, `AllowList`, `DenyList`, `Metadata`
+- `Store` supports `Upsert`, `Get`, `List`, `SetRollout`, and `Enabled` evaluation
+- `RolloutStrategy` supports global, percentage, allowlist, and denylist modes
+- `/v1/flags` accepts POST for create/update and GET for listing
+- `/v1/flags/{key}` returns a specific flag
+- CLI: `aerollm flags --key <flag>` and `aerollm flags --set '{"key":"x","enabled":true}'
+
+```bash
+curl -X POST http://localhost:8080/v1/flags/darkmode -H 'content-type: application/json' -d '{"key":"darkmode","enabled":true,"strategy":"global"}'
+curl http://localhost:8080/v1/flags/darkmode
+```
+
+```bash
+aerollm flags --set '{"key":"darkmode","enabled":true,"strategy":"global"}' --key darkmode
+```
+

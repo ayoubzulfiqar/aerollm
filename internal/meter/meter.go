@@ -7,13 +7,13 @@ import (
 
 // UsageRecord captures a single usage event.
 type UsageRecord struct {
-	Timestamp time.Time
-	APIKey    string
-	Provider  string
-	Model     string
-	TokensIn  int64
-	TokensOut int64
-	LatencyMs float64
+	Timestamp time.Time `json:"timestamp"`
+	APIKey    string     `json:"api_key"`
+	Provider  string     `json:"provider"`
+	Model     string     `json:"model"`
+	TokensIn  int64      `json:"tokens_in"`
+	TokensOut int64      `json:"tokens_out"`
+	LatencyMs float64    `json:"latency_ms"`
 }
 
 // Recorder records usage events in memory.
