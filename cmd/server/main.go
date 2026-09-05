@@ -50,6 +50,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/backpressure"
 	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
 	"github.com/ayoubzulfiqar/aerollm/internal/compliance"
+	"github.com/ayoubzulfiqar/aerollm/internal/meter"
 	"github.com/ayoubzulfiqar/aerollm/internal/admission"
 	"github.com/ayoubzulfiqar/aerollm/internal/slo"
 	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
@@ -242,6 +243,22 @@ func main() {
 	})
 	mux.HandleFunc("/v1/slo/budget", slo.Handler(slo.NewErrorBudget(100), "latency"))
 	mux.HandleFunc("/backpressure/status", backpressureController.Handler())
+	mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req meter.UsageRecord
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		recorder := meter.NewRecorder()
+		recorder.Record(req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(recorder.Records())
+	})
 	mux.HandleFunc("/v1/admission/validate", admission.WebhookHandler(admission.ValidatorFunc(func(req admission.AdmissionRequest) admission.AdmissionResponse {
 		return admission.AdmissionResponse{Allowed: true, Reason: "admission allow"}
 	})))

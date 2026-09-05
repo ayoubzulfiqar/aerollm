@@ -625,3 +625,22 @@ aerollm admission validate
 - Injection shield returns `HTTP 403`.
 - PII redaction rewrites the request body with placeholders; original body is preserved in request context for downstream handlers that need restoration.
 - API key scoping enforces `AllowedModels` and `IPAllowlist`.
+
+## Phase 22: Usage Metering & Telemetry Export
+
+Usage recording and telemetry export for observability pipelines.
+
+- `UsageRecord` captures `APIKey`, `Provider`, `Model`, `TokensIn`, `TokensOut`, `LatencyMs`
+- `Recorder` stores usage events in memory with thread-safe access
+- `/v1/meter/usage` accepts usage records and returns recorded metrics
+- Intended to integrate with `pkg/telemetry` and billing providers
+
+```bash
+curl -X POST http://localhost:8080/v1/meter/usage -H 'content-type: application/json' -d '{"api_key":"k1","provider":"p1","model":"m1","tokens_in":10,"tokens_out":20,"latency_ms":100}'
+```
+
+CLI:
+
+```bash
+aerollm meter usage
+```
