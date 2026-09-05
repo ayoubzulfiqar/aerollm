@@ -717,3 +717,24 @@ aerollm policy --id allow --expr allow --severity low
 aerollm policy
 ```
 
+
+## Phase 26: Data Retention & Lifecycle Management
+
+Data retention policies for managing resource lifecycles.
+
+- `RetentionPolicy` captures `ID`, `Resource`, `TTL`, `MaxItems`, `CreatedAt`
+- `RetentionStore` manages retention policies with CRUD operations
+- `/v1/retention` accepts POST for create/update and GET for listing
+
+```bash
+curl -X POST http://localhost:8080/v1/retention -H 'content-type: application/json' -d '{"id":"logs","resource":"logs","ttl":24,"max_items":1000}'
+curl http://localhost:8080/v1/retention
+```
+
+CLI:
+
+```bash
+aerollm retention --id logs --resource logs --ttl 24 --max-items 1000
+aerollm retention
+```
+

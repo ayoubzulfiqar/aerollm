@@ -34,6 +34,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
+	"github.com/ayoubzulfiqar/aerollm/internal/retention"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
@@ -258,6 +259,8 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]string{"status":"ok"})
 		})).ServeHTTP(w, r)
 	})
+	retentionStore := retention.NewRetentionStore()
+	mux.HandleFunc("/v1/retention", retention.WebhookHandler(retentionStore))
 	mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
