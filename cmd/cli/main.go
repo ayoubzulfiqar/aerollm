@@ -34,6 +34,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAdmissionCmd())
 	root.AddCommand(newMeterCmd())
 	root.AddCommand(newFlagsCmd())
+	root.AddCommand(newEvalCmd())
 
 	return root
 }

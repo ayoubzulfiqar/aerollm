@@ -665,3 +665,30 @@ curl http://localhost:8080/v1/flags/darkmode
 aerollm flags --set '{"key":"darkmode","enabled":true,"strategy":"global"}' --key darkmode
 ```
 
+
+## Phase 24: Evaluation Engine & Judge Pipeline
+
+Automated scoring and regression detection for LLM outputs.
+
+- `JudgePipeline` scores requests against a judge model rubric and persists results
+- `RegressionDetector` identifies prompt-version score regressions
+- `BenchmarkRunner` runs JSONL datasets and returns aggregate scores
+- `InMemoryScoreStore` stores scores in memory
+- `/v1/eval/judge` accepts scoring requests and returns scores
+- `/v1/eval/regression` detects score regressions
+- `/v1/eval/benchmark` runs datasets and returns aggregates
+
+```bash
+curl -X POST http://localhost:8080/v1/eval/judge -H 'content-type: application/json' -d '{"prompt":"hi","response":"hello","model":"m1","provider":"p1","prompt_version":"v1"}'
+curl http://localhost:8080/v1/eval/regression
+curl -X POST http://localhost:8080/v1/eval/benchmark -H 'content-type: application/json' -d '{"dataset":"{\"prompt\":\"hello\"}\n","model":"m1","provider":"p1","rubric":"general"}'
+```
+
+CLI:
+
+```bash
+aerollm eval --kind judge --prompt hi --response hello --model m1 --provider p1 --prompt-version v1
+aerollm eval --kind regression
+aerollm eval --kind benchmark --dataset '{"prompt":"hello"}\n' --model m1 --provider p1
+```
+
