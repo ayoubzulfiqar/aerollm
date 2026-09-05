@@ -37,6 +37,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/retention"
 	"github.com/ayoubzulfiqar/aerollm/internal/schedule"
 	"github.com/ayoubzulfiqar/aerollm/internal/secrets"
+	"github.com/ayoubzulfiqar/aerollm/internal/region"
 	"github.com/ayoubzulfiqar/aerollm/internal/incident"
 	"github.com/ayoubzulfiqar/aerollm/internal/notification"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
@@ -274,6 +275,10 @@ func main() {
 	mux.HandleFunc("/v1/schedule", schedule.WebhookHandler(scheduleStore))
 	secretsStore := secrets.NewStore()
 	mux.HandleFunc("/v1/secrets", secrets.WebhookHandler(secretsStore))
+	regionStore := region.NewStore()
+	mux.HandleFunc("/v1/region/regions", region.WebhookHandler(regionStore))
+	mux.HandleFunc("/v1/region/residency", region.WebhookHandler(regionStore))
+	mux.HandleFunc("/v1/region/routes", region.WebhookHandler(regionStore))
 	mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)

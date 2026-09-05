@@ -832,3 +832,30 @@ aerollm secrets --name "api-key" --value "secret123" --type token
 aerollm secrets
 ```
 
+
+## Phase 31: Multi-Region Routing & Data Residency
+
+Region-aware routing and data residency controls.
+
+- `Region` captures `ID`, `Name`, `Endpoint`, `Primary`
+- `ResidencyPolicy` defines data residency requirements by region
+- `RouteRule` defines routing rules by region with provider and priority
+- `Store` manages regions, policies, and rules in memory
+- `/v1/region/regions` accepts POST for create and GET for listing
+- `/v1/region/residency` accepts POST for create and GET for listing
+- `/v1/region/routes` accepts POST for create and GET for listing
+
+```bash
+curl -X POST http://localhost:8080/v1/region/regions -H 'content-type: application/json' -d '{"id":"us-east-1","name":"US East","endpoint":"https://us.example.com","primary":true}'
+curl http://localhost:8080/v1/region/regions
+curl -X POST http://localhost:8080/v1/region/residency -H 'content-type: application/json' -d '{"id":"p1","region":"us-east-1","data_type":"pii","required":true}'
+curl http://localhost:8080/v1/region/routes -H 'content-type: application/json' -d '{"id":"r1","region":"us-east-1","providers":["openai"],"priority":1,"enabled":true}'
+```
+
+CLI:
+
+```bash
+aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
+aerollm region
+```
+
