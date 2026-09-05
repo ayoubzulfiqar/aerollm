@@ -494,6 +494,17 @@ CLI:
 aerollm chaos fault
 ```
 
+## Phase 17 Server Routes
+
+- `POST /v1/chaos/fault` accepts JSON config and returns fault status with HTTP 202
+- `GET /resilience/status` returns current resilience state
+- `GET /healthz` returns liveness
+- `GET /readyz` returns readiness from registered checkers
+
+```bash
+curl http://localhost:8080/resilience/status
+```
+
 ## Phase 18: Backpressure Control & Load Shedding
 
 Flow control and load shedding primitives for high-load paths.
@@ -512,6 +523,17 @@ CLI:
 
 ```bash
 aerollm backpressure
+```
+
+## Phase 18 Server Routes
+
+- `GET /backpressure/status` returns current controller metrics
+- `POST /v1/chaos/fault` updates fault injection config
+- `GET /resilience/status` returns resilience state
+- `GET /readyz` returns readiness status
+
+```bash
+curl http://localhost:8080/backpressure/status
 ```
 
 ## Phase 19: Quota Enforcement & Tenant Store
@@ -534,6 +556,17 @@ CLI:
 aerollm quota
 ```
 
+## Phase 19 Server Routes
+
+- `POST /v1/quota` inspects quota limits and usage
+- `GET /backpressure/status` returns backpressure metrics
+- `GET /v1/chaos/fault` returns chaos fault config
+- `GET /resilience/status` returns resilience state
+
+```bash
+curl -X POST http://localhost:8080/v1/quota -H 'content-type: application/json' -d '{"id":"q1","scope":"tenant","target_id":"t1","limit":100,"used":25}'
+```
+
 ## Phase 20: Audit Logging & Compliance Pipeline
 
 Structured audit events with append-only storage and replay.
@@ -552,6 +585,19 @@ CLI:
 
 ```bash
 aerollm audit events --limit 20
+```
+
+## Phase 20 Server Routes
+
+- `POST /v1/audit/events` streams JSON audit records
+- `POST /v1/quota` inspects quota state
+- `GET /backpressure/status` returns backpressure metrics
+- `GET /resilience/status` returns resilience state
+- `GET /healthz` returns liveness
+- `GET /readyz` returns readiness
+
+```bash
+curl http://localhost:8080/v1/audit/events
 ```
 
 ## Guardrails
