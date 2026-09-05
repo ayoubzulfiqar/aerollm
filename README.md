@@ -763,3 +763,26 @@ aerollm incident --title "outage" --severity high
 aerollm incident
 ```
 
+
+## Phase 28: Notification Channels & Subscriptions
+
+Multi-channel notification routing for alerts and incidents.
+
+- `Channel` captures `ID`, `Name`, `Type`, `Target`, `Enabled`, `Metadata`
+- `Subscription` links `AlertID` to `ChannelID`
+- `Store` manages channels and subscriptions in memory
+- `/v1/notification/channels` accepts POST for create and GET for listing
+- `/v1/notification/subscriptions` accepts POST for create and GET for listing
+
+```bash
+curl -X POST http://localhost:8080/v1/notification/channels -H 'content-type: application/json' -d '{"id":"c1","name":"ops","type":"webhook","target":"https://example.com/alerts","enabled":true}'
+curl http://localhost:8080/v1/notification/channels
+```
+
+CLI:
+
+```bash
+aerollm notification --resource channel
+aerollm notification --resource subscription
+```
+
