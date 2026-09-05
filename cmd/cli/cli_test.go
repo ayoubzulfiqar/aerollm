@@ -268,6 +268,13 @@ func TestResilienceOutput(t *testing.T) {
 	}
 }
 
+func TestChaosFaultOutput(t *testing.T) {
+	output := captureOutput(t, []string{"chaos", "fault"})
+	if !strings.Contains(output, "type") {
+		t.Fatalf("expected chaos output, got: %s", output)
+	}
+}
+
 func TestTrafficShadowOutput(t *testing.T) {
 	output := captureOutput(t, []string{"traffic", "shadow"})
 	if !strings.Contains(output, "shadow") {

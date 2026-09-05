@@ -46,6 +46,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/state"
 	"github.com/ayoubzulfiqar/aerollm/internal/studio"
 	"github.com/ayoubzulfiqar/aerollm/internal/synthesis"
+	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
 	"github.com/ayoubzulfiqar/aerollm/internal/slo"
 	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
@@ -235,6 +236,7 @@ func main() {
 		_, _ = w.Write([]byte(`{"shadow":"accepted"}`))
 	})
 	mux.HandleFunc("/v1/slo/budget", slo.Handler(slo.NewErrorBudget(100), "latency"))
+	mux.HandleFunc("/v1/chaos/fault", chaos.Handler(chaos.NewInjector(chaos.Config{})))
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
 
 	graphStore := graphrag.NewBboltGraphStore()

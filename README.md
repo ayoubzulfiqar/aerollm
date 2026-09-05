@@ -474,6 +474,26 @@ CLI:
 aerollm slo budget --target latency
 ```
 
+## Phase 17: Chaos Fault Injection & Resilience Testing
+
+Configurable fault injection endpoints for chaos engineering.
+
+- `Config` supports `latency`, `error`, and `panic` fault types
+- `Injector.ShouldFault` samples randomized percentage to apply faults
+- `Handler` on `/v1/chaos/fault` accepts JSON config and returns status
+- `RecoverPanic` middleware catches injected panics and returns `HTTP 500`
+- Intended for integration with `internal/middleware` and `/v1/chat/completions` flows
+
+```bash
+curl -X POST http://localhost:8080/v1/chaos/fault -H 'content-type: application/json' -d '{"type":"error","percent":100}'
+```
+
+CLI:
+
+```bash
+aerollm chaos fault
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.
