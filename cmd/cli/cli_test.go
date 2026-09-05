@@ -291,6 +291,13 @@ func TestQuotaOutput(t *testing.T) {
 	}
 }
 
+func TestAuditEventsOutput(t *testing.T) {
+	output := captureOutput(t, []string{"audit", "events"})
+	if !strings.Contains(output, "Decision") {
+		t.Fatalf("expected audit output, got: %s", output)
+	}
+}
+
 func TestTrafficShadowOutput(t *testing.T) {
 	output := captureOutput(t, []string{"traffic", "shadow"})
 	if !strings.Contains(output, "shadow") {

@@ -514,6 +514,46 @@ CLI:
 aerollm backpressure
 ```
 
+## Phase 19: Quota Enforcement & Tenant Store
+
+Per-tenant, team, and user quota tracking with usage enforcement.
+
+- `Quota` defines `Limit`, `Used`, `Burst`, `Scope`, and `Window`
+- `InMemoryQuotaStore` provides `Upsert`, `Get`, `ForScope`, and `Enforce`
+- `Enforce` returns `QuotaEnforcedError` when usage exceeds limit
+- `InMemoryStore` in `tenant` package handles org, team, user, and API key CRUD
+- Designed to integrate with `internal/middleware` for request-time enforcement
+
+```bash
+curl -X POST http://localhost:8080/v1/quota -H 'content-type: application/json' -d '{"id":"q1","scope":"tenant","target_id":"t1","limit":100,"used":25}'
+```
+
+CLI:
+
+```bash
+aerollm quota
+```
+
+## Phase 20: Audit Logging & Compliance Pipeline
+
+Structured audit events with append-only storage and replay.
+
+- `AuditEvent` captures actor, action, target, metadata, and timestamp
+- `MemoryAuditLogger` stores events in memory for testing
+- `PolicyRegistry` loads named policies for compliance checks
+- `/v1/audit/events` endpoint streams JSON audit records
+- `internal/compliance` exposes `AuditLogger` interface for durable backends
+
+```bash
+curl http://localhost:8080/v1/audit/events
+```
+
+CLI:
+
+```bash
+aerollm audit events --limit 20
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.

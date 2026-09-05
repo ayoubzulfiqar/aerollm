@@ -30,6 +30,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newChaosCmd())
 	root.AddCommand(newBackpressureCmd())
 	root.AddCommand(newQuotaCmd())
+	root.AddCommand(newAuditCmd())
 
 	return root
 }

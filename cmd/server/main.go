@@ -49,6 +49,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/tenant"
 	"github.com/ayoubzulfiqar/aerollm/internal/backpressure"
 	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
+	"github.com/ayoubzulfiqar/aerollm/internal/compliance"
 	"github.com/ayoubzulfiqar/aerollm/internal/slo"
 	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
@@ -240,6 +241,22 @@ func main() {
 	})
 	mux.HandleFunc("/v1/slo/budget", slo.Handler(slo.NewErrorBudget(100), "latency"))
 	mux.HandleFunc("/backpressure/status", backpressureController.Handler())
+	mux.HandleFunc("/v1/audit/events", func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil {
+			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+		var req struct{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		logger := compliance.NewMemoryAuditLogger()
+		logger.Log(&compliance.AuditEvent{Timestamp: time.Now(), Policy: "default", Decision: "allow", Reason: "audit endpoint"})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(logger.Events())
+	})
 	mux.HandleFunc("/v1/quota", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
 			http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
