@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newIncidentCmd())
 	root.AddCommand(newNotificationCmd())
 	root.AddCommand(newScheduleCmd())
+	root.AddCommand(newSecretsCmd())
 
 	return root
 }

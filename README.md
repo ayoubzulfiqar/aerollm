@@ -810,3 +810,25 @@ aerollm schedule --name "backup" --schedule "0 0 * * *"
 aerollm schedule
 ```
 
+
+## Phase 30: Secrets Management & Vault Integration
+
+In-memory secret storage with metadata and lifecycle management.
+
+- `Secret` captures `ID`, `Name`, `Value`, `Type`, `Metadata`, `CreatedAt`
+- `Store` manages secrets with `Upsert`, `Get`, `List`, and `Delete`
+- `/v1/secrets` accepts POST for create, GET for list/get, and DELETE for removal
+
+```bash
+curl -X POST http://localhost:8080/v1/secrets -H 'content-type: application/json' -d '{"name":"api-key","value":"secret123","type":"token"}'
+curl http://localhost:8080/v1/secrets
+curl -X DELETE "http://localhost:8080/v1/secrets?id=sec_api-key"
+```
+
+CLI:
+
+```bash
+aerollm secrets --name "api-key" --value "secret123" --type token
+aerollm secrets
+```
+
