@@ -28,6 +28,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newTrafficCmd())
 	root.AddCommand(newSloCmd())
 	root.AddCommand(newChaosCmd())
+	root.AddCommand(newBackpressureCmd())
 
 	return root
 }

@@ -494,6 +494,26 @@ CLI:
 aerollm chaos fault
 ```
 
+## Phase 18: Backpressure Control & Load Shedding
+
+Flow control and load shedding primitives for high-load paths.
+
+- `BackpressureController.Allow` gates requests against `MaxInflight`
+- `Metrics` exposes `inflight`, `dropped`, `total`, `drop_rate`, and rolling window info
+- `/backpressure/status` returns current controller metrics as JSON
+- `Middleware` drops requests with `HTTP 503` when controller is saturated
+- Windowed reset prevents stale counters from masking throughput regressions
+
+```bash
+curl http://localhost:8080/backpressure/status
+```
+
+CLI:
+
+```bash
+aerollm backpressure
+```
+
 ## Guardrails
 
 - Injection shield returns `HTTP 403`.
