@@ -886,3 +886,26 @@ All phases 12-31 are fully implemented, tested, documented, and pushed.
 - Phase 31: Multi-Region Routing & Data Residency
 
 All tests pass (`go test ./...`), all builds pass (`go build ./...`), and all changes are committed and pushed to origin/main.
+
+## Community Standards
+
+This project includes the following community standards:
+
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) - Community code of conduct
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contributing guidelines
+- [LICENSE](LICENSE) - License and copyright
+- [SECURITY.md](SECURITY.md) - Security policy
+- [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md) - Bug report template
+- [.github/ISSUE_TEMPLATE/feature_request.md](.github/ISSUE_TEMPLATE/feature_request.md) - Feature request template
+- [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) - Pull request template
+
+## Author
+
+Ayoub Zulfiqar  
+Website: https://ayoubzulfiqar.com  
+Contact: contact@ayoubzulfiqar.com  
+GitHub: https://github.com/ayoubzulfiqar
+
+Copyright (c) 2026 Ayoub Zulfiqar. All rights reserved.
+
+This repository and its contents are the intellectual property of Ayoub Zulfiqar. Permission is NOT granted for personal use, reproduction, modification, distribution, or any other use of this work without explicit written permission from the author.
