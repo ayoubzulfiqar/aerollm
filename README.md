@@ -25,36 +25,45 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **Webhooks**: Async retry-capable webhook delivery with exponential backoff
 
 ### Advanced
-- **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
-- **MCP Hub**: Native Model Context Protocol server for external tool integration
-- **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
-- **Context Manager**: Token counting and auto-summarization for long conversations
-- **GitOps**: Git-backed prompt template versioning and delivery
-- **Immutable Ledger**: Cryptographic audit chain for request/response integrity
-- **WASM Sandbox**: Zero-trust isolated tool execution runtime
-- **Realtime**: Bidirectional WebSocket streaming with barge-in support
-- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
-- **Kubernetes Operator**: Control-plane reconciliation for routes, budgets, and agent pipelines
-- **Flywheel**: Feedback ingestion, dataset export, and fine-tuning pipeline
-- **Embedded State**: bbolt-backed KV with flat vector index for zero-latency agent memory
-- **Agent Swarms**: Dynamic sub-agent spawning with shared hive-mind context
-- **Red-Teaming**: Adversarial prompt generation and self-healing patch proposal
-- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner
-- **Compliance-as-Code**: Policy engine with HTTP 451 enforcement
-- **Multi-Tenant**: Hierarchical tenant model with tenant-scoped service wrappers
-- **Plugins**: WASM-compatible plugin interface with lifecycle hooks and registry
-- **Marketplace**: Signed manifest verification, registry client, micro-royalty tracking
-- **Post-Quantum Crypto**: ML-KEM/ML-DSA hybrid key management and stream encryptors
-- **Spatial Fabric**: Chunked video/3D streaming and WebXR spatial translation
-- **Federated Learning**: FedAvg aggregation for secure LoRA weight averaging
-- **Edge Companion**: Local-first binary with bbolt, hardware detection, and WASM sandbox
-- **Policy Engine**: HTTP policy evaluation with rule-based access control
-- **Data Retention**: TTL and max-items retention policies
-- **Incident Management**: Incident lifecycle with severity and status tracking
-- **Notifications**: Multi-channel notification routing (webhook, email, Slack, SMS)
-- **Scheduled Tasks**: Cron, interval, and onetime automation tasks
-- **Secrets Management**: In-memory secret storage with metadata
-- **Multi-Region**: Region-aware routing and data residency controls
+|- **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
+|- **MCP Hub**: Native Model Context Protocol server for external tool integration
+|- **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
+|- **Context Manager**: Token counting and auto-summarization for long conversations
+|- **GitOps**: Git-backed prompt template versioning and delivery
+|- **Immutable Ledger**: Cryptographic audit chain for request/response integrity
+|- **WASM Sandbox**: Zero-trust isolated tool execution runtime
+|- **Realtime**: Bidirectional WebSocket streaming with barge-in support
+|- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
+|- **Kubernetes Operator**: Control-plane reconciliation for routes, budgets, and agent pipelines
+|- **Flywheel**: Feedback ingestion, dataset export, and fine-tuning pipeline
+|- **Embedded State**: bbolt-backed KV with flat vector index for zero-latency agent memory
+|- **Agent Swarms**: Dynamic sub-agent spawning with shared hive-mind context
+|- **Red-Teaming**: Adversarial prompt generation and self-healing patch proposal
+|- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner
+|- **Compliance-as-Code**: Policy engine with HTTP 451 enforcement
+|- **Multi-Tenant**: Hierarchical tenant model with tenant-scoped service wrappers
+|- **Plugins**: WASM-compatible plugin interface with lifecycle hooks and registry
+|- **Marketplace**: Signed manifest verification, registry client, micro-royalty tracking
+|- **Post-Quantum Crypto**: ML-KEM/ML-DSA hybrid key management and stream encryptors
+|- **Spatial Fabric**: Chunked video/3D streaming and WebXR spatial translation
+|- **Federated Learning**: FedAvg aggregation for secure LoRA weight averaging
+|- **Edge Companion**: Local-first binary with bbolt, hardware detection, and WASM sandbox
+|- **Policy Engine**: HTTP policy evaluation with rule-based access control
+|- **Data Retention**: TTL and max-items retention policies
+|- **Incident Management**: Incident lifecycle with severity and status tracking
+|- **Notifications**: Multi-channel notification routing (webhook, email, Slack, SMS)
+|- **Scheduled Tasks**: Cron, interval, and onetime automation tasks
+|- **Secrets Management**: In-memory secret storage with metadata
+|- **Multi-Region**: Region-aware routing and data residency controls
+
+### Enterprise & Migration
+|- **Virtual Keys & Agencies**: Per-key rate limits, budget tracking, and agency-level RBAC
+|- **LiteLLM Migration CLI**: Convert LiteLLM `litellm_config.yaml` to AeroLLM `config.yaml`
+|- **OpenAI-Compatible Batch API**: Asynchronous batch processing for large-scale LLM workloads
+|- **OpenAPI/Swagger Docs**: Auto-generated API spec with interactive Swagger UI
+|- **Standardized Rate Limit Headers**: OpenAI-compatible `X-RateLimit-*` headers for SDK backpressure
+|- **Cache Management APIs**: Inspect, stats, and clear endpoints for DevOps (admin-auth protected)
+|- **Advanced Provider Features**: OpenAI structured outputs (JSON schema) and Anthropic prompt caching
 
 ## Quick Start
 
@@ -401,9 +410,157 @@ aerollm schedule --name "backup" --schedule "0 0 * * *"
 # Secrets
 aerollm secrets --name "api-key" --value "secret123" --type token
 
-# Region
+|# Region
 aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
 ```
+
+## Migration CLI
+
+AeroLLM includes a CLI tool for migrating LiteLLM configurations to AeroLLM format:
+
+```bash
+# Install the CLI
+go build -o aerollm ./cmd/cli
+
+# Migrate a LiteLLM config to AeroLLM config
+aerollm migrate litellm --input litellm_config.yaml --output config.yaml
+```
+
+The migration tool translates:
+- `model_list` entries into AeroLLM `providers` list
+- `litellm_params.api_key` into `api_key` (with `${ENV_VAR}` references)
+- `litellm_params.api_base` into `base_url`
+- `litellm_params.model` into `models` list
+- `router_settings.routing_strategy` into `router.strategy`
+
+Supported strategy mappings:
+- `simple-rotation` / `round robin` → `round_robin`
+- `lowest-latency` → `latency`
+- `cost` / `cost-optimized` → `cost`
+- `least-busy` → `least-busy`
+- `usage-based` → `usage-based`
+- `sequential` / `fallback` → `fallback`
+
+Supported model classification (prefix-based):
+- `bedrock/` → bedrock provider
+- `vertex_ai/` → gemini provider
+- `claude-*` → anthropic provider
+- `gpt-*` → openai-compatible provider
+- `gemini-*` → gemini provider
+- `llama-*` → openai-compatible (Groq) provider
+- `command-*` → openai-compatible (Cohere) provider
+
+## API Documentation
+
+AeroLLM provides auto-generated OpenAPI/Swagger documentation. Once the server is running, access:
+
+- **Swagger UI**: http://localhost:8080/swagger/index.html
+- **JSON spec**: http://localhost:8080/swagger/doc.json
+- **YAML spec**: http://localhost:8080/swagger/doc.yaml
+
+## Rate Limit Headers
+
+All responses include OpenAI-compatible rate limit headers for SDK backpressure handling:
+
+| Header | Description |
+|---|---|
+| `X-RateLimit-Limit-Requests` | Max requests allowed in the window |
+| `X-RateLimit-Limit-Tokens` | Max tokens allowed in the window |
+| `X-RateLimit-Remaining-Requests` | Remaining requests in the current window |
+| `X-RateLimit-Remaining-Tokens` | Remaining tokens in the current window |
+| `X-RateLimit-Reset-Requests` | Seconds until the request limit resets |
+| `X-RateLimit-Reset-Tokens` | Seconds until the token limit resets |
+
+Headers reflect per-key limits from Virtual Key or Tenant configuration. On 429 responses, remaining counts are zeroed.
+
+## Cache Management API
+
+DevOps endpoints for cache inspection and management. These require Master/Admin API key authentication (not standard virtual keys).
+
+```bash
+# Get cache statistics (exact + semantic)
+curl -H "Authorization: Bearer <master-key>" http://localhost:8080/v1/cache/stats
+
+# Clear cache (all, or specific type via ?type=semantic|exact)
+curl -X DELETE -H "Authorization: Bearer <master-key>" http://localhost:8080/v1/cache
+curl -X DELETE -H "Authorization: Bearer <master-key>" "http://localhost:8080/v1/cache?type=semantic"
+
+# Inspect cached entries (paginated, metadata-only for security)
+curl -H "Authorization: Bearer <master-key>" "http://localhost:8080/v1/cache/inspect?cursor=0&page_size=50"
+```
+
+## Batch API
+
+AeroLLM supports the OpenAI-compatible Batch API for asynchronous, large-scale processing.
+
+```bash
+# Create a batch job
+curl -X POST -H "Authorization: Bearer <master-key>" \
+  -F "file=@batch_input.jsonl" \
+  http://localhost:8080/v1/batches
+
+# Check batch status
+curl -H "Authorization: Bearer <master-key>" http://localhost:8080/v1/batches/batch_abc123
+
+# Download batch results (available when status is "completed")
+curl -H "Authorization: Bearer <master-key>" http://localhost:8080/v1/batches/batch_abc123/results
+```
+
+The input JSONL file format matches the OpenAI Batch API spec:
+```jsonl
+{"custom_id": "request-1", "method": "POST", "endpoint": "/v1/chat/completions", "body": {"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}}
+```
+
+Batch statuses: `validating` → `in_progress` → `completed` (or `failed`)
+
+## Advanced Provider Features
+
+### OpenAI Structured Outputs
+
+Send a `response_format` with `json_schema` type to get guaranteed structured JSON:
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "What is the capital of France?"}],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "capital_response",
+        "schema": {
+          "type": "object",
+          "properties": {"capital": {"type": "string"}, "population": {"type": "number"}},
+          "required": ["capital", "population"]
+        }
+      }
+    }
+  }'
+```
+
+### Anthropic Prompt Caching
+
+Use `cache_control` on messages to leverage Anthropic's prompt caching (up to 90% cost reduction for long prompts):
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "messages": [
+      {"role": "user", "content": "You are an expert analyst. Here is a 100-page report...", "cache_control": {"type": "ephemeral"}},
+      {"role": "user", "content": "Summarize the key findings."}
+    ]
+  }'
+```
+
+The adapter automatically:
+1. Sets the `anthropic-beta: prompt-caching-2024-02-15` header
+2. Inserts `cache_control` on the annotated message
+3. Uses Anthropic's native `/v1/messages` endpoint format
 
 ## Architecture
 
@@ -450,6 +607,8 @@ Request path for `/v1/chat/completions`:
 - `internal/evolution` — self-evolution proposal queue and scoring
 - `internal/learning` — autonomous fine-tuning pipeline from flywheel datasets
 - `internal/providers/universal` — provider registry and unified adapter/stream normalizer
+- `internal/batch` — async batch processing engine for OpenAI-compatible Batch API
+- `internal/middleware/ratelimit.go` — standardized rate limit header middleware
 - `internal/intelligence` — intent classification, model selection, bandit routing
 - `internal/tenant` — multi-tenant models and context propagation
 - `internal/plugins` — plugin hooks, registry, and WASM host
