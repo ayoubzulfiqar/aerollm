@@ -113,3 +113,99 @@ const TraceIDContextKey = "trace_id"
 func GenerateTraceID() string {
 	return ""
 }
+
+// ChatRequest is the request body for chat completions endpoints.
+type ChatRequest struct {
+	Model            string            `json:"model"`
+	Messages         []Message         `json:"messages"`
+	MaxTokens        *int              `json:"max_tokens,omitempty"`
+	Temperature      *float64          `json:"temperature,omitempty"`
+	TopP             *float64          `json:"top_p,omitempty"`
+	Stream           bool              `json:"stream"`
+	Stop             []string          `json:"stop,omitempty"`
+	PresencePenalty  *float64          `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64          `json:"frequency_penalty,omitempty"`
+	Tools            []ToolDefinition  `json:"tools,omitempty"`
+	RagEnabled       bool              `json:"rag_enabled,omitempty"`
+}
+
+// ChatResponse is the response body for chat completions endpoints.
+type ChatResponse struct {
+	ID             string     `json:"id"`
+	Object         string     `json:"object"`
+	Created        int64      `json:"created"`
+	Model          string     `json:"model"`
+	Choices        []Choice   `json:"choices"`
+	Usage          *Usage     `json:"usage,omitempty"`
+}
+
+// EmbeddingRequest is the request body for embeddings endpoints.
+type EmbeddingRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// EmbeddingResponse is the response body for embeddings endpoints.
+type EmbeddingResponse struct {
+	Object string      `json:"object"`
+	Data   []Embedding `json:"data"`
+	Model  string      `json:"model"`
+	Usage  *Usage      `json:"usage,omitempty"`
+}
+
+// Embedding represents a single embedding vector.
+type Embedding struct {
+	Object    string    `json:"object"`
+	Embedding []float64 `json:"embedding"`
+	Index     int       `json:"index"`
+}
+
+// ImageRequest is the request body for image generation endpoints.
+type ImageRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	N      int    `json:"n,omitempty"`
+	Size   string `json:"size,omitempty"`
+}
+
+// ImageResponse is the response body for image generation endpoints.
+type ImageResponse struct {
+	Created int64     `json:"created"`
+	Data    []Image   `json:"data"`
+}
+
+// Image represents a single generated image.
+type Image struct {
+	URL string `json:"url,omitempty"`
+	B64 string `json:"b64_json,omitempty"`
+}
+
+// AudioRequest is the request body for audio transcription/speech endpoints.
+type AudioRequest struct {
+	Model  string `json:"model"`
+	File   string `json:"file,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// AudioResponse is the response body for audio transcription endpoints.
+type AudioResponse struct {
+	Text string `json:"text"`
+}
+
+// ResponsesRequest is the request body for OpenAI-compatible responses endpoints.
+type ResponsesRequest struct {
+	Model     string    `json:"model"`
+	Input     string    `json:"input"`
+	Previous  *string   `json:"previous_response_id,omitempty"`
+	Tools     []ToolDefinition `json:"tools,omitempty"`
+}
+
+// ResponsesResponse is the response body for OpenAI-compatible responses endpoints.
+type ResponsesResponse struct {
+	ID             string     `json:"id"`
+	Object         string     `json:"object"`
+	CreatedAt      int64      `json:"created_at"`
+	Model          string     `json:"model"`
+	Output         []Message  `json:"output"`
+	Usage          *Usage     `json:"usage,omitempty"`
+}

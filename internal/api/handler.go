@@ -292,3 +292,34 @@ func RateLimitMiddleware(next http.HandlerFunc, rl ratelimit.RateLimiter) http.H
 		next(w, r)
 	}
 }
+
+// Embeddings handles the /v1/embeddings endpoint.
+func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ImageGenerations handles the /v1/images/generations endpoint.
+func (h *Handler) ImageGenerations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// AudioTranscriptions handles the /v1/audio/transcriptions endpoint.
+func (h *Handler) AudioTranscriptions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Responses handles the /v1/responses endpoint.
+func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
+	h.ChatCompletions(w, r)
+}
+
+// Messages handles the /v1/messages endpoint.
+func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
+	h.ChatCompletions(w, r)
+}

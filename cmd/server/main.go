@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	_ "net/http/pprof" // pprof profiling on :6060
 	"os"
 	"os/signal"
 	"sync"
@@ -63,6 +64,8 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/traffic"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/internal/zk"
+	"github.com/ayoubzulfiqar/aerollm/internal/providers"
+	"github.com/ayoubzulfiqar/aerollm/internal/tools"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 )
@@ -174,7 +177,51 @@ func main() {
 	r := NewRouter(router.Config{Strategy: appCfg.Router.Strategy})
 	rl := NewRateLimiter()
 	registry := agent.NewToolRegistry()
+
+	// Register built-in tools into the agent registry so the agent loop
+	// can execute tool calls (calculator, weather, time, search, echo).
+	for _, tool := range tools.All() {
+		if err := registry.Register(tool); err != nil {
+			logger.Error("failed to register tool", "tool", tool.Name(), "error", err)
+		} else {
+			logger.Info("tool registered", "tool", tool.Name())
+		}
+	}
+
+	// Register LLM providers into the router so requests can be routed
+	// to the appropriate backend. Providers are read from environment
+	// configuration; only non-empty configurations are registered.
+	if apiKey := getenvOrDefault("OPENAI_API_KEY", ""); apiKey != "" {
+		openaiClient := providers.NewOpenAIProvider(
+			"openai",
+			apiKey,
+			getenvOrDefault("OPENAI_BASE_URL", "https://api.openai.com"),
+		)
+		r.RegisterProvider(openaiClient)
+		logger.Info("provider registered", "provider", openaiClient.Name())
+	}
+
+	if apiKey := getenvOrDefault("ANTHROPIC_API_KEY", ""); apiKey != "" {
+		anthropicClient := providers.NewAnthropicProvider(
+			getenvOrDefault("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+			apiKey,
+			"claude-3-sonnet",
+		)
+		r.RegisterProvider(anthropicClient)
+		logger.Info("provider registered", "provider", anthropicClient.Name())
+	}
+
+	if localURL := getenvOrDefault("AEROLLM_LOCAL_URL", ""); localURL != "" {
+		local := providers.NewLocalProvider(localURL, getenvOrDefault("AEROLLM_LOCAL_MODEL", "llama-3-8b"))
+		r.RegisterProvider(local)
+		logger.Info("provider registered", "provider", local.Name())
+	}
+
+	// Create the agent engine. The ToolProvider adapter bridges the
+	// router's provider routing to the agent loop's CallLLM.
+	toolProviderAdapter := tools.NewRouterAdapter(r)
 	a := NewAgent(registry)
+	a.Provider = toolProviderAdapter
 	cacheInst := cache.NewRedisCache(redisClient, time.Hour)
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
 
@@ -363,6 +410,22 @@ func main() {
 	chatHandler = graphRAGMiddleware.Middleware(chatHandler)
 	chatHandler = zk.Middleware(nil)(chatHandler)
 	mux.HandleFunc("/v1/chat/completions", chatHandler.ServeHTTP)
+
+	embeddingsHandler := http.HandlerFunc(handler.Embeddings)
+	imagesHandler := http.HandlerFunc(handler.ImageGenerations)
+	audioHandler := http.HandlerFunc(handler.AudioTranscriptions)
+	responsesHandler := http.HandlerFunc(handler.Responses)
+	messagesHandler := http.HandlerFunc(handler.Messages)
+	embeddingsHandler = middleware.NewAuthMiddleware(embeddingsHandler.ServeHTTP).Next
+	imagesHandler = middleware.NewAuthMiddleware(imagesHandler.ServeHTTP).Next
+	audioHandler = middleware.NewAuthMiddleware(audioHandler.ServeHTTP).Next
+	responsesHandler = middleware.NewAuthMiddleware(responsesHandler.ServeHTTP).Next
+	messagesHandler = middleware.NewAuthMiddleware(messagesHandler.ServeHTTP).Next
+	mux.Handle("/v1/embeddings", embeddingsHandler)
+	mux.Handle("/v1/images/generations", imagesHandler)
+	mux.Handle("/v1/audio/transcriptions", audioHandler)
+	mux.Handle("/v1/responses", responsesHandler)
+	mux.Handle("/v1/messages", messagesHandler)
 
 	advanced := NewAdvancedAgent(registry, redisClient)
 	handler.Advanced = advanced
@@ -589,6 +652,24 @@ func main() {
 		fmt.Println("server starting on port 8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		}
+	}()
+
+	// Signal that the main API server is listening on :8080.
+	// The EngineManager (Flutter Desktop) detects this marker in stdout
+	// to determine server readiness.
+	go func() {
+		// Brief delay for the listener to bind.
+		time.Sleep(100 * time.Millisecond)
+		fmt.Println("listening on :8080")
+	}()
+
+	// Start a separate pprof server on :6060 so profiling does not
+	// interfere with the main :8080 gateway traffic.
+	go func() {
+		fmt.Println("pprof listening on :6060")
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			fmt.Fprintf(os.Stderr, "pprof server error: %v\n", err)
 		}
 	}()
 

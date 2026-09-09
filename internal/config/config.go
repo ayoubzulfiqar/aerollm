@@ -60,6 +60,32 @@ type ProviderConfig struct {
 	Weight       int           `mapstructure:"weight"`
 	Timeout      time.Duration `mapstructure:"timeout"`
 	RateLimitRPS float64       `mapstructure:"rate_limit_rps"`
+	Models       []string      `mapstructure:"models"`
+}
+
+// ResolvedName returns the effective provider name.
+func (p ProviderConfig) ResolvedName() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	return p.Type
+}
+
+// Endpoint returns the API base URL, ensuring a sane default.
+func (p ProviderConfig) Endpoint() string {
+	if p.BaseURL != "" {
+		return p.BaseURL
+	}
+	switch p.Type {
+	case "anthropic":
+		return "https://api.anthropic.com"
+	case "bedrock":
+		return "https://bedrock.us-east-1.amazonaws.com"
+	case "gemini":
+		return "https://generativelanguage.googleapis.com"
+	default:
+		return "https://api.openai.com/v1"
+	}
 }
 
 // RouterConfig holds routing settings.
