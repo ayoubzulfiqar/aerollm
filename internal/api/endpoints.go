@@ -11,6 +11,15 @@ import (
 )
 
 // Embeddings handles the /v1/embeddings endpoint.
+// @Summary Create embeddings
+// @Description Generate embeddings for the given input.
+// @Tags embeddings
+// @Accept json
+// @Produce json
+// @Param req body models.EmbeddingRequest true "Embeddings request"
+// @Success 200 {object} models.EmbeddingResponse
+// @Failure 400 {object} map[string]string
+// @Router /v1/embeddings [post]
 func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
@@ -46,6 +55,13 @@ func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
 }
 
 // ImageGenerations handles the /v1/images/generations endpoint.
+// @Summary Generate image
+// @Tags images
+// @Accept json
+// @Produce json
+// @Param req body models.ImageRequest true "Image generation request"
+// @Success 200 {object} models.ImageResponse
+// @Router /v1/images/generations [post]
 func (h *Handler) ImageGenerations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req models.ImageRequest
@@ -74,6 +90,13 @@ func (h *Handler) ImageGenerations(w http.ResponseWriter, r *http.Request) {
 }
 
 // AudioTranscriptions handles the /v1/audio/transcriptions endpoint.
+// @Summary Transcribe audio
+// @Tags audio
+// @Accept json
+// @Produce json
+// @Param req body models.AudioRequest true "Audio transcription request"
+// @Success 200 {object} models.AudioResponse
+// @Router /v1/audio/transcriptions [post]
 func (h *Handler) AudioTranscriptions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req models.AudioRequest
@@ -102,6 +125,14 @@ func (h *Handler) AudioTranscriptions(w http.ResponseWriter, r *http.Request) {
 }
 
 // Responses handles the /v1/responses endpoint.
+// @Summary Create response
+// @Description Create a response using the OpenAI Responses API.
+// @Tags responses
+// @Accept json
+// @Produce json
+// @Param req body models.ResponsesRequest true "Responses request"
+// @Success 200 {object} models.ResponsesResponse
+// @Router /v1/responses [post]
 func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	var req models.ResponsesRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -145,6 +176,14 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 }
 
 // Messages handles the /v1/messages endpoint (Anthropic compatibility).
+// @Summary Anthropic-style messages
+// @Description Anthropic-compatible /v1/messages endpoint (routes to chat completions).
+// @Tags chat
+// @Accept json
+// @Produce json
+// @Param req body models.LLMRequest true "Messages request"
+// @Success 200 {object} models.LLMResponse
+// @Router /v1/messages [post]
 func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
 	h.ChatCompletions(w, r)
 }

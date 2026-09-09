@@ -43,8 +43,12 @@ func (a *OpenAICompatibleAdapter) ProviderType() providers.ProviderType {
 }
 
 // ChatCompletions sends a chat completion request to the OpenAI-compatible endpoint.
+// OpenAI Structured Outputs: when req.ResponseFormat has type "json_schema",
+// the request body includes response_format with the JSON schema, enabling
+// guaranteed structured JSON responses from the provider.
 func (a *OpenAICompatibleAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
-	body, err := jsonMarshal(req)
+	payload := buildChatPayload(req)
+	body, err := jsonMarshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -258,7 +262,9 @@ func (a *OpenAICompatibleAdapter) Responses(ctx context.Context, req *models.Res
 
 // Stream sends a streaming chat completion request.
 func (a *OpenAICompatibleAdapter) Stream(ctx context.Context, req *models.LLMRequest) (<-chan AeroStreamChunk, error) {
-	body, err := jsonMarshal(req)
+	payload := buildChatPayload(req)
+	payload.Stream = true
+	body, err := jsonMarshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}

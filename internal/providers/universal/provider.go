@@ -51,25 +51,43 @@ func NewDefaultAdapterConfig(apiKey, baseURL string) AdapterConfig {
 
 // ChatPayload is the common JSON body for OpenAI-compatible chat routes.
 type ChatPayload struct {
-	Model       string          `json:"model"`
-	Messages    []models.Message `json:"messages"`
-	Stream      bool            `json:"stream"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
+	Model          string                   `json:"model"`
+	Messages       []models.Message         `json:"messages"`
+	Stream         bool                     `json:"stream"`
+	MaxTokens      *int                     `json:"max_tokens,omitempty"`
+	Temperature    *float64                 `json:"temperature,omitempty"`
+	TopP           *float64                 `json:"top_p,omitempty"`
+	Stop           []string                 `json:"stop,omitempty"`
+	PresencePenalty *float64                `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64               `json:"frequency_penalty,omitempty"`
+	Tools          []models.ToolDefinition  `json:"tools,omitempty"`
+	ResponseFormat *models.ResponseFormat   `json:"response_format,omitempty"`
 }
 
 // ToChatPayload converts a universal request into an OpenAI-style payload.
 func ToChatPayload(req *models.LLMRequest) ChatPayload {
 	return ChatPayload{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Stream:      false,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
+		Model:            req.Model,
+		Messages:         req.Messages,
+		Stream:           false,
+		MaxTokens:        req.MaxTokens,
+		Temperature:      req.Temperature,
+		TopP:             req.TopP,
+		Stop:             req.Stop,
+		PresencePenalty:  req.PresencePenalty,
+		FrequencyPenalty: req.FrequencyPenalty,
+		Tools:            req.Tools,
+		ResponseFormat:   req.ResponseFormat,
 	}
 }
 
 // MarshalChatPayload JSON-encodes a ChatPayload.
 func MarshalChatPayload(p ChatPayload) ([]byte, error) {
 	return json.Marshal(p)
+}
+
+// buildChatPayload converts a universal LLMRequest into an OpenAI-compatible
+// chat payload, including response_format for Structured Outputs.
+func buildChatPayload(req *models.LLMRequest) ChatPayload {
+	return ToChatPayload(req)
 }

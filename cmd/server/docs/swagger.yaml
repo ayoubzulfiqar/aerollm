@@ -1,0 +1,909 @@
+basePath: /
+definitions:
+  analytics.LogEntry:
+    properties:
+      api_key:
+        type: string
+      cost_usd:
+        type: number
+      customer_id:
+        type: string
+      input_tokens:
+        type: integer
+      metadata:
+        additionalProperties: true
+        type: object
+      model:
+        type: string
+      output_tokens:
+        type: integer
+      provider:
+        type: string
+      request_id:
+        type: string
+      team_id:
+        type: string
+      timestamp:
+        type: string
+    type: object
+  analytics.SpendBucket:
+    properties:
+      cost_usd:
+        type: number
+      input_tokens:
+        type: integer
+      output_tokens:
+        type: integer
+      requests:
+        type: integer
+      total_tokens:
+        type: integer
+    type: object
+  analytics.SpendLogsResponse:
+    properties:
+      has_more:
+        type: boolean
+      logs:
+        items:
+          $ref: '#/definitions/analytics.LogEntry'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  analytics.SpendReport:
+    properties:
+      by_api_key:
+        additionalProperties:
+          $ref: '#/definitions/analytics.SpendBucket'
+        type: object
+      by_customer:
+        additionalProperties:
+          $ref: '#/definitions/analytics.SpendBucket'
+        type: object
+      by_model:
+        additionalProperties:
+          $ref: '#/definitions/analytics.SpendBucket'
+        type: object
+      by_team:
+        additionalProperties:
+          $ref: '#/definitions/analytics.SpendBucket'
+        type: object
+      generated_at:
+        type: string
+      time_range:
+        $ref: '#/definitions/analytics.TimeRange'
+      total_cost_usd:
+        type: number
+      total_requests:
+        type: integer
+      total_tokens:
+        $ref: '#/definitions/analytics.SpendTokens'
+    type: object
+  analytics.SpendTokens:
+    properties:
+      input:
+        type: integer
+      output:
+        type: integer
+      total:
+        type: integer
+    type: object
+  analytics.TimeRange:
+    properties:
+      end:
+        type: string
+      start:
+        type: string
+    type: object
+  config.AppConfig:
+    properties:
+      env:
+        type: string
+      name:
+        type: string
+      version:
+        type: string
+    type: object
+  config.Config:
+    type: object
+  keymanager.DeleteRequest:
+    properties:
+      key:
+        type: string
+      key_hash:
+        type: string
+      token:
+        type: string
+    type: object
+  keymanager.GenerateRequest:
+    properties:
+      aliases:
+        items:
+          type: string
+        type: array
+      duration:
+        type: string
+      max_budget:
+        type: number
+      metadata:
+        additionalProperties: true
+        type: object
+      models:
+        items:
+          type: string
+        type: array
+      team_id:
+        type: string
+      user_id:
+        type: string
+    type: object
+  keymanager.GenerateResponse:
+    properties:
+      expires:
+        type: string
+      key:
+        type: string
+      key_hash:
+        type: string
+      token:
+        type: string
+    type: object
+  keymanager.InfoRequest:
+    properties:
+      key:
+        type: string
+      key_hash:
+        type: string
+      token:
+        type: string
+    type: object
+  keymanager.InfoResponse:
+    properties:
+      aliases:
+        items:
+          type: string
+        type: array
+      created_at:
+        type: string
+      expires_at:
+        type: string
+      key_hash:
+        type: string
+      max_budget:
+        type: number
+      metadata:
+        additionalProperties: true
+        type: object
+      models:
+        items:
+          type: string
+        type: array
+      status:
+        $ref: '#/definitions/keymanager.KeyStatus'
+    type: object
+  keymanager.KeyStatus:
+    enum:
+    - active
+    - deleted
+    - expired
+    type: string
+    x-enum-varnames:
+    - StatusActive
+    - StatusDeleted
+    - StatusExpired
+  keymanager.Team:
+    properties:
+      budget:
+        type: number
+      created_at:
+        type: string
+      id:
+        type: string
+      members:
+        items:
+          type: string
+        type: array
+      metadata:
+        additionalProperties: true
+        type: object
+      name:
+        type: string
+    type: object
+  keymanager.User:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+      metadata:
+        additionalProperties: true
+        type: object
+      role:
+        type: string
+    type: object
+  models.AudioRequest:
+    properties:
+      file:
+        type: string
+      model:
+        type: string
+      prompt:
+        type: string
+    type: object
+  models.AudioResponse:
+    properties:
+      text:
+        type: string
+    type: object
+  models.CacheControl:
+    properties:
+      type:
+        description: e.g. "ephemeral"
+        type: string
+    type: object
+  models.Choice:
+    description: A single response choice.
+    properties:
+      finish_reason:
+        type: string
+      index:
+        type: integer
+      message:
+        $ref: '#/definitions/models.Message'
+    type: object
+  models.Embedding:
+    properties:
+      embedding:
+        items:
+          type: number
+        type: array
+      index:
+        type: integer
+      object:
+        type: string
+    type: object
+  models.EmbeddingRequest:
+    properties:
+      input:
+        type: string
+      model:
+        type: string
+    type: object
+  models.EmbeddingResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/models.Embedding'
+        type: array
+      model:
+        type: string
+      object:
+        type: string
+      usage:
+        $ref: '#/definitions/models.Usage'
+    type: object
+  models.Image:
+    properties:
+      b64_json:
+        type: string
+      url:
+        type: string
+    type: object
+  models.ImageRequest:
+    properties:
+      model:
+        type: string
+      "n":
+        type: integer
+      prompt:
+        type: string
+      size:
+        type: string
+    type: object
+  models.ImageResponse:
+    properties:
+      created:
+        type: integer
+      data:
+        items:
+          $ref: '#/definitions/models.Image'
+        type: array
+    type: object
+  models.JSONSchema:
+    properties:
+      name:
+        type: string
+      schema:
+        additionalProperties: {}
+        type: object
+      strict:
+        type: boolean
+    type: object
+  models.LLMRequest:
+    description: Unified chat completion request compatible with OpenAI, Anthropic,
+      and 100+ providers.
+    properties:
+      frequency_penalty:
+        type: number
+      max_tokens:
+        description: Maximum tokens to generate.
+        example: 4096
+        type: integer
+      messages:
+        description: The conversation messages.
+        items:
+          $ref: '#/definitions/models.Message'
+        type: array
+      model:
+        description: The model identifier (e.g. "gpt-4o", "claude-3-opus").
+        example: gpt-4o
+        type: string
+      presence_penalty:
+        type: number
+      rag_enabled:
+        type: boolean
+      response_format:
+        allOf:
+        - $ref: '#/definitions/models.ResponseFormat'
+        description: ResponseFormat controls structured output.
+      stop:
+        description: Stop sequences.
+        items:
+          type: string
+        type: array
+      stream:
+        type: boolean
+      temperature:
+        description: Sampling temperature (0-2).
+        example: 0.7
+        type: number
+      tools:
+        items:
+          $ref: '#/definitions/models.ToolDefinition'
+        type: array
+      top_p:
+        description: Nucleus sampling (0-1).
+        example: 1
+        type: number
+    type: object
+  models.LLMResponse:
+    description: Unified LLM response.
+    properties:
+      choices:
+        items:
+          $ref: '#/definitions/models.Choice'
+        type: array
+      created:
+        example: 1700000000
+        type: integer
+      id:
+        example: chatcmpl-123
+        type: string
+      model:
+        example: gpt-4o
+        type: string
+      object:
+        example: chat.completion
+        type: string
+      usage:
+        $ref: '#/definitions/models.Usage'
+    type: object
+  models.Message:
+    properties:
+      cache_control:
+        allOf:
+        - $ref: '#/definitions/models.CacheControl'
+        description: |-
+          CacheControl enables prompt caching (Anthropic beta feature).
+          When set to {"type":"ephemeral"}, Anthropic caches this message to reduce costs.
+      content:
+        type: string
+      name:
+        type: string
+      role:
+        $ref: '#/definitions/models.MessageRole'
+      tool_call_id:
+        type: string
+      tool_calls:
+        items:
+          $ref: '#/definitions/models.ToolCall'
+        type: array
+      tool_result:
+        type: string
+    type: object
+  models.MessageRole:
+    enum:
+    - system
+    - user
+    - assistant
+    - tool
+    type: string
+    x-enum-varnames:
+    - RoleSystem
+    - RoleUser
+    - RoleAssistant
+    - RoleTool
+  models.ResponseFormat:
+    properties:
+      json_schema:
+        $ref: '#/definitions/models.JSONSchema'
+      type:
+        description: '"json_schema" | "json_object" | "text"'
+        type: string
+    type: object
+  models.ResponsesRequest:
+    properties:
+      input:
+        type: string
+      model:
+        type: string
+      previous_response_id:
+        type: string
+      tools:
+        items:
+          $ref: '#/definitions/models.ToolDefinition'
+        type: array
+    type: object
+  models.ResponsesResponse:
+    properties:
+      created_at:
+        type: integer
+      id:
+        type: string
+      model:
+        type: string
+      object:
+        type: string
+      output:
+        items:
+          $ref: '#/definitions/models.Message'
+        type: array
+      usage:
+        $ref: '#/definitions/models.Usage'
+    type: object
+  models.ToolCall:
+    properties:
+      function:
+        $ref: '#/definitions/models.ToolFunction'
+      id:
+        type: string
+      type:
+        type: string
+    type: object
+  models.ToolDefinition:
+    properties:
+      description:
+        type: string
+      name:
+        type: string
+      parameters:
+        additionalProperties: true
+        type: object
+    type: object
+  models.ToolFunction:
+    properties:
+      arguments:
+        type: string
+      name:
+        type: string
+    type: object
+  models.Usage:
+    description: Token usage statistics for a completion request.
+    properties:
+      completion_tokens:
+        example: 50
+        type: integer
+      prompt_tokens:
+        example: 100
+        type: integer
+      total_tokens:
+        example: 150
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: contact@ayoubzulfiqar.com
+    name: AeroLLM Contributors
+    url: https://github.com/ayoubzulfiqar/aerollm
+  description: AeroLLM is a high-performance, multi-provider LLM gateway that serves
+    as a drop-in replacement for the LiteLLM proxy. It supports 100+ LLM providers
+    with advanced routing, virtual keys, semantic caching, spend analytics, and async
+    observability callbacks.
+  license:
+    name: MIT
+    url: https://github.com/ayoubzulfiqar/aerollm/blob/main/LICENSE
+  termsOfService: http://swagger.io/terms/
+  title: AeroLLM API
+  version: "1.0"
+paths:
+  /config/update:
+    post:
+      consumes:
+      - application/json
+      description: Accepts a partial or full config (JSON), validates it, and hot-reloads
+        the provider registry without dropping active connections.
+      parameters:
+      - description: Updated configuration
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/config.Config'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Update config
+      tags:
+      - config
+  /config/yaml:
+    get:
+      description: Returns the current active configuration with all secrets masked.
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Get config YAML
+      tags:
+      - config
+  /global/spend/logs:
+    get:
+      description: Returns paginated, detailed transaction logs for a specific key
+        or customer.
+      parameters:
+      - description: Filter by api_key, customer_id, or team_id
+        in: query
+        name: filter
+        type: string
+      - description: Page number (default 1)
+        in: query
+        name: page
+        type: integer
+      - description: Entries per page (default 50, max 500)
+        in: query
+        name: page_size
+        type: integer
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/analytics.SpendLogsResponse'
+      summary: Get spend logs
+      tags:
+      - analytics
+  /global/spend/report:
+    get:
+      description: Aggregates spend over a time range, grouped by api_key, customer,
+        team, or model.
+      parameters:
+      - description: RFC3339 start timestamp
+        in: query
+        name: start
+        required: true
+        type: string
+      - description: RFC3339 end timestamp
+        in: query
+        name: end
+        required: true
+        type: string
+      - description: 'Group by: api_key, customer, team, model'
+        in: query
+        name: group_by
+        type: string
+      - description: Optional filter value
+        in: query
+        name: filter
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/analytics.SpendReport'
+      summary: Get spend report
+      tags:
+      - analytics
+  /key/delete:
+    post:
+      consumes:
+      - application/json
+      description: Soft-delete a virtual key.
+      parameters:
+      - description: Delete key request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.DeleteRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Delete virtual key
+      tags:
+      - keys
+  /key/generate:
+    post:
+      consumes:
+      - application/json
+      description: Create a new virtual key with allowed models, TTL, and budget limits.
+      parameters:
+      - description: Generate key request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.GenerateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.GenerateResponse'
+      summary: Generate virtual key
+      tags:
+      - keys
+  /key/info:
+    post:
+      consumes:
+      - application/json
+      description: Get usage, budget, and metadata for a specific virtual key.
+      parameters:
+      - description: Key info request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.InfoRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.InfoResponse'
+      summary: Get key info
+      tags:
+      - keys
+  /model/info:
+    get:
+      description: Returns all currently loaded models, their providers, and capabilities.
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get model info
+      tags:
+      - config
+  /team/create:
+    post:
+      consumes:
+      - application/json
+      description: Create a new team for an agency.
+      parameters:
+      - description: Team creation request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.Team'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.Team'
+      summary: Create team
+      tags:
+      - teams
+  /team/update:
+    post:
+      consumes:
+      - application/json
+      description: Update an existing team's details.
+      parameters:
+      - description: Team update request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.Team'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.Team'
+      summary: Update team
+      tags:
+      - teams
+  /user/info:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: User info request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/keymanager.InfoRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.User'
+      summary: Get user info
+      tags:
+      - users
+  /v1/audio/transcriptions:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Audio transcription request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.AudioRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.AudioResponse'
+      summary: Transcribe audio
+      tags:
+      - audio
+  /v1/chat/completions:
+    post:
+      consumes:
+      - application/json
+      description: Send a chat completion request to an LLM provider.
+      parameters:
+      - description: Chat completion request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.LLMRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.LLMResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Chat completion
+      tags:
+      - chat
+  /v1/embeddings:
+    post:
+      consumes:
+      - application/json
+      description: Generate embeddings for the given input.
+      parameters:
+      - description: Embeddings request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.EmbeddingRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.EmbeddingResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create embeddings
+      tags:
+      - embeddings
+  /v1/images/generations:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Image generation request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.ImageRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.ImageResponse'
+      summary: Generate image
+      tags:
+      - images
+  /v1/messages:
+    post:
+      consumes:
+      - application/json
+      description: Anthropic-compatible /v1/messages endpoint (routes to chat completions).
+      parameters:
+      - description: Messages request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.LLMRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.LLMResponse'
+      summary: Anthropic-style messages
+      tags:
+      - chat
+  /v1/responses:
+    post:
+      consumes:
+      - application/json
+      description: Create a response using the OpenAI Responses API.
+      parameters:
+      - description: Responses request
+        in: body
+        name: req
+        required: true
+        schema:
+          $ref: '#/definitions/models.ResponsesRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.ResponsesResponse'
+      summary: Create response
+      tags:
+      - responses
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

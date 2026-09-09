@@ -23,7 +23,11 @@ func NewConfigHandler(reloader *config.ConfigReloader, logger func(msg string, k
 }
 
 // ModelInfo handles GET /model/info.
-// Returns all currently loaded models, their providers, and capabilities.
+// @Summary Get model info
+// @Description Returns all currently loaded models, their providers, and capabilities.
+// @Tags config
+// @Success 200 {object} map[string]interface{}
+// @Router /model/info [get]
 func (h *ConfigHandler) ModelInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -38,7 +42,11 @@ func (h *ConfigHandler) ModelInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // ConfigYaml handles GET /config/yaml.
-// Returns the current active configuration with all secrets masked.
+// @Summary Get config YAML
+// @Description Returns the current active configuration with all secrets masked.
+// @Tags config
+// @Success 200 {string} string
+// @Router /config/yaml [get]
 func (h *ConfigHandler) ConfigYaml(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -50,8 +58,14 @@ func (h *ConfigHandler) ConfigYaml(w http.ResponseWriter, r *http.Request) {
 }
 
 // ConfigUpdate handles POST /config/update.
-// Accepts a partial or full config (JSON), validates it, and hot-reloads
-// the provider registry without dropping active connections.
+// @Summary Update config
+// @Description Accepts a partial or full config (JSON), validates it, and hot-reloads the provider registry without dropping active connections.
+// @Tags config
+// @Accept json
+// @Produce json
+// @Param req body config.Config true "Updated configuration"
+// @Success 200 {object} map[string]interface{}
+// @Router /config/update [post]
 func (h *ConfigHandler) ConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)

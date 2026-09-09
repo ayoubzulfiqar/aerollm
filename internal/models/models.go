@@ -16,12 +16,21 @@ const (
 
 // Message represents a single message in the LLM conversation history.
 type Message struct {
-	Role       MessageRole `json:"role"`
-	Content    *string     `json:"content,omitempty"`
-	Name       *string     `json:"name,omitempty"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID *string     `json:"tool_call_id,omitempty"`
-	ToolResult *string     `json:"tool_result,omitempty"`
+	Role       MessageRole      `json:"role"`
+	Content    *string          `json:"content,omitempty"`
+	Name       *string          `json:"name,omitempty"`
+	ToolCalls  []ToolCall       `json:"tool_calls,omitempty"`
+	ToolCallID *string          `json:"tool_call_id,omitempty"`
+	ToolResult *string          `json:"tool_result,omitempty"`
+	// CacheControl enables prompt caching (Anthropic beta feature).
+	// When set to {"type":"ephemeral"}, Anthropic caches this message to reduce costs.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// CacheControl enables prompt caching (Anthropic beta feature).
+// When set to {"type":"ephemeral"}, Anthropic caches this message to reduce costs.
+type CacheControl struct {
+	Type string `json:"type"` // e.g. "ephemeral"
 }
 
 // ToolCall represents a single tool call requested by the LLM.
@@ -45,31 +54,55 @@ type ToolDefinition struct {
 }
 
 // LLMRequest is the unified request structure sent to any LLM provider.
+// @Description Unified chat completion request compatible with OpenAI, Anthropic, and 100+ providers.
 type LLMRequest struct {
-	Model            string            `json:"model"`
+	// The model identifier (e.g. "gpt-4o", "claude-3-opus").
+	Model            string            `json:"model" example:"gpt-4o"`
+	// The conversation messages.
 	Messages         []Message         `json:"messages"`
-	MaxTokens        *int              `json:"max_tokens,omitempty"`
-	Temperature      *float64          `json:"temperature,omitempty"`
-	TopP             *float64          `json:"top_p,omitempty"`
-	Stream           bool              `json:"stream"`
+	// Maximum tokens to generate.
+	MaxTokens        *int              `json:"max_tokens,omitempty" example:"4096"`
+	// Sampling temperature (0-2).
+	Temperature      *float64          `json:"temperature,omitempty" example:"0.7"`
+	// Nucleus sampling (0-1).
+	TopP             *float64          `json:"top_p,omitempty" example:"1.0"`
+	Stream           bool              `json:"stream" example:"false"`
+	// Stop sequences.
 	Stop             []string          `json:"stop,omitempty"`
 	PresencePenalty  *float64          `json:"presence_penalty,omitempty"`
 	FrequencyPenalty *float64          `json:"frequency_penalty,omitempty"`
 	Tools            []ToolDefinition  `json:"tools,omitempty"`
 	RagEnabled       bool              `json:"rag_enabled,omitempty"`
+	// ResponseFormat controls structured output.
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat controls structured output formatting.
+type ResponseFormat struct {
+	Type       string      `json:"type"` // "json_schema" | "json_object" | "text"
+	JSONSchema *JSONSchema `json:"json_schema,omitempty"`
+}
+
+// JSONSchema defines a JSON schema for structured output.
+type JSONSchema struct {
+	Name   string         `json:"name"`
+	Schema map[string]any `json:"schema,omitempty"`
+	Strict bool           `json:"strict,omitempty"`
 }
 
 // LLMResponse is the unified response structure from any LLM provider.
+// @Description Unified LLM response.
 type LLMResponse struct {
-	ID             string     `json:"id"`
-	Object         string     `json:"object"`
-	Created        int64      `json:"created"`
-	Model          string     `json:"model"`
-	Choices        []Choice   `json:"choices"`
-	Usage          *Usage     `json:"usage,omitempty"`
+	ID      string    `json:"id" example:"chatcmpl-123"`
+	Object  string    `json:"object" example:"chat.completion"`
+	Created int64     `json:"created" example:"1700000000"`
+	Model   string    `json:"model" example:"gpt-4o"`
+	Choices []Choice  `json:"choices"`
+	Usage   *Usage    `json:"usage,omitempty"`
 }
 
 // Choice represents a single response choice.
+// @Description A single response choice.
 type Choice struct {
 	Index        int         `json:"index"`
 	Message      Message     `json:"message"`
@@ -77,10 +110,11 @@ type Choice struct {
 }
 
 // Usage represents token usage statistics.
+// @Description Token usage statistics for a completion request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     int `json:"prompt_tokens" example:"100"`
+	CompletionTokens int `json:"completion_tokens" example:"50"`
+	TotalTokens      int `json:"total_tokens" example:"150"`
 }
 
 // ToolResult holds the result of executing a tool call.

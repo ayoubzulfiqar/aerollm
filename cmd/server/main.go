@@ -1,5 +1,25 @@
 package main
 
+// @title AeroLLM API
+// @version 1.0
+// @description AeroLLM is a high-performance, multi-provider LLM gateway that serves as a drop-in replacement for the LiteLLM proxy. It supports 100+ LLM providers with advanced routing, virtual keys, semantic caching, spend analytics, and async observability callbacks.
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name AeroLLM Contributors
+// @contact.url https://github.com/ayoubzulfiqar/aerollm
+// @contact.email contact@ayoubzulfiqar.com
+
+// @license.name MIT
+// @license.url https://github.com/ayoubzulfiqar/aerollm/blob/main/LICENSE
+
+// @host localhost:8080
+// @BasePath /
+// @query.collection.format multi
+
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name Authorization
+
 import (
 	"context"
 	"encoding/json"
@@ -74,6 +94,9 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/tools"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
+
+	_ "github.com/ayoubzulfiqar/aerollm/cmd/server/docs" // swag-generated OpenAPI docs
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 // LoggerAdapter implements the LoggerInterface.
@@ -632,7 +655,13 @@ func main() {
 	mux.HandleFunc("/config/yaml", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigYaml)).Next)
 	mux.HandleFunc("/config/update", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigUpdate)).Next)
 
-	// Initialize analytics engine for spend reporting (shared between handler and API).
+	// Serve Swagger UI and JSON spec for API documentation.
+	mux.Handle("/swagger/", httpSwagger.Handler())
+	mux.HandleFunc("/swagger/doc.json", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/swagger/index.html", http.StatusMovedPermanently)
+	})
+
+	// Global spend analytics routes (admin/master key only — no virtual key access).
 	analyticsEngine := analytics.NewAnalyticsEngine()
 	handler.Analytics = analyticsEngine
 

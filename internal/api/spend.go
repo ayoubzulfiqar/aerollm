@@ -27,11 +27,15 @@ func NewSpendHandler(engine *analytics.AnalyticsEngine, logger func(msg string, 
 }
 
 // SpendReport handles GET /global/spend/report.
-// Query parameters:
-//   - start: RFC3339 timestamp (required)
-//   - end: RFC3339 timestamp (required)
-//   - group_by: "api_key", "customer", "team", "model" (default: "api_key")
-//   - filter: optional filter value (api_key, customer_id, or team_id)
+// @Summary Get spend report
+// @Description Aggregates spend over a time range, grouped by api_key, customer, team, or model.
+// @Tags analytics
+// @Param start query string true "RFC3339 start timestamp"
+// @Param end query string true "RFC3339 end timestamp"
+// @Param group_by query string false "Group by: api_key, customer, team, model"
+// @Param filter query string false "Optional filter value"
+// @Success 200 {object} analytics.SpendReport
+// @Router /global/spend/report [get]
 func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
@@ -89,10 +93,14 @@ func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 }
 
 // SpendLogs handles GET /global/spend/logs.
-// Query parameters:
-//   - filter: api_key, customer_id, or team_id to filter by
-//   - page: page number (default 1)
-//   - page_size: entries per page (default 50, max 500)
+// @Summary Get spend logs
+// @Description Returns paginated, detailed transaction logs for a specific key or customer.
+// @Tags analytics
+// @Param filter query string false "Filter by api_key, customer_id, or team_id"
+// @Param page query int false "Page number (default 1)"
+// @Param page_size query int false "Entries per page (default 50, max 500)"
+// @Success 200 {object} analytics.SpendLogsResponse
+// @Router /global/spend/logs [get]
 func (h *SpendHandler) SpendLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)

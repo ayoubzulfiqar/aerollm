@@ -59,6 +59,14 @@ func NewKeyHandler(mgr *Manager, users UserStore, teams TeamStore, logger func(m
 }
 
 // GenerateKeys handles POST /key/generate.
+// @Summary Generate virtual key
+// @Description Create a new virtual key with allowed models, TTL, and budget limits.
+// @Tags keys
+// @Accept json
+// @Produce json
+// @Param req body GenerateRequest true "Generate key request"
+// @Success 200 {object} GenerateResponse
+// @Router /key/generate [post]
 func (h *KeyHandler) GenerateKeys(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req GenerateRequest
@@ -77,6 +85,14 @@ func (h *KeyHandler) GenerateKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteKey handles POST /key/delete.
+// @Summary Delete virtual key
+// @Description Soft-delete a virtual key.
+// @Tags keys
+// @Accept json
+// @Produce json
+// @Param req body DeleteRequest true "Delete key request"
+// @Success 200 {object} map[string]string
+// @Router /key/delete [post]
 func (h *KeyHandler) DeleteKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req DeleteRequest
@@ -98,6 +114,14 @@ func (h *KeyHandler) DeleteKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // InfoKey handles POST /key/info.
+// @Summary Get key info
+// @Description Get usage, budget, and metadata for a specific virtual key.
+// @Tags keys
+// @Accept json
+// @Produce json
+// @Param req body InfoRequest true "Key info request"
+// @Success 200 {object} InfoResponse
+// @Router /key/info [post]
 func (h *KeyHandler) InfoKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req InfoRequest
@@ -120,6 +144,13 @@ func (h *KeyHandler) InfoKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // UserInfo handles POST /user/info.
+// @Summary Get user info
+// @Tags users
+// @Accept json
+// @Produce json
+// @Param req body keymanager.InfoRequest true "User info request"
+// @Success 200 {object} User
+// @Router /user/info [post]
 func (h *KeyHandler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
@@ -156,6 +187,14 @@ func (h *KeyHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // TeamCreate handles POST /team/create.
+// @Summary Create team
+// @Description Create a new team for an agency.
+// @Tags teams
+// @Accept json
+// @Produce json
+// @Param req body Team true "Team creation request"
+// @Success 200 {object} Team
+// @Router /team/create [post]
 func (h *KeyHandler) TeamCreate(w http.ResponseWriter, r *http.Request) {
 	var t Team
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
@@ -173,6 +212,14 @@ func (h *KeyHandler) TeamCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // TeamUpdate handles POST /team/update.
+// @Summary Update team
+// @Description Update an existing team's details.
+// @Tags teams
+// @Accept json
+// @Produce json
+// @Param req body Team true "Team update request"
+// @Success 200 {object} Team
+// @Router /team/update [post]
 func (h *KeyHandler) TeamUpdate(w http.ResponseWriter, r *http.Request) {
 	var t Team
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {

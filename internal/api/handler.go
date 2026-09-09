@@ -75,6 +75,15 @@ func NewHandler(router *router.Router, agent *agent.AgentEngine, cache *cache.Re
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
+// @Summary Chat completion
+// @Description Send a chat completion request to an LLM provider.
+// @Tags chat
+// @Accept json
+// @Produce json
+// @Param req body models.LLMRequest true "Chat completion request"
+// @Success 200 {object} models.LLMResponse
+// @Failure 400 {object} map[string]string
+// @Router /v1/chat/completions [post]
 func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
