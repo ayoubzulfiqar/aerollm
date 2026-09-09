@@ -460,6 +460,9 @@ Request path for `/v1/chat/completions`:
 - `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
 - `internal/providers/universal` — universal model registry for capability cards
 - `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers
+- `internal/keymanager` — virtual key generation, validation, and agency/RBAC management
+- `internal/callbacks` — native observability callback dispatch (Langfuse, Datadog, webhook)
+- `internal/config` — Viper config loading, hot-reload with atomic pointer, model info
 - `internal/marketplace` — signed manifest verification, registry client, micro-royalty tracking
 - `internal/economy` — agent wallets, micro-transaction billing for tool calls, and SLA-aware selection
 - `internal/zk` — zero-knowledge encrypted payload middleware and confidential compute stubs
@@ -471,8 +474,6 @@ Request path for `/v1/chat/completions`:
 - `internal/licensing` — license validation and feature gating
 - `internal/studio` — topology, analytics, and DAG visualization APIs
 - `internal/genui` — generative UI SSE streaming and normalization
-- `internal/marketplace` — plugin marketplace, registry, and royalty tracking
-- `internal/zk` — zero-knowledge guardrails and confidential compute stubs
 
 ## Community
 
