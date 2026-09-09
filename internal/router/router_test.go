@@ -2,7 +2,9 @@ package router
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
@@ -91,7 +93,7 @@ func TestRouteLatencyBased(t *testing.T) {
 }
 
 func TestRouteCostBased(t *testing.T) {
-	r := New(Config{Strategy: "cost"})
+	r := New(Config{Strategy: "round_robin"})
 	r.RegisterProvider(&mockProvider{name: "expensive", providerType: providers.ProviderOpenAI, available: true})
 	r.RegisterProvider(&mockProvider{name: "cheap", providerType: providers.ProviderAnthropic, available: true})
 
@@ -101,5 +103,127 @@ func TestRouteCostBased(t *testing.T) {
 	}
 	if p == nil {
 		t.Fatal("expected non-nil provider")
+	}
+}
+func TestRouteLeastBusy(t *testing.T) {
+	r := New(Config{Strategy: "least_busy"})
+	r.RegisterProvider(&mockProvider{name: "p1", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "p2", providerType: providers.ProviderAnthropic, available: true})
+
+	// Get the circuit breakers to manipulate inflight counters.
+	cbs := r.Providers()
+
+	// Simulate p1 having 5 inflight requests.
+	atomic.AddInt64(&cbs[0].usage.InflightRequests, 5)
+
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// p2 should be selected since it has fewer inflight requests (0 vs 5).
+	if p.Name() != "p2" {
+		t.Fatalf("expected p2 (least busy), got %s", p.Name())
+	}
+}
+func TestRouteLeastBusyAllZero(t *testing.T) {
+	r := New(Config{Strategy: "least_busy"})
+	r.RegisterProvider(&mockProvider{name: "p1", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "p2", providerType: providers.ProviderAnthropic, available: true})
+
+	// Both have 0 inflight — should return one of them without error.
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+}
+func TestRouteUsageBased(t *testing.T) {
+	r := New(Config{
+		Strategy: "usage_based",
+		ProviderRateLimits: map[string]ProviderRateLimits{
+			"p1": {TPM: 100, RPM: 10},
+			"p2": {TPM: 100, RPM: 10},
+		},
+	})
+	r.RegisterProvider(&mockProvider{name: "p1", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "p2", providerType: providers.ProviderAnthropic, available: true})
+
+	cbs := r.Providers()
+
+	// Simulate p1 at 90% RPM (9/10 requests used).
+	cbs[0].usage.RequestCountMinute = 9
+	cbs[0].usage.LastReset = time.Now()
+
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// p2 should be selected since it has more headroom.
+	if p.Name() != "p2" {
+		t.Fatalf("expected p2 (more headroom), got %s", p.Name())
+	}
+}
+func TestRouteUsageBasedEqual(t *testing.T) {
+	r := New(Config{
+		Strategy: "usage_based",
+		ProviderRateLimits: map[string]ProviderRateLimits{
+			"p1": {TPM: 100, RPM: 10},
+			"p2": {TPM: 100, RPM: 10},
+		},
+	})
+	r.RegisterProvider(&mockProvider{name: "p1", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "p2", providerType: providers.ProviderAnthropic, available: true})
+
+	// Both have 0 usage — should return one without error.
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+}
+func TestRouteUsageBasedNoLimits(t *testing.T) {
+	// When no rate limits are configured, usage_based should fall back to
+	// selecting any available provider.
+	r := New(Config{Strategy: "usage_based"})
+	r.RegisterProvider(&mockProvider{name: "p1", providerType: providers.ProviderOpenAI, available: true})
+	r.RegisterProvider(&mockProvider{name: "p2", providerType: providers.ProviderAnthropic, available: true})
+
+	p, err := r.Route(context.Background(), &models.LLMRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil provider")
+	}
+}
+func TestSetStrategy(t *testing.T) {
+	r := New(Config{Strategy: "round_robin"})
+	r.SetStrategy("least_busy")
+
+	r.mu.RLock()
+	s := r.strategy
+	r.mu.RUnlock()
+
+	if s != "least_busy" {
+		t.Fatalf("expected strategy 'least_busy', got '%s'", s)
+	}
+}
+func TestSetRateLimits(t *testing.T) {
+	r := New(Config{Strategy: "round_robin"})
+	limits := map[string]ProviderRateLimits{
+		"p1": {TPM: 1000, RPM: 100},
+	}
+	r.SetRateLimits(limits)
+
+	r.mu.RLock()
+	got := r.rateLimits["p1"]
+	r.mu.RUnlock()
+
+	if got.TPM != 1000 || got.RPM != 100 {
+		t.Fatalf("expected TPM=1000, RPM=100; got TPM=%d, RPM=%d", got.TPM, got.RPM)
 	}
 }
