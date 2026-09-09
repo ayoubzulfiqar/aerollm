@@ -16,6 +16,7 @@ type Config struct {
 	Server     ServerConfig     `mapstructure:"server"`
 	Redis      RedisConfig      `mapstructure:"redis"`
 	Providers  []ProviderConfig `mapstructure:"providers"`
+	Callbacks  CallbacksConfig  `mapstructure:"callbacks"`
 	Router     RouterConfig     `mapstructure:"router"`
 	RateLimit  RateLimitConfig  `mapstructure:"rate_limit"`
 	Cache      CacheConfig      `mapstructure:"cache"`
@@ -152,6 +153,39 @@ type FinopsConfig struct {
 // WebhooksConfig holds webhook settings.
 type WebhooksConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+}
+
+// CallbackWebhookConfig holds callback webhook settings.
+type CallbackWebhookConfig struct {
+	Enabled    bool          `mapstructure:"enabled"`
+	URL        string        `mapstructure:"url"`
+	Secret     string        `mapstructure:"secret"`
+	Timeout    time.Duration `mapstructure:"timeout"`
+	Retries    int           `mapstructure:"retries"`
+	RetryDelay time.Duration `mapstructure:"retry_delay"`
+}
+
+// CallbackLangfuseConfig holds Langfuse callback settings.
+type CallbackLangfuseConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	APIKey    string `mapstructure:"api_key"`
+	BaseURL   string `mapstructure:"base_url"`
+	ProjectID string `mapstructure:"project_id"`
+}
+
+// CallbackDatadogConfig holds Datadog callback settings.
+type CallbackDatadogConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	APIKey  string `mapstructure:"api_key"`
+	BaseURL string `mapstructure:"base_url"`
+	Site    string `mapstructure:"site"`
+}
+
+// CallbacksConfig holds observability callback configuration.
+type CallbacksConfig struct {
+	Webhook  CallbackWebhookConfig  `mapstructure:"webhook"`
+	Langfuse CallbackLangfuseConfig `mapstructure:"langfuse"`
+	Datadog  CallbackDatadogConfig  `mapstructure:"datadog"`
 }
 
 // LoadConfig reads configuration from the given file path and environment variables.

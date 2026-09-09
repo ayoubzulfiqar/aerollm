@@ -88,3 +88,25 @@ finops:
 
 webhooks:
   enabled: true
+
+callbacks:
+  # Webhook callback: sends OnSuccess/OnError events to a configurable endpoint.
+  webhook:
+    enabled: false
+    url: ""
+    secret: ""
+    timeout: 5s
+    retries: 3
+    retry_delay: 200ms
+  # Langfuse callback: sends traces and generations to Langfuse.
+  langfuse:
+    enabled: false
+    api_key: "${LANGFUSE_API_KEY}"
+    base_url: "https://cloud.langfuse.com"
+    project_id: "default"
+  # Datadog callback: sends metrics and log events to Datadog.
+  datadog:
+    enabled: false
+    api_key: "${DATADOG_API_KEY}"
+    base_url: "https://api.datadoghq.com"
+    site: "datadoghq.com"

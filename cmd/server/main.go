@@ -397,36 +397,36 @@ func main() {
 
 	backpressureController := backpressure.NewBackpressureController(backpressure.Config{MaxInflight: 1000, Window: time.Minute})
 
-	// Initialize callback manager with configured webhook endpoint.
+	// Initialize callback manager from config.
 	callbackMgr := callbacks.NewCallbackManager(5 * time.Second)
-	if webhookURL := getenvOrDefault("AEROLLM_CALLBACK_WEBHOOK_URL", ""); webhookURL != "" {
+	if appCfg.Callbacks.Webhook.Enabled {
 		cbWebhook := callbacks.NewWebhookCallback(callbacks.WebhookConfig{
-			URL:        webhookURL,
-			Secret:     getenvOrDefault("AEROLLM_CALLBACK_WEBHOOK_SECRET", ""),
-			Timeout:    5 * time.Second,
-			Retries:    3,
-			RetryDelay: 200 * time.Millisecond,
+			URL:        appCfg.Callbacks.Webhook.URL,
+			Secret:     appCfg.Callbacks.Webhook.Secret,
+			Timeout:    appCfg.Callbacks.Webhook.Timeout,
+			Retries:    appCfg.Callbacks.Webhook.Retries,
+			RetryDelay: appCfg.Callbacks.Webhook.RetryDelay,
 		})
 		callbackMgr.Register(cbWebhook)
 	}
-	// Register Langfuse callback if configured.
-	if lfKey := getenvOrDefault("AEROLLM_LANGFUSE_API_KEY", ""); lfKey != "" {
+	if appCfg.Callbacks.Langfuse.Enabled {
 		lfCallback := callbacks.NewLangfuseCallback(
-			lfKey,
-			getenvOrDefault("AEROLLM_LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
-			getenvOrDefault("AEROLLM_LANGFUSE_PROJECT_ID", "default"),
+			appCfg.Callbacks.Langfuse.APIKey,
+			appCfg.Callbacks.Langfuse.BaseURL,
+			appCfg.Callbacks.Langfuse.ProjectID,
 		)
 		callbackMgr.Register(lfCallback)
 	}
-	// Register Datadog callback if configured.
-	if ddKey := getenvOrDefault("AEROLLM_DATADOG_API_KEY", ""); ddKey != "" {
-		ddCallback := callbacks.NewDatadogCallback(ddKey,
-			getenvOrDefault("AEROLLM_DATADOG_BASE_URL", "https://api.datadoghq.com"),
-			getenvOrDefault("AEROLLM_DATADOG_SITE", "datadoghq.com"),
+	if appCfg.Callbacks.Datadog.Enabled {
+		ddCallback := callbacks.NewDatadogCallback(
+			appCfg.Callbacks.Datadog.APIKey,
+			appCfg.Callbacks.Datadog.BaseURL,
+			appCfg.Callbacks.Datadog.Site,
 		)
 		callbackMgr.Register(ddCallback)
 	}
 	handler.CallbackMgr = callbackMgr
+	_ = callbackMgr
 
 	// Initialize semantic cache with embedding provider for production caching.
 	if semCacheTTL := getenvOrDefault("AEROLLM_SEMANTIC_CACHE_TTL", "15m"); semCacheTTL != "" {
