@@ -35,9 +35,12 @@ type BatchRequest struct {
 }
 
 // BatchResponse is a single line in the output JSONL file.
+// @Description BatchResponse represents the result of a single batch request line.
 type BatchResponse struct {
-	CustomID string          `json:"custom_id"`
-	Response json.RawMessage `json:"response"` // The LLMResponse JSON or error
+	CustomID string `json:"custom_id"`
+	// Response is the raw JSON response from the provider (LLMResponse or error).
+	// swag:ignore — swag cannot introspect json.RawMessage
+	Response json.RawMessage `json:"response"`
 }
 
 // Batch represents a batch processing job.
