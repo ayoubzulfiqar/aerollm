@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/intelligence"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 )
@@ -31,6 +32,8 @@ type Config struct {
 	BreakerConfig CircuitBreakerConfig
 	// ProviderRateLimits maps provider name to its rate limits.
 	ProviderRateLimits map[string]ProviderRateLimits
+	// CostMap provides dynamic model pricing for cost-based routing.
+	CostMap *intelligence.ModelCostMap
 }
 
 // CircuitBreakerConfig holds circuit breaker settings.
@@ -214,6 +217,7 @@ type Router struct {
 	strategy     string
 	breakerCfg   CircuitBreakerConfig
 	rateLimits   map[string]ProviderRateLimits
+	costMap      *intelligence.ModelCostMap
 	currentIndex atomic.Uint64
 	mu           sync.RWMutex
 }
@@ -224,6 +228,7 @@ func New(cfg Config) *Router {
 		strategy:    cfg.Strategy,
 		breakerCfg:  cfg.BreakerConfig,
 		rateLimits:  cfg.ProviderRateLimits,
+		costMap:     cfg.CostMap,
 	}
 }
 
@@ -278,7 +283,7 @@ func (r *Router) Route(ctx context.Context, req *models.LLMRequest) (providers.P
 	case "latency":
 		return r.latencyBased(available), nil
 	case "cost":
-		return r.costBased(available, req), nil
+		return r.costBased(available, req, r.costMap), nil
 	case "fallback":
 		return r.fallback(available), nil
 	default:
@@ -374,11 +379,13 @@ func (r *Router) latencyBased(available []*CircuitBreaker) providers.Provider {
 }
 
 // costBased returns the provider with the lowest estimated cost for the given request.
-func (r *Router) costBased(available []*CircuitBreaker, req *models.LLMRequest) providers.Provider {
+// Uses the ModelCostMap for accurate per-model pricing when available; falls
+// back to a simple token-length heuristic otherwise.
+func (r *Router) costBased(available []*CircuitBreaker, req *models.LLMRequest, costMap *intelligence.ModelCostMap) providers.Provider {
 	var best providers.Provider
 	var lowestCost float64 = 1<<63 - 1
 	for _, cb := range available {
-		cost := estimateCost(cb, req)
+		cost := estimateCostWithMap(cb, req, costMap)
 		if cost < lowestCost {
 			lowestCost = cost
 			best = cb
@@ -395,15 +402,30 @@ func (r *Router) fallback(available []*CircuitBreaker) providers.Provider {
 	return nil
 }
 
-// estimateCost estimates the cost of a request.
-func estimateCost(p providers.Provider, req *models.LLMRequest) float64 {
+// estimateCostWithMap computes the estimated cost of a request.
+// If a costMap is available and knows the model price, it uses accurate
+// per-1M-token pricing from the cost map. Otherwise it falls back to
+// a simple token-length heuristic.
+func estimateCostWithMap(p providers.Provider, req *models.LLMRequest, costMap *intelligence.ModelCostMap) float64 {
 	totalTokens := 0
 	for _, m := range req.Messages {
 		if m.Content != nil {
 			totalTokens += len(*m.Content) / 4
 		}
 	}
+	// If we have a cost map, use accurate pricing.
+	if costMap != nil && len(req.Model) > 0 {
+		if cost, ok := costMap.Lookup(req.Model); ok {
+			// Estimate 80/20 input/output split.
+			inputTokens := float64(totalTokens) * 0.8
+			outputTokens := float64(totalTokens) * 0.2
+			inputCost := inputTokens / intelligence.CostScale * cost.InputCostPer1M
+			outputCost := outputTokens / intelligence.CostScale * cost.OutputCostPer1M
+			return inputCost + outputCost
+		}
+	}
 	_ = p
+	// Fallback: simple heuristic.
 	return float64(totalTokens) * 0.001
 }
 

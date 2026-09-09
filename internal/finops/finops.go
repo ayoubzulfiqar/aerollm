@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/billing"
+	"github.com/ayoubzulfiqar/aerollm/internal/intelligence"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/redis/go-redis/v9"
@@ -89,21 +90,37 @@ type CostRequest struct {
 type CostTracker struct {
 	redis         *redis.Client
 	prices        *PricingMap
+	costMap       *intelligence.ModelCostMap
 	dispatcher    dispatcherInterface
 	budgetWebhook webhooks.BudgetWebhookConfig
 	webhookMu     sync.RWMutex
 }
 
 // NewCostTracker creates a new cost tracker.
-func NewCostTracker(redisClient *redis.Client, prices *PricingMap) *CostTracker {
-	return &CostTracker{redis: redisClient, prices: prices}
+func NewCostTracker(redisClient *redis.Client, prices *PricingMap, costMap *intelligence.ModelCostMap) *CostTracker {
+	return &CostTracker{
+		redis:   redisClient,
+		prices:  prices,
+		costMap: costMap,
+	}
 }
 
 // CalculateCost computes cost in USD for a request.
+// Uses the dynamic ModelCostMap for accurate per-model pricing.
+// Falls back to the legacy PricingMap if the cost map is not configured.
 func (c *CostTracker) CalculateCost(model string, usage *models.Usage) float64 {
 	if usage == nil {
 		return 0
 	}
+	// Prefer the dynamic cost map for accurate pricing.
+	if c.costMap != nil {
+		if cost, ok := c.costMap.Lookup(model); ok {
+			inputCost := float64(usage.PromptTokens) / intelligence.CostScale * cost.InputCostPer1M
+			outputCost := float64(usage.CompletionTokens) / intelligence.CostScale * cost.OutputCostPer1M
+			return inputCost + outputCost
+		}
+	}
+	// Fall back to legacy PricingMap.
 	pricing := c.prices.Ensure(model)
 	return float64(usage.PromptTokens)*pricing.PromptPrice + float64(usage.CompletionTokens)*pricing.CompletionPrice
 }

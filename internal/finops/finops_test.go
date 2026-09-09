@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/intelligence"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 )
@@ -31,17 +32,26 @@ func TestPricingMapDefaults(t *testing.T) {
 
 func TestCalculateCost(t *testing.T) {
 	p := NewPricingMap()
-	c := NewCostTracker(nil, p)
-	cost := c.CalculateCost("gpt-4", &models.Usage{PromptTokens: 10, CompletionTokens: 20})
-	expected := 10*0.03 + 20*0.06
-	if cost != expected {
+	cm := intelligence.NewModelCostMap()
+	cm.LoadFromDefault()
+	c := NewCostTracker(nil, p, cm)
+	cost := c.CalculateCost("gpt-4o", &models.Usage{PromptTokens: 1000000, CompletionTokens: 500000})
+	// gpt-4o: input 5.0/1M, output 15.0/1M
+	// Cost = 1.0*5.0 + 0.5*15.0 = 5.0 + 7.5 = 12.5
+	expected := 12.5
+	if !approxEqual(cost, expected, 0.0001) {
 		t.Fatalf("expected %.4f, got %.4f", expected, cost)
 	}
 }
 
+func approxEqual(a, b, epsilon float64) bool {
+	return a-b < epsilon && b-a < epsilon
+}
+
 func TestCalculateCostNilUsage(t *testing.T) {
 	p := NewPricingMap()
-	c := NewCostTracker(nil, p)
+	cm := intelligence.NewModelCostMap()
+	c := NewCostTracker(nil, p, cm)
 	if got := c.CalculateCost("gpt-4", nil); got != 0 {
 		t.Fatalf("expected 0 for nil usage, got %f", got)
 	}
@@ -49,7 +59,8 @@ func TestCalculateCostNilUsage(t *testing.T) {
 
 func TestRecordUsageNoRedisNoOp(t *testing.T) {
 	p := NewPricingMap()
-	c := NewCostTracker(nil, p)
+	cm := intelligence.NewModelCostMap()
+	c := NewCostTracker(nil, p, cm)
 	err := c.RecordUsage(context.Background(), CostRequest{
 		APIKey: "sk-nil-redis",
 		Model:  "gpt-4",
@@ -62,7 +73,8 @@ func TestRecordUsageNoRedisNoOp(t *testing.T) {
 
 func TestSetBudgetWebhookConfigStoresDispatcher(t *testing.T) {
 	p := NewPricingMap()
-	c := NewCostTracker(nil, p)
+	cm := intelligence.NewModelCostMap()
+	c := NewCostTracker(nil, p, cm)
 	fd := &fakeDispatcher{}
 	c.SetBudgetWebhookConfig(fd, webhooks.BudgetWebhookConfig{
 		URL:     "http://example.com/budget",

@@ -29,6 +29,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/genui"
 	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
+	"github.com/ayoubzulfiqar/aerollm/internal/intelligence"
 	"github.com/ayoubzulfiqar/aerollm/internal/keymanager"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/licensing"
@@ -352,7 +353,9 @@ func main() {
 
 
 	prices := finops.NewPricingMap()
-	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
+	costMap := intelligence.NewModelCostMap()
+	costMap.LoadFromDefault()
+	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices, costMap)
 	scoper := guardrails.NewAPIKeyScoper()
 	scoper.AddScope(guardrails.APIKeyScope{
 		APIKey:       getenvOrDefault("AEROLLM_API_KEY", "sk-demo"),
