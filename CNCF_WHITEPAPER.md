@@ -61,13 +61,17 @@ Client -> [Gateway] -> [Control Plane] -> [Provider Adapter] -> LLM Provider
 ### 2.2 Core Components
 
 - **Gateway Engine**: HTTP/1.1, HTTP/2, and WebSocket ingress with OpenAI-compatible normalization
-- **Router**: Round-robin, latency-based, cost-based, fallback, and bandit routing strategies
-- **Provider Registry**: Dynamic adapter discovery for OpenAI, Anthropic, Google, AWS, Azure, Groq, Cohere, DeepSeek, and OpenAI-compatible endpoints
+- **Router**: Round-robin, latency-based, cost-based, fallback, least-busy, usage-based, and bandit routing strategies
+- **Provider Registry**: Dynamic adapter discovery for OpenAI, Anthropic, Google, AWS Bedrock, Azure OpenAI, Groq, Cohere, DeepSeek, and 100+ OpenAI-compatible endpoints via Universal Protocol Adapter pattern
 - **Middleware Pipeline**: Recovery, logging, auth, rate limiting, guardrails, budget check, cache, routing
+- **Rate Limit Headers**: OpenAI-compatible `X-RateLimit-*` headers on every response (including 429s) for SDK backpressure
+- **Batch Processor**: Async batch job engine for OpenAI-compatible Batch API
+- **Cache Management**: Inspect, stats, and clear APIs (admin-auth protected)
 - **Agent Runtime**: Tool execution loop with retry, deficit detection, and HITL approval flows
 - **State Layer**: In-memory caches, bbolt embedded store, Redis cluster, and CRDT mesh for distributed state
 - **Observability Stack**: OpenTelemetry traces, structured logs, SLO budgets, and shadow traffic
 - **Control Plane**: Policies, quotas, audit log, incidents, notifications, scheduled tasks, secrets, and multi-region routing
+- **Migration CLI**: LiteLLM config migration tool with strategy/model classification
 
 ### 2.3 Deployment Modes
 
@@ -85,7 +89,7 @@ A typical `/v1/chat/completions` request traverses:
 1. Recovery middleware
 2. Structured logging
 3. Authentication and API key scoping
-4. Token bucket rate limiting
+4. Token bucket rate limiting with `X-RateLimit-*` header injection
 5. Prompt injection shield and PII redaction
 6. Budget pre-check and cost estimation
 7. Exact-match cache lookup
@@ -223,6 +227,7 @@ ML-KEM/ML-DSA hybrid key management and stream encryptors via cloudflare/circl.
 
 ```bash
 aerollm init
+aerollm migrate litellm --input litellm_config.yaml --output config.yaml
 aerollm health
 aerollm resilience
 aerollm traffic shadow
@@ -243,6 +248,11 @@ aerollm schedule --name "backup" --schedule "0 0 * * *"
 aerollm secrets --name "api-key" --value "secret123" --type token
 aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
 ```
+
+The `aerollm migrate litellm` command converts LiteLLM `litellm_config.yaml` into AeroLLM `config.yaml`, translating:
+- `model_list` entries to provider configurations with model lists
+- `litellm_params.api_key` references to `${ENV_VAR}` format
+- `router_settings.routing_strategy` to AeroLLM strategy names
 
 ### 9.2 Configuration
 
@@ -302,6 +312,25 @@ Control-plane reconciliation via:
 - `POST /v1/region/residency`
 - `POST /v1/region/routes`
 
+### Enterprise & Migration
+
+- `POST /v1/batches` — create batch job from JSONL upload
+- `GET /v1/batches/{batch_id}` — get batch status
+- `GET /v1/batches/{batch_id}/results` — download batch results
+- `GET /v1/cache/stats` — cache statistics (exact + semantic)
+- `DELETE /v1/cache` — clear cache (supports `?type=semantic|exact|all`)
+- `GET /v1/cache/inspect` — paginated cache entry metadata
+- `GET /v1/models` — list available models
+- `GET /v1/models/{model}` — get model cost/capability info
+- `GET /v1/virtual-keys` — list virtual keys
+- `POST /v1/virtual-keys` — create virtual key
+- `GET /v1/virtual-keys/{key_id}` — get key details
+- `PUT /v1/virtual-keys/{key_id}` — update key
+- `DELETE /v1/virtual-keys/{key_id}` — revoke key
+- `GET /v1/spend/report` — per-key spend report
+- `GET /v1/spend/logs` — spend transaction logs
+- `GET /swagger/index.html` — interactive Swagger UI
+
 ---
 
 ## 11. Comparison with Alternatives
@@ -309,7 +338,7 @@ Control-plane reconciliation via:
 | Dimension | AeroLLM | Commercial Gateways | Cloud-Native Proxies |
 |-----------|---------|---------------------|----------------------|
 | License | Copyright Ayoub Zulfiqar (permission required) | Proprietary | Open Source |
-| Provider Neutrality | Yes | Partial | Partial |
+| Provider Neutrality | Yes (100+ providers, Universal Protocol Adapter) | Partial | Partial |
 | Extensibility | WASM + MCP + Plugins | Limited | Limited |
 | Cost Governance | Built-in | Add-on | None |
 | Federated Deployment | Native | Rare | None |
@@ -317,6 +346,10 @@ Control-plane reconciliation via:
 | Post-Quantum Crypto | Native | None | None |
 | Policy-as-Code | Native | Add-on | None |
 | Observability | OpenTelemetry native | Proprietary | Basic |
+| Batch Processing | OpenAI-compatible Batch API | Varies | None |
+| Cache Management | Inspect + stats + clear APIs | None | None |
+| Rate Limit Headers | OpenAI-compatible X-RateLimit-* | Partial | None |
+| Migration Tooling | LiteLLM config migration CLI | None | None |
 
 ---
 
@@ -339,6 +372,21 @@ Control-plane reconciliation via:
 - Policy engine, data retention, incidents, notifications, scheduled tasks, secrets
 - Multi-region routing and data residency
 
+### Enterprise & Migration (Recently Completed)
+
+- 100+ provider support via Universal Protocol Adapter pattern (no hardcoded switches)
+- Virtual Keys & Agency Management API
+- Async Callbacks and Observability
+- Dynamic Semantic Caching
+- Spend Analytics with cost-based routing
+- Advanced Load Balancing (round-robin, latency, cost, fallback, least-busy, usage-based)
+- OpenAPI/Swagger Documentation with interactive UI
+- LiteLLM Migration CLI tool
+- Standardized Rate Limit Headers (X-RateLimit-* on every response)
+- Cache Management & Inspection APIs
+- OpenAI-Compatible Batch API
+- Advanced Provider Features (structured outputs, Anthropic prompt caching)
+
 ### Future
 
 - Native GPU inference scheduler for edge nodes
@@ -356,7 +404,7 @@ AeroLLM is developed and maintained by Ayoub Zulfiqar. Contributions are accepte
 
 ## 14. Conclusion
 
-AeroLLM provides a comprehensive, open, and extensible foundation for AI gateway infrastructure. Its architecture addresses the full lifecycle of LLM request handling — from ingress to policy enforcement, from cost governance to federated deployment — without vendor lock-in. We invite operators, platform teams, and researchers to evaluate AeroLLM as the standard control plane for production AI systems.
+AeroLLM provides a comprehensive, open, and extensible foundation for AI gateway infrastructure. Its architecture addresses the full lifecycle of LLM request handling — from ingress to policy enforcement, from cost governance to federated deployment — without vendor lock-in. With enterprise-grade features including Virtual Keys, LiteLLM migration tooling, OpenAI-compatible Batch API, standardized rate limit headers, cache management APIs, structured outputs, and Anthropic prompt caching, AeroLLM is positioned as the de facto standard for production AI gateway deployments. We invite operators, platform teams, and researchers to evaluate AeroLLM as the standard control plane for production AI systems.
 
 ---
 
