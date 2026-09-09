@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	_ "net/http/pprof" // pprof profiling on :6060
 	"os"
 	"os/signal"
@@ -92,6 +93,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers/universal"
 	"github.com/ayoubzulfiqar/aerollm/internal/tools"
+	"github.com/ayoubzulfiqar/aerollm/internal/batch"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
 
@@ -703,6 +705,30 @@ func main() {
 	_ = spatial.NewVideo3DStreamHandler()
 	pqcKM := pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
 	mux.HandleFunc("/v1/pqc/keys", pqc.HandshakeHandler(pqcKM))
+
+	// Batch API routes (OpenAI-compatible).
+	batchStore := batch.NewInMemoryStore()
+	batchProcessor := batch.NewBatchProcessor(batchStore, handler.ModelResolver, batch.BatchProcessorConfig{
+		WorkDir:     os.TempDir(),
+		Concurrency: 4,
+	})
+	batchHandler := api.NewBatchHandler(batchProcessor, batchStore)
+	mux.Handle("/v1/batches", adminAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			batchHandler.CreateBatch(w, r)
+		} else {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/v1/batches/", adminAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Route: /v1/batches/{batch_id} or /v1/batches/{batch_id}/results
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/results") {
+			batchHandler.GetBatchResults(w, r)
+		} else {
+			batchHandler.GetBatch(w, r)
+		}
+	})))
 
 	mux.HandleFunc("/v1/spatial/parse", func(w http.ResponseWriter, r *http.Request) {
 		if r == nil || r.Body == nil {
