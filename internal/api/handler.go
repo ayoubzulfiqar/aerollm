@@ -14,6 +14,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
@@ -45,6 +46,9 @@ type Handler struct {
 		Latest(ctx context.Context) (*ledger.LedgerRecord, error)
 	}
 	UsageSink chan<- billing.MeterEntry
+
+	// ModelResolver resolves a provider for a given model alias. Optional.
+	ModelResolver func(model string) (providers.Provider, bool)
 }
 
 // NewHandler creates a new Handler with dependency injection.
@@ -291,35 +295,4 @@ func RateLimitMiddleware(next http.HandlerFunc, rl ratelimit.RateLimiter) http.H
 	return func(w http.ResponseWriter, r *http.Request) {
 		next(w, r)
 	}
-}
-
-// Embeddings handles the /v1/embeddings endpoint.
-func (h *Handler) Embeddings(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// ImageGenerations handles the /v1/images/generations endpoint.
-func (h *Handler) ImageGenerations(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// AudioTranscriptions handles the /v1/audio/transcriptions endpoint.
-func (h *Handler) AudioTranscriptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": "not implemented"})
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// Responses handles the /v1/responses endpoint.
-func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
-	h.ChatCompletions(w, r)
-}
-
-// Messages handles the /v1/messages endpoint.
-func (h *Handler) Messages(w http.ResponseWriter, r *http.Request) {
-	h.ChatCompletions(w, r)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 )
 
 // OpenAICompatibleAdapter is a reusable adapter for OpenAI-compatible APIs.
@@ -33,8 +34,13 @@ func NewOpenAICompatibleAdapter(name, providerType, apiKey, baseURL string) *Ope
 // Name returns the adapter name.
 func (a *OpenAICompatibleAdapter) Name() string { return a.name }
 
-// Type returns the adapter provider type.
+// Type returns the adapter provider type as a string.
 func (a *OpenAICompatibleAdapter) Type() string { return a.providerType }
+
+// ProviderType returns the provider type.
+func (a *OpenAICompatibleAdapter) ProviderType() providers.ProviderType {
+	return providers.ProviderType(a.providerType)
+}
 
 // ChatCompletions sends a chat completion request to the OpenAI-compatible endpoint.
 func (a *OpenAICompatibleAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {

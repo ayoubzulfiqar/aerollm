@@ -65,6 +65,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/webhooks"
 	"github.com/ayoubzulfiqar/aerollm/internal/zk"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
+	"github.com/ayoubzulfiqar/aerollm/internal/providers/universal"
 	"github.com/ayoubzulfiqar/aerollm/internal/tools"
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
 	"github.com/redis/go-redis/v9"
@@ -118,6 +119,57 @@ func NewAdvancedAgent(registry *agent.ToolRegistry, redisClient cache.RedisClien
 // NewAgent creates a new base agent engine.
 func NewAgent(registry *agent.ToolRegistry) *agent.AgentEngine {
 	return agent.NewAgentEngine(nil, registry)
+}
+
+// universalAdapterBridge wraps any universal.ProviderAdapter and exposes it as
+// a providers.Provider + providers.MultiEndpointProvider so it can be used by
+// the API handler. This avoids the Type()/Health() signature conflict between
+// the universal and legacy provider interfaces.
+type universalAdapterBridge struct {
+	inner universal.ProviderAdapter
+}
+
+func (b *universalAdapterBridge) Name() string                  { return b.inner.Name() }
+func (b *universalAdapterBridge) Type() providers.ProviderType  { return providers.ProviderType(b.inner.Type()) }
+func (b *universalAdapterBridge) ProviderType() providers.ProviderType { return providers.ProviderType(b.inner.Type()) }
+func (b *universalAdapterBridge) Health() providers.ProviderHealth {
+	return providers.ProviderHealth{Name: b.inner.Name(), Type: b.ProviderType(), Healthy: true}
+}
+func (b *universalAdapterBridge) Close() error { return b.inner.Close() }
+func (b *universalAdapterBridge) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
+	return b.inner.ChatCompletions(ctx, req)
+}
+func (b *universalAdapterBridge) Embeddings(ctx context.Context, req *models.EmbeddingRequest) (*models.EmbeddingResponse, error) {
+	if mp, ok := b.inner.(interface {
+		Embeddings(context.Context, *models.EmbeddingRequest) (*models.EmbeddingResponse, error)
+	}); ok {
+		return mp.Embeddings(ctx, req)
+	}
+	return nil, fmt.Errorf("embedding not supported by provider %s", b.inner.Name())
+}
+func (b *universalAdapterBridge) ImageGenerations(ctx context.Context, req *models.ImageRequest) (*models.ImageResponse, error) {
+	if mp, ok := b.inner.(interface {
+		ImageGenerations(context.Context, *models.ImageRequest) (*models.ImageResponse, error)
+	}); ok {
+		return mp.ImageGenerations(ctx, req)
+	}
+	return nil, fmt.Errorf("image generation not supported by provider %s", b.inner.Name())
+}
+func (b *universalAdapterBridge) AudioTranscriptions(ctx context.Context, req *models.AudioRequest) (*models.AudioResponse, error) {
+	if mp, ok := b.inner.(interface {
+		AudioTranscriptions(context.Context, *models.AudioRequest) (*models.AudioResponse, error)
+	}); ok {
+		return mp.AudioTranscriptions(ctx, req)
+	}
+	return nil, fmt.Errorf("audio transcription not supported by provider %s", b.inner.Name())
+}
+func (b *universalAdapterBridge) Responses(ctx context.Context, req *models.ResponsesRequest) (*models.ResponsesResponse, error) {
+	if mp, ok := b.inner.(interface {
+		Responses(context.Context, *models.ResponsesRequest) (*models.ResponsesResponse, error)
+	}); ok {
+		return mp.Responses(ctx, req)
+	}
+	return nil, fmt.Errorf("responses not supported by provider %s", b.inner.Name())
 }
 
 // realtimeProvider adapts the router/provider flow for WebSocket streaming.
@@ -224,6 +276,51 @@ func main() {
 	a.Provider = toolProviderAdapter
 	cacheInst := cache.NewRedisCache(redisClient, time.Hour)
 	handler := api.NewHandler(r, a, cacheInst, rl, tp, logger)
+
+	// Register providers from config.yaml into the universal registry.
+	providerReg := universal.NewProviderRegistry()
+	for _, pcfg := range appCfg.Providers {
+		if pcfg.APIKey == "" && pcfg.Type != "bedrock" {
+			continue
+		}
+		switch pcfg.Type {
+		case "openai", "openai-compatible":
+			adapter := universal.NewOpenAICompatibleAdapter(pcfg.ResolvedName(), pcfg.Type, pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "anthropic":
+			adapter := universal.NewAnthropicAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "groq":
+			adapter := universal.NewGroqAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "cohere":
+			adapter := universal.NewCohereAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "deepseek":
+			adapter := universal.NewDeepSeekAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "bedrock":
+			adapter := universal.NewBedrockAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		case "gemini":
+			adapter := universal.NewGeminiAdapter(pcfg.APIKey, pcfg.Endpoint())
+			_ = providerReg.Register(adapter, pcfg.Models...)
+			logger.Info("provider registered", "provider", adapter.Name())
+		}
+	}
+	handler.ModelResolver = func(model string) (providers.Provider, bool) {
+		adapter, err := providerReg.ResolveProviderByModel(model)
+		if err != nil {
+			return nil, false
+		}
+		return &universalAdapterBridge{inner: adapter}, true
+	}
 
 	prices := finops.NewPricingMap()
 	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
