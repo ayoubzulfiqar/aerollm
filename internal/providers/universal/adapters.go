@@ -33,3 +33,8 @@ func NewCohereAdapter(apiKey, baseURL string) *OpenAICompatibleAdapter {
 func NewDeepSeekAdapter(apiKey, baseURL string) *OpenAICompatibleAdapter {
 	return NewOpenAICompatibleAdapter("deepseek", "deepseek", apiKey, baseURL)
 }
+
+// NewAnthropicAdapter returns an Anthropic provider adapter.
+func NewAnthropicAdapter(apiKey, baseURL string) *OpenAICompatibleAdapter {
+	return NewOpenAICompatibleAdapter("anthropic", "anthropic", apiKey, baseURL)
+}
