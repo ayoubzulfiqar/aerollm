@@ -17,6 +17,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/api"
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/aiops"
+	"github.com/ayoubzulfiqar/aerollm/internal/analytics"
 	"github.com/ayoubzulfiqar/aerollm/internal/autoscale"
 	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
@@ -628,12 +629,25 @@ func main() {
 	mux.HandleFunc("/config/yaml", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigYaml)).Next)
 	mux.HandleFunc("/config/update", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigUpdate)).Next)
 
+	// Initialize analytics engine for spend reporting (shared between handler and API).
+	analyticsEngine := analytics.NewAnalyticsEngine()
+	handler.Analytics = analyticsEngine
+
 	mcpServer := mcp.NewServer()
 	mux.Handle("/mcp", mcpServer)
 
 	mux.HandleFunc("/ws", realtime.ServeWS(realtime.NewHub(), &realtimeProvider{}))
 
-	_ = pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
+	// Global spend analytics routes (admin/master key only — no virtual key access).
+	spendHandler := api.NewSpendHandler(analyticsEngine, func(msg string, kv ...interface{}) {
+		logger.Info(msg, kv...)
+	})
+	adminKeys := map[string]bool{getenvOrDefault("AEROLLM_API_KEY", "sk-demo"): true}
+	adminAuth := api.AdminAuthMiddleware(adminKeys, func(msg string, kv ...interface{}) {
+		logger.Info(msg, kv...)
+	})
+	mux.Handle("/global/spend/report", adminAuth(http.HandlerFunc(spendHandler.SpendReport)))
+	mux.Handle("/global/spend/logs", adminAuth(http.HandlerFunc(spendHandler.SpendLogs)))
 	_ = spatial.NewVideo3DStreamHandler()
 	pqcKM := pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
 	mux.HandleFunc("/v1/pqc/keys", pqc.HandshakeHandler(pqcKM))

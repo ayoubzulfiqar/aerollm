@@ -11,6 +11,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/analytics"
 	"github.com/ayoubzulfiqar/aerollm/internal/callbacks"
 	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
@@ -41,6 +42,8 @@ type Handler struct {
 	CallbackMgr *callbacks.CallbackManager
 	// SemanticCache provides production-grade semantic caching via embeddings.
 	SemanticCache *cache.VectorSemanticCache
+	// Analytics records spend data for /global/spend/report and /global/spend/logs.
+	Analytics *analytics.AnalyticsEngine
 
 	Advanced interface {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
@@ -200,6 +203,13 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.Cache != nil {
 		cacheKey := cache.KeyForRequest(&req)
 		_ = h.Cache.SetExact(cacheKey, respBytes, 0)
+	}
+
+	// Record analytics for spend reporting.
+	if h.Analytics != nil && selectedProvider != nil {
+		providerName := selectedProvider.Name()
+		apiKey := extractAPIKey(r.Header.Get("Authorization"))
+		h.Analytics.RecordFromUsage(resp.ID, apiKey, "", "", req.Model, providerName, resp.Usage, 0)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -381,4 +391,15 @@ func RateLimitMiddleware(next http.HandlerFunc, rl ratelimit.RateLimiter) http.H
 	return func(w http.ResponseWriter, r *http.Request) {
 		next(w, r)
 	}
+}
+
+// extractAPIKey extracts the API key from the Authorization header.
+func extractAPIKey(auth string) string {
+	if auth == "" {
+		return ""
+	}
+	if len(auth) > 7 && auth[:7] == "Bearer " {
+		return auth[7:]
+	}
+	return auth
 }
