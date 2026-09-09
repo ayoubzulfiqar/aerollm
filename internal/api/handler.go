@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/billing"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/callbacks"
 	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
@@ -34,7 +36,13 @@ type Handler struct {
 	RateLimiter ratelimit.RateLimiter
 	Telemetry   *telemetry.Provider
 	Logger      LoggerInterface
-	Advanced   interface {
+
+	// CallbackMgr dispatches observability callbacks asynchronously.
+	CallbackMgr *callbacks.CallbackManager
+	// SemanticCache provides production-grade semantic caching via embeddings.
+	SemanticCache *cache.VectorSemanticCache
+
+	Advanced interface {
 		ResumeApproval(ctx context.Context, approvalID string, approved bool, req *models.LLMRequest) (*models.LLMResponse, error)
 	}
 	UsageRecorder *finops.CostTracker
@@ -96,6 +104,26 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 			w.Write(cached.Response)
 			telemetry.RecordCacheHit(true)
 			h.Logger.Info("cache hit", "key", cacheKey)
+			return
+		}
+	}
+
+	// Semantic cache check — uses embedding-based cosine similarity.
+	if h.SemanticCache != nil {
+		semKey := cache.KeyForRequest(&req)
+		// Serialize the request prompt for embedding.
+		promptText := req.Model
+		for _, msg := range req.Messages {
+			if msg.Content != nil {
+				promptText += " " + *msg.Content
+			}
+		}
+		if hit, err := h.SemanticCache.Search(ctx, promptText); err == nil && hit != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write(hit.Response)
+			telemetry.RecordCacheHit(true)
+			h.Logger.Info("semantic cache hit", "key", semKey)
 			return
 		}
 	}
@@ -180,6 +208,64 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	telemetry.RecordRequestCount(selectedProvider.Name(), 1)
 	telemetry.RecordLatencyMs(float64(time.Since(start).Milliseconds()))
+
+	// Store in semantic cache for future similarity-based lookups.
+	if h.SemanticCache != nil {
+		semKey := cache.KeyForRequest(&req)
+		promptText := req.Model
+		for _, msg := range req.Messages {
+			if msg.Content != nil {
+				promptText += " " + *msg.Content
+			}
+		}
+		_ = h.SemanticCache.Upsert(ctx, semKey, promptText, respBytes, map[string]interface{}{
+			"model": req.Model,
+		})
+	}
+
+	// Fire async callbacks — response is already sent to client.
+	if h.CallbackMgr != nil && resp.Usage != nil {
+		// Build token counts from the response usage.
+		tokenCount := map[string]int{}
+		if resp.Usage.PromptTokens > 0 {
+			tokenCount["input"] = resp.Usage.PromptTokens
+		}
+		if resp.Usage.CompletionTokens > 0 {
+			tokenCount["output"] = resp.Usage.CompletionTokens
+		}
+
+		// Convert messages to interface{} for callback payload.
+		msgMaps := make([]map[string]interface{}, 0, len(req.Messages))
+		for _, m := range req.Messages {
+			msgMap := map[string]interface{}{
+				"role": string(m.Role),
+			}
+			if m.Content != nil {
+				msgMap["content"] = *m.Content
+			}
+			msgMaps = append(msgMaps, msgMap)
+		}
+
+		reqData := &callbacks.CallbackRequestData{
+			RequestID:  fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			Model:      req.Model,
+			Provider:   selectedProvider.Name(),
+			Messages:   msgMaps,
+			CostUSD:    float64(0), // costTracker could be queried here
+			Timestamp:  time.Now(),
+		}
+		respData := &callbacks.CallbackResponseData{
+			ResponseID:   resp.ID,
+			Usage:        map[string]interface{}{"prompt_tokens": resp.Usage.PromptTokens, "completion_tokens": resp.Usage.CompletionTokens},
+			Model:        resp.Model,
+			Provider:     selectedProvider.Name(),
+			LatencyMs:    time.Since(start).Milliseconds(),
+			TokenCount:   tokenCount,
+			Metadata:     map[string]interface{}{"stream": req.Stream},
+			Timestamp:    time.Now(),
+		}
+		h.CallbackMgr.FireSuccess(reqData, respData)
+	}
 
 	if h.Ledger != nil {
 		reqBytes, _ := json.Marshal(req)
