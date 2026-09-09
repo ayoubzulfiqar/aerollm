@@ -227,6 +227,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Config reloader for hot-reload of providers and routing.
+	configReloader := config.NewConfigReloader(appCfg)
+
 	r := NewRouter(router.Config{Strategy: appCfg.Router.Strategy})
 	rl := NewRateLimiter()
 	registry := agent.NewToolRegistry()
@@ -322,6 +325,26 @@ func main() {
 		}
 		return &universalAdapterBridge{inner: adapter}, true
 	}
+
+	// Register the hot-reload callback that rebuilds the provider registry.
+	configReloader.SetReloadCallback(func(ctx context.Context, cfg *config.Config) error {
+		// Rebuild provider registry from new config.
+		newReg := universal.NewProviderRegistry()
+		if err := newReg.RegisterFromConfig(cfg.Providers); err != nil {
+			logger.Error("hot-reload provider registration failed", "error", err)
+			return err
+		}
+		// Atomically swap the model resolver to use the new registry.
+		handler.ModelResolver = func(model string) (providers.Provider, bool) {
+			adapter, err := newReg.ResolveProviderByModel(model)
+			if err != nil {
+				return nil, false
+			}
+			return &universalAdapterBridge{inner: adapter}, true
+		}
+		logger.Info("provider registry hot-reloaded", "providers", len(cfg.Providers))
+		return nil
+	})
 
 
 
@@ -548,6 +571,14 @@ func main() {
 	mux.HandleFunc("/user/info", middleware.NewAuthMiddleware(keyHandler.UserInfo).Next)
 	mux.HandleFunc("/team/create", middleware.NewAuthMiddleware(keyHandler.TeamCreate).Next)
 	mux.HandleFunc("/team/update", middleware.NewAuthMiddleware(keyHandler.TeamUpdate).Next)
+
+	// Dynamic config management routes (admin endpoints).
+	configHandler := api.NewConfigHandler(configReloader, func(msg string, kv ...interface{}) {
+		logger.Info(msg, kv...)
+	})
+	mux.HandleFunc("/model/info", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ModelInfo)).Next)
+	mux.HandleFunc("/config/yaml", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigYaml)).Next)
+	mux.HandleFunc("/config/update", middleware.NewAuthMiddleware(http.HandlerFunc(configHandler.ConfigUpdate)).Next)
 
 	mcpServer := mcp.NewServer()
 	mux.Handle("/mcp", mcpServer)
