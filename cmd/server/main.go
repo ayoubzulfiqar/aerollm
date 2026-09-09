@@ -26,6 +26,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/genui"
 	"github.com/ayoubzulfiqar/aerollm/internal/graphrag"
 	"github.com/ayoubzulfiqar/aerollm/internal/guardrails"
+	"github.com/ayoubzulfiqar/aerollm/internal/keymanager"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/licensing"
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
@@ -322,6 +323,8 @@ func main() {
 		return &universalAdapterBridge{inner: adapter}, true
 	}
 
+
+
 	prices := finops.NewPricingMap()
 	costTracker := finops.NewCostTracker(redisClient.(*redis.Client), prices)
 	scoper := guardrails.NewAPIKeyScoper()
@@ -330,6 +333,14 @@ func main() {
 		AllowedModels: []string{"gpt-3.5-turbo", "gpt-4", "claude-3-sonnet"},
 		MaxBudgetUSD: 100,
 		IPAllowlist:  []string{"127.0.0.1"},
+	})
+
+	// Virtual key manager for agency-generated keys.
+	keyStore := keymanager.NewInMemoryKeyStore()
+	keyManager := keymanager.NewManager(keyStore, getenvOrDefault("AEROLLM_KEYMASTER_KEY", "default-master-key"))
+	staticKeys := map[string]bool{getenvOrDefault("AEROLLM_API_KEY", "sk-demo"): true}
+	keyHandler := keymanager.NewKeyHandler(keyManager, nil, nil, func(msg string, kv ...interface{}) {
+		logger.Info(msg, kv...)
 	})
 
 	handler.UsageRecorder = costTracker
@@ -491,6 +502,8 @@ func main() {
 	chat = guardrails.InjectionShieldMiddleware(chat)
 	chat = guardrails.PIIMiddleware(chat)
 	chat = guardrails.APIKeyScopingMiddleware(scoper)(chat)
+	vkAuth := middleware.NewVirtualKeyAuthMiddleware(chat, keyManager, staticKeys)
+	chat = vkAuth.ServeHTTP
 	chat = middleware.NewRateLimitMiddleware(chat, rl).Next
 	chat = middleware.NewAuthMiddleware(chat).Next
 	chat = middleware.NewLoggingMiddleware(chat, logger).Next
@@ -527,6 +540,14 @@ func main() {
 	advanced := NewAdvancedAgent(registry, redisClient)
 	handler.Advanced = advanced
 	mux.HandleFunc("/v1/agents/approvals/", handler.ResumeApproval)
+
+	// Key management routes (admin endpoints — protected by static API key auth).
+	mux.HandleFunc("/key/generate", middleware.NewAuthMiddleware(keyHandler.GenerateKeys).Next)
+	mux.HandleFunc("/key/delete", middleware.NewAuthMiddleware(keyHandler.DeleteKey).Next)
+	mux.HandleFunc("/key/info", middleware.NewAuthMiddleware(keyHandler.InfoKey).Next)
+	mux.HandleFunc("/user/info", middleware.NewAuthMiddleware(keyHandler.UserInfo).Next)
+	mux.HandleFunc("/team/create", middleware.NewAuthMiddleware(keyHandler.TeamCreate).Next)
+	mux.HandleFunc("/team/update", middleware.NewAuthMiddleware(keyHandler.TeamUpdate).Next)
 
 	mcpServer := mcp.NewServer()
 	mux.Handle("/mcp", mcpServer)
