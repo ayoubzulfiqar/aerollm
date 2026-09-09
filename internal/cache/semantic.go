@@ -225,6 +225,14 @@ func (s *SemanticCache) PurgeExpired() int {
 	return before - len(s.entries)
 }
 
+// Clear removes all entries from the semantic cache.
+func (s *SemanticCache) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = make([]SimpleVector, 0)
+	return nil
+}
+
 // Sort caches by similarity to the query for inspection/debugging.
 func (s *SemanticCache) Sort(query string) []SimpleVector {
 	s.mu.RLock()
@@ -462,6 +470,42 @@ func (s *VectorSemanticCache) PurgeExpired() int {
 	}
 	s.entries = filtered
 	return before - len(s.entries)
+}
+
+// Clear removes all entries from the semantic cache.
+func (s *VectorSemanticCache) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = make([]VectorSemanticEntry, 0)
+	return nil
+}
+
+// Inspect returns a paginated list of semantic cache entries (metadata only — no payloads).
+func (s *VectorSemanticCache) Inspect(cursor uint64, pageSize int) ([]CacheInspectEntry, uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	start := int(cursor)
+	if start >= len(s.entries) {
+		return nil, 0
+	}
+	end := start + pageSize
+	if end > len(s.entries) {
+		end = len(s.entries)
+	}
+
+	var entries []CacheInspectEntry
+	for i := start; i < end; i++ {
+		e := s.entries[i]
+		entries = append(entries, CacheInspectEntry{
+			Key:        e.Key,
+			TokenCount: len(e.Response), // Approximate token count from response size
+			Semantic:   true,
+			CreatedAt:  e.CreatedAt,
+		})
+	}
+
+	return entries, uint64(end)
 }
 
 // Export serializes all entries for persistence.

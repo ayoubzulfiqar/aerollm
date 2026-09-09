@@ -66,6 +66,13 @@ func (m *mockRedisClient) Set(ctx context.Context, key string, value interface{}
 func (m *mockRedisClient) Del(ctx context.Context, keys ...string) *redis.IntCmd {
 	return redis.NewIntCmd(ctx)
 }
+func (m *mockRedisClient) Keys(ctx context.Context, pattern string) *redis.StringSliceCmd {
+	cmd := redis.NewStringSliceCmd(ctx)
+	return cmd
+}
+func (m *mockRedisClient) Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd {
+	return redis.NewScanCmdResult(nil, 0, nil)
+}
 func (m *mockRedisClient) Close() error { return nil }
 
 func strPtr(s string) *string { return &s }

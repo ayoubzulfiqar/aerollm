@@ -99,6 +99,43 @@ definitions:
       start:
         type: string
     type: object
+  api.CacheInspectEntry:
+    properties:
+      created_at:
+        type: string
+      key:
+        type: string
+      model:
+        type: string
+      semantic:
+        type: boolean
+      token_count:
+        type: integer
+    type: object
+  api.CacheInspectResponse:
+    properties:
+      cursor:
+        type: string
+      entries:
+        items:
+          $ref: '#/definitions/api.CacheInspectEntry'
+        type: array
+    type: object
+  api.CacheStatsResponse:
+    properties:
+      exact:
+        properties:
+          total_entries:
+            type: integer
+        type: object
+      semantic:
+        properties:
+          active_entries:
+            type: integer
+          total_entries:
+            type: integer
+        type: object
+    type: object
   config.AppConfig:
     properties:
       env:
@@ -358,6 +395,7 @@ definitions:
           type: string
         type: array
       stream:
+        example: false
         type: boolean
       temperature:
         description: Sampling temperature (0-2).
@@ -780,6 +818,64 @@ paths:
       summary: Transcribe audio
       tags:
       - audio
+  /v1/cache:
+    delete:
+      description: Clears the entire cache. Optionally target a specific type via
+        ?type=semantic or ?type=exact.
+      parameters:
+      - description: 'Cache type to clear: ''exact'', ''semantic'', or ''all'' (default:
+          all)'
+        in: query
+        name: type
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Clear cache
+      tags:
+      - cache
+  /v1/cache/inspect:
+    get:
+      description: Returns a paginated list of cached keys/hashes (does not return
+        full payloads for security).
+      parameters:
+      - description: 'Cache type: ''exact'' (default), ''semantic'', or ''all'''
+        in: query
+        name: type
+        type: string
+      - description: 'Pagination cursor (default: \'
+        in: query
+        name: cursor
+        type: string
+      - description: 'Page size (default: 50, max: 500)'
+        in: query
+        name: page_size
+        type: integer
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.CacheInspectResponse'
+      summary: Inspect cache entries
+      tags:
+      - cache
+  /v1/cache/stats:
+    get:
+      description: Returns statistics about the exact-match and semantic caches (total
+        entries, hit/miss rates).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.CacheStatsResponse'
+      summary: Get cache statistics
+      tags:
+      - cache
   /v1/chat/completions:
     post:
       consumes:

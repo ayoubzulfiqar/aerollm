@@ -415,6 +415,89 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/cache": {
+            "delete": {
+                "description": "Clears the entire cache. Optionally target a specific type via ?type=semantic or ?type=exact.",
+                "tags": [
+                    "cache"
+                ],
+                "summary": "Clear cache",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Cache type to clear: 'exact', 'semantic', or 'all' (default: all)",
+                        "name": "type",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/cache/inspect": {
+            "get": {
+                "description": "Returns a paginated list of cached keys/hashes (does not return full payloads for security).",
+                "tags": [
+                    "cache"
+                ],
+                "summary": "Inspect cache entries",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Cache type: 'exact' (default), 'semantic', or 'all'",
+                        "name": "type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pagination cursor (default: \\",
+                        "name": "cursor",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (default: 50, max: 500)",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.CacheInspectResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/cache/stats": {
+            "get": {
+                "description": "Returns statistics about the exact-match and semantic caches (total entries, hit/miss rates).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "cache"
+                ],
+                "summary": "Get cache statistics",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.CacheStatsResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/chat/completions": {
             "post": {
                 "description": "Send a chat completion request to an LLM provider.",
@@ -752,6 +835,64 @@ const docTemplate = `{
                 },
                 "start": {
                     "type": "string"
+                }
+            }
+        },
+        "api.CacheInspectEntry": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "key": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "semantic": {
+                    "type": "boolean"
+                },
+                "token_count": {
+                    "type": "integer"
+                }
+            }
+        },
+        "api.CacheInspectResponse": {
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "string"
+                },
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.CacheInspectEntry"
+                    }
+                }
+            }
+        },
+        "api.CacheStatsResponse": {
+            "type": "object",
+            "properties": {
+                "exact": {
+                    "type": "object",
+                    "properties": {
+                        "total_entries": {
+                            "type": "integer"
+                        }
+                    }
+                },
+                "semantic": {
+                    "type": "object",
+                    "properties": {
+                        "active_entries": {
+                            "type": "integer"
+                        },
+                        "total_entries": {
+                            "type": "integer"
+                        }
+                    }
                 }
             }
         },
@@ -1144,7 +1285,8 @@ const docTemplate = `{
                     }
                 },
                 "stream": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "example": false
                 },
                 "temperature": {
                     "description": "Sampling temperature (0-2).",

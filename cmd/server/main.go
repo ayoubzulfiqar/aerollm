@@ -603,6 +603,13 @@ func main() {
 	vkAuth := middleware.NewVirtualKeyAuthMiddleware(chat, keyManager, staticKeys)
 	chat = vkAuth.ServeHTTP
 	chat = middleware.NewRateLimitMiddleware(chat, rl).Next
+	// Wrap with rate limit headers middleware to inject X-RateLimit-* headers on every response.
+	defaultRPS := appCfg.RateLimit.DefaultRPS
+	if defaultRPS <= 0 {
+		defaultRPS = 100.0
+	}
+	defaultTPM := 60000
+	chat = middleware.NewRateLimitHeadersMiddleware(chat, rl, defaultRPS, defaultTPM).ServeHTTP
 	chat = middleware.NewAuthMiddleware(chat).Next
 	chat = middleware.NewLoggingMiddleware(chat, logger).Next
 	chat = middleware.NewRecoveryMiddleware(chat).Next
@@ -624,11 +631,11 @@ func main() {
 	audioHandler := http.HandlerFunc(handler.AudioTranscriptions)
 	responsesHandler := http.HandlerFunc(handler.Responses)
 	messagesHandler := http.HandlerFunc(handler.Messages)
-	embeddingsHandler = middleware.NewAuthMiddleware(embeddingsHandler.ServeHTTP).Next
-	imagesHandler = middleware.NewAuthMiddleware(imagesHandler.ServeHTTP).Next
-	audioHandler = middleware.NewAuthMiddleware(audioHandler.ServeHTTP).Next
-	responsesHandler = middleware.NewAuthMiddleware(responsesHandler.ServeHTTP).Next
-	messagesHandler = middleware.NewAuthMiddleware(messagesHandler.ServeHTTP).Next
+	embeddingsHandler = middleware.NewRateLimitHeadersMiddleware(middleware.NewAuthMiddleware(embeddingsHandler.ServeHTTP).Next, rl, defaultRPS, defaultTPM).ServeHTTP
+	imagesHandler = middleware.NewRateLimitHeadersMiddleware(middleware.NewAuthMiddleware(imagesHandler.ServeHTTP).Next, rl, defaultRPS, defaultTPM).ServeHTTP
+	audioHandler = middleware.NewRateLimitHeadersMiddleware(middleware.NewAuthMiddleware(audioHandler.ServeHTTP).Next, rl, defaultRPS, defaultTPM).ServeHTTP
+	responsesHandler = middleware.NewRateLimitHeadersMiddleware(middleware.NewAuthMiddleware(responsesHandler.ServeHTTP).Next, rl, defaultRPS, defaultTPM).ServeHTTP
+	messagesHandler = middleware.NewRateLimitHeadersMiddleware(middleware.NewAuthMiddleware(messagesHandler.ServeHTTP).Next, rl, defaultRPS, defaultTPM).ServeHTTP
 	mux.Handle("/v1/embeddings", embeddingsHandler)
 	mux.Handle("/v1/images/generations", imagesHandler)
 	mux.Handle("/v1/audio/transcriptions", audioHandler)
@@ -680,6 +687,19 @@ func main() {
 	})
 	mux.Handle("/global/spend/report", adminAuth(http.HandlerFunc(spendHandler.SpendReport)))
 	mux.Handle("/global/spend/logs", adminAuth(http.HandlerFunc(spendHandler.SpendLogs)))
+
+	// Cache management routes (admin/master key only).
+	cacheHandler := api.NewCacheHandler(cacheInst, handler.SemanticCache)
+	mux.Handle("/v1/cache/stats", adminAuth(http.HandlerFunc(cacheHandler.Stats)))
+	mux.Handle("/v1/cache", adminAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			cacheHandler.Clear(w, r)
+		} else {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/v1/cache/inspect", adminAuth(http.HandlerFunc(cacheHandler.Inspect)))
+
 	_ = spatial.NewVideo3DStreamHandler()
 	pqcKM := pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridEd25519MLDSA65)
 	mux.HandleFunc("/v1/pqc/keys", pqc.HandshakeHandler(pqcKM))
