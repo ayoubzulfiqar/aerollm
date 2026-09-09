@@ -432,7 +432,7 @@ Request path for `/v1/chat/completions`:
 - `internal/traffic` — shadow testing
 - `internal/webhooks` — async webhook dispatch with retry/backoff
 - `internal/agent` — agent engine, memory, approvals
-- `internal/router` — round-robin, latency, cost, fallback + circuit breaker
+- `internal/router` — round-robin, latency, cost, fallback, least-busy, usage-based + circuit breaker
 - `internal/orchestrator` — DAG execution with `errgroup` concurrency
 - `internal/mcp` — Model Context Protocol HTTP/SSE server
 - `internal/rag` — hybrid retrieval, RRF fusion, context injection
