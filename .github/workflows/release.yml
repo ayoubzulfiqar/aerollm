@@ -1,0 +1,120 @@
+name: Backend Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            goos: linux
+            goarch: amd64
+            ext: ''
+            flutter_target: linux
+            package_name: aero-linux
+            asset_extension: .tar.gz
+            archive_path: aero/build/linux/x64/release/bundle
+          - os: windows-latest
+            target: windows
+            goos: windows
+            goarch: amd64
+            ext: .exe
+            flutter_target: windows
+            package_name: aero-windows
+            asset_extension: .zip
+            archive_path: aero/build/windows/x64/runner/Release
+          - os: macos-latest
+            target: macos
+            goos: darwin
+            goarch: arm64
+            ext: ''
+            flutter_target: macos
+            package_name: aero-macos
+            asset_extension: .dmg
+            archive_path: aero/build/macos/Build/Products/Release/aero.app
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Run Tests
+        run: |
+          go test ./... -v
+          go vet ./...
+
+      - name: Build Binary
+        run: |
+          mkdir -p dist aero/assets/binaries
+          go build -o dist/aerollm-${{ matrix.target }}${{ matrix.ext }} ./cmd/server
+          go build -o aero/assets/binaries/aerollm-${{ matrix.target }}${{ matrix.os == 'windows-latest' && '.exe' || '' }} ./cmd/server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+
+      - name: Ensure executable bit on non-Windows binary
+        if: matrix.os != 'windows-latest'
+        run: chmod +x aero/assets/binaries/aerollm-${{ matrix.target }}
+
+      - name: Set up Flutter 3.24.0
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: stable
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev clang cmake pkg-config
+
+      - name: Flutter pub get
+        working-directory: aero
+        run: flutter pub get
+
+      - name: Flutter build release
+        working-directory: aero
+        run: flutter build ${{ matrix.flutter_target }} --release
+
+      - name: Package Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          powershell -Command "Compress-Archive -Path 'aero/build/windows/x64/runner/Release/*' -DestinationPath '${{ matrix.package_name }}${{ matrix.asset_extension }}' -Force"
+        shell: pwsh
+
+      - name: Package Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          tar -czf ${{ matrix.package_name }}${{ matrix.asset_extension }} -C aero/build/linux/x64/release bundle
+
+      - name: Package macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          hdiutil create -volname "AeroLLM Studio" -srcfolder aero/build/macos/Build/Products/Release/aero.app -ov -format UDZO ${{ matrix.package_name }}${{ matrix.asset_extension }}
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/aerollm-${{ matrix.target }}${{ matrix.ext }}
+            ${{ matrix.package_name }}${{ matrix.asset_extension }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
