@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    paths:
-      - 'cmd/**'
-      - 'internal/**'
-      - 'pkg/**'
-      - 'go.mod'
-      - 'go.sum'
 
 permissions:
   contents: write
@@ -77,7 +71,6 @@ jobs:
           else
             zip -r bin/aerollm-binaries.zip bin
           fi
-        shell: ${{ matrix.os == 'windows-latest' && 'pwsh' || 'bash' }}
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
