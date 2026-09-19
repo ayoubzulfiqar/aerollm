@@ -616,8 +616,9 @@ Request path for `/v1/chat/completions`:
 - `internal/compliance` — policy engine and HTTP 451 middleware
 - `internal/synthesis` — deficit detection, LLM code generation stub, tool promoter
 - `internal/graphrag` — temporal graph store, BFS neighbors, token query, GraphRAG middleware
-- `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
-- `internal/providers/universal` — universal model registry for capability cards
+|- `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
+|- `internal/rsi` — Recursive Self-Improvement engine (HCI assessment, Dream replay simulator)
+|- `internal/providers/universal` — universal model registry for capability cards
 - `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers
 - `internal/keymanager` — virtual key generation, validation, and agency/RBAC management
 - `internal/callbacks` — native observability callback dispatch (Langfuse, Datadog, webhook)
@@ -633,6 +634,64 @@ Request path for `/v1/chat/completions`:
 - `internal/licensing` — license validation and feature gating
 - `internal/studio` — topology, analytics, and DAG visualization APIs
 - `internal/genui` — generative UI SSE streaming and normalization
+
+## RSI Engine (Recursive Self-Improvement)
+
+The `internal/rsi` package implements Phase 32 of the AeroLLM roadmap, integrating concepts from four cutting-edge RSI papers:
+
+- **The Last AI Built by Humans** — HCI (Headroom-Closed Index) for staged autonomy assessment
+- **Dream-RSI** — Replay simulators from discovery history for offline policy evolution
+- **ModularRSI** — Benchmark-disjoint evaluation to prevent overfitting
+- **RSIAgent** — Broad-then-deep autonomous exploration for orchestration improvements
+
+### Components
+
+| Component | File | Description |
+|---|---|---|
+| HCI Engine | `internal/rsi/hci.go` | Assesses headroom across 6 dimensions: routing, cache, guardrails, agent tools, cost, latency |
+| Dream Simulator | `internal/rsi/dream.go` | Replays cached ledger responses to evaluate policies offline — no real LLM calls |
+| Modular Evaluator | `internal/rsi/modular.go` | Benchmark-disjoint evaluation with k-fold partitioning and diversity guarantees |
+| Autonomous Explorer | `internal/rsi/explore.go` | Broad-then-deep policy exploration with mutation and deep optimization |
+| RSI Orchestrator | `internal/rsi/orchestrator.go` | Full RSI lifecycle: assess → explore → evaluate → deploy via AIOps |
+
+### Architecture
+
+The RSI engine is non-invasive: it reads from existing `internal/ledger` records and `internal/trace` metrics, never modifying the request path directly. Policy deployment (when improvement exceeds a threshold) is delegated to `internal/aiops.MetaAgentTuner`.
+
+```
+Ledger Records ──→ HCIEngine ──→ HeadroomAssessment
+                       │              ↗
+                       ↓            ↗
+                  Prioritize     ↗
+                       │          ↗
+                    ┌──┴──┐      ↗
+                    │     │     ↘
+              DreamSimulator ──→  ExplorationResult
+                    │
+                    ↓
+              ModularEvaluator → DisjointMetrics
+                    │
+                    ↓
+              RSIOrchestrator → AIOps.TunerAction
+```
+
+### API Endpoints
+
+```
+GET  /v1/rsi/headroom        # Current HCI assessment for all dimensions
+GET  /v1/rsi/cycles          # RSI cycle history
+POST /v1/rsi/cycle           # Manually trigger an RSI cycle
+GET  /v1/rsi/current         # Currently active RSI cycle
+PUT  /v1/rsi/config          # Configure RSI parameters
+```
+
+### CLI Commands
+
+```bash
+aerollm rsi headroom    # Print HCI assessment
+aerollm rsi cycles      # List RSI cycle history
+aerollm rsi trigger     # Manually trigger RSI cycle
+```
 
 ## Community
 

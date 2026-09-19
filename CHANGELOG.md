@@ -13,6 +13,12 @@ All notable changes to this project will be documented in this file.
 - Token bucket rate limiting interface
 - OpenTelemetry OTLP gRPC exporter with context-aware spans
 - Comprehensive README with API docs and architecture
+- RSI Engine (Phase 32): Recursive Self-Improvement package at `internal/rsi/`
+  - HCI (Headroom-Closed Index) engine assessing headroom across 6 dimensions: routing, cache, guardrails, agent tools, cost, latency
+  - Dream Simulator for offline policy evaluation via ledger replay (no real LLM calls)
+  - Pluggable Policy interface for routing/caching/guardrail/agent-tool evolution
+  - Thread-safe, cached ledger record loading with Refresh support
+  - Integration-ready with internal/ledger, internal/trace, internal/finops, internal/aiops
 
 ## [1.0.0] - 2026-09-01
 
