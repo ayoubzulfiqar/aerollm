@@ -35,6 +35,14 @@ All notable changes to this project will be documented in this file.
   - CLI subcommands (cmd/cli/rsi.go): aerollm rsi headroom, aerollm rsi cycles, aerollm rsi trigger
   - CLI command registered in root command tree (cmd/cli/main.go)
   - routerProviderLister adapter wires router.Providers() to rsi.ProviderLister
+- RSI Engine: End-to-end test suite
+  - 27 orchestrator tests: RunCycle lifecycle, deploy trigger/not-triggered/error, headroom assessment, cycle history, JSON serialization, background Run loop, integration full lifecycle
+  - Total: 128 tests across 6 test files in internal/rsi/
+- RSI Engine: Full project integration
+  - Server wiring: RSIOrchestrator started as background goroutine in cmd/server/main.go
+  - Four HTTP endpoints: GET /v1/rsi/headroom, GET /v1/rsi/cycles, POST /v1/rsi/cycle, GET /v1/rsi/current
+  - CLI subcommands: aerollm rsi headroom, aerollm rsi cycles, aerollm rsi trigger
+  - Full project: go build ./..., go vet ./..., go test ./... — all passing
 
 ## [1.0.0] - 2026-09-01
 
