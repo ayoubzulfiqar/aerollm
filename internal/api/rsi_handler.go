@@ -103,3 +103,39 @@ func (h *RSIHandler) CurrentCycle() http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(cycle)
 	}
 }
+
+// GetConfig returns the current RSI configuration.
+func (h *RSIHandler) GetConfig() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h == nil || h.orchestrator == nil {
+			http.Error(w, `{"error":"RSI orchestrator not initialized"}`, http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(h.orchestrator.Config())
+	}
+}
+
+// UpdateConfig accepts a new RSI configuration in the JSON request body.
+func (h *RSIHandler) UpdateConfig() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h == nil || h.orchestrator == nil {
+			http.Error(w, `{"error":"RSI orchestrator not initialized"}`, http.StatusServiceUnavailable)
+			return
+		}
+
+		var cfg rsi.RSIConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		h.orchestrator.SetConfig(cfg)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"config": cfg,
+		})
+	}
+}

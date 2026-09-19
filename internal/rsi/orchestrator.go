@@ -13,29 +13,13 @@ import (
 
 // RSIConfig configures the RSI orchestrator's behavior.
 type RSIConfig struct {
-	// ImprovementThresholdPct is the minimum improvement (%) over the base
-	// policy score required to trigger a deployment.
-	ImprovementThresholdPct float64
-
-	// BroadIterations is the number of mutations generated in the broad phase.
-	BroadIterations int
-
-	// DeepIterations is the number of optimize iterations in the deep phase.
-	DeepIterations int
-
-	// CycleInterval is how often the orchestrator runs a full RSI cycle.
-	CycleInterval time.Duration
-
-	// KFold is the number of folds for disjoint evaluation.
-	KFold int
-
-	// HeadroomThreshold is the minimum headroom percentage (0-1) required
-	// to trigger exploration on a dimension.
-	HeadroomThreshold float64
-
-	// SampleSize limits the number of scenarios loaded from the ledger.
-	// 0 means load all.
-	SampleSize int
+	ImprovementThresholdPct float64       `json:"improvement_threshold_pct"`
+	BroadIterations         int           `json:"broad_iterations"`
+	DeepIterations          int           `json:"deep_iterations"`
+	CycleInterval           time.Duration `json:"cycle_interval"`
+	KFold                   int           `json:"k_fold"`
+	HeadroomThreshold       float64       `json:"headroom_threshold"`
+	SampleSize              int           `json:"sample_size"`
 }
 
 // DefaultRSIConfig returns a production-ready configuration.
@@ -258,6 +242,26 @@ func (o *RSIOrchestrator) DeployedPolicy() Policy {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.deployed
+}
+
+// Config returns a copy of the current RSI configuration.
+func (o *RSIOrchestrator) Config() RSIConfig {
+	if o == nil {
+		return RSIConfig{}
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.config
+}
+
+// SetConfig updates the orchestrator's configuration at runtime.
+func (o *RSIOrchestrator) SetConfig(cfg RSIConfig) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.config = cfg
 }
 
 // ---------------------------------------------------------------------------

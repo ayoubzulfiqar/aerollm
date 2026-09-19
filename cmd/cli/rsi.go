@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,6 +21,7 @@ func newRSICmd() *cobra.Command {
 	cmd.AddCommand(newRSIHeadroomCmd())
 	cmd.AddCommand(newRSICyclesCmd())
 	cmd.AddCommand(newRSIITriggerCmd())
+	cmd.AddCommand(newRSIConfigCmd())
 	return cmd
 }
 
@@ -129,5 +131,91 @@ func newRSIITriggerCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
 	cmd.Flags().DurationVarP(&wait, "wait", "w", 0, "wait for cycle to complete (duration)")
+	return cmd
+}
+
+// --- rsi config ---
+
+func newRSIConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Get or set RSI configuration",
+		Long:  "Without flags: show current config. With --set: update config via JSON string.",
+	}
+	cmd.AddCommand(newRSIConfigGetCmd())
+	cmd.AddCommand(newRSIConfigSetCmd())
+	return cmd
+}
+
+func newRSIConfigGetCmd() *cobra.Command {
+	var addr string
+	cmd := &cobra.Command{
+		Use:   "get",
+		Short: "Get current RSI configuration",
+		Run: func(_ *cobra.Command, _ []string) {
+			if addr == "" {
+				addr = "http://localhost:8080"
+			}
+			resp, err := http.Get(addr + "/v1/rsi/config")
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			var out interface{}
+			if err := json.Unmarshal(body, &out); err != nil {
+				fmt.Println(string(body))
+				return
+			}
+			pretty, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(pretty))
+		},
+	}
+	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
+	return cmd
+}
+
+func newRSIConfigSetCmd() *cobra.Command {
+	var addr string
+	var cfgJSON string
+	cmd := &cobra.Command{
+		Use:   "set",
+		Short: "Update RSI configuration (pass JSON via --json)",
+		Run: func(_ *cobra.Command, _ []string) {
+			if addr == "" {
+				addr = "http://localhost:8080"
+			}
+			if cfgJSON == "" {
+				fmt.Println("error: --json flag is required")
+				return
+			}
+			req, err := http.NewRequest(http.MethodPut, addr+"/v1/rsi/config", nil)
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.ContentLength = int64(len(cfgJSON))
+			req.Body = io.NopCloser(strings.NewReader(cfgJSON))
+			client := &http.Client{}
+			httpResp, err := client.Do(req)
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+				return
+			}
+			defer httpResp.Body.Close()
+			body, _ := io.ReadAll(httpResp.Body)
+			var out interface{}
+			if err := json.Unmarshal(body, &out); err != nil {
+				fmt.Println(string(body))
+				return
+			}
+			pretty, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(pretty))
+		},
+	}
+	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
+	cmd.Flags().StringVarP(&cfgJSON, "json", "j", "", "JSON config string to set")
 	return cmd
 }

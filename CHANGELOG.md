@@ -41,8 +41,11 @@ All notable changes to this project will be documented in this file.
 - RSI Engine: Full project integration
   - Server wiring: RSIOrchestrator started as background goroutine in cmd/server/main.go
   - Four HTTP endpoints: GET /v1/rsi/headroom, GET /v1/rsi/cycles, POST /v1/rsi/cycle, GET /v1/rsi/current
-  - CLI subcommands: aerollm rsi headroom, aerollm rsi cycles, aerollm rsi trigger
+  - Runtime config endpoints: GET /v1/rsi/config, PUT /v1/rsi/config/
+  - CLI subcommands: aerollm rsi headroom, aerollm rsi cycles, aerollm rsi trigger, aerollm rsi config get/set
   - Full project: go build ./..., go vet ./..., go test ./... — all passing
+- RSI Engine: API handler test suite (12 tests)
+  - internal/api/rsi_handler_test.go: headroom, cycles, current cycle, config get/update/invalid, trigger cycle, nil orchestrator handling
 
 ## [1.0.0] - 2026-09-01
 

@@ -482,3 +482,66 @@ func TestRSIOrchestrator_Integration_FullLifecycle(t *testing.T) {
 		// That's fine — the cycle still completed successfully.
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Config Tests
+// ---------------------------------------------------------------------------
+
+func TestConfig_GetDefault(t *testing.T) {
+	orch := newTestOrchestrator(makeLedgerRecords(5, "openai", "gpt-4o", time.Now()), DefaultRSIConfig())
+	cfg := orch.Config()
+	assert.Equal(t, 5.0, cfg.ImprovementThresholdPct)
+	assert.Equal(t, 10, cfg.BroadIterations)
+	assert.Equal(t, 5, cfg.DeepIterations)
+	assert.Equal(t, 3, cfg.KFold)
+	assert.Equal(t, 0.1, cfg.HeadroomThreshold)
+	assert.Equal(t, 5*time.Minute, cfg.CycleInterval)
+}
+
+func TestConfig_GetNilOrchestrator(t *testing.T) {
+	var orch *RSIOrchestrator
+	cfg := orch.Config()
+	assert.Equal(t, RSIConfig{}, cfg)
+}
+
+func TestConfig_SetAndRetrieve(t *testing.T) {
+	orch := newTestOrchestrator(makeLedgerRecords(5, "openai", "gpt-4o", time.Now()), DefaultRSIConfig())
+
+	newCfg := RSIConfig{
+		ImprovementThresholdPct: 10.0,
+		BroadIterations:         20,
+		DeepIterations:          10,
+		CycleInterval:           10 * time.Minute,
+		KFold:                   5,
+		HeadroomThreshold:       0.2,
+	}
+	orch.SetConfig(newCfg)
+
+	cfg := orch.Config()
+	assert.Equal(t, 10.0, cfg.ImprovementThresholdPct)
+	assert.Equal(t, 20, cfg.BroadIterations)
+	assert.Equal(t, 10, cfg.DeepIterations)
+	assert.Equal(t, 5, cfg.KFold)
+	assert.Equal(t, 0.2, cfg.HeadroomThreshold)
+	assert.Equal(t, 10*time.Minute, cfg.CycleInterval)
+}
+
+func TestConfig_SetConfigAffectsRunCycle(t *testing.T) {
+	now := time.Now()
+	records := makeLedgerRecords(20, "openai", "gpt-4o", now)
+	orch := newTestOrchestrator(records, DefaultRSIConfig())
+
+	// Lower the headroom threshold to force exploration.
+	orch.SetConfig(RSIConfig{
+		ImprovementThresholdPct: 1_000_000.0,
+		BroadIterations:         3,
+		DeepIterations:          1,
+		KFold:                   2,
+		HeadroomThreshold:       -1.0,
+	})
+
+	cycle, err := orch.RunCycle(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cycle)
+	assert.NotEmpty(t, cycle.Dimension, "should have explored a dimension with forced low threshold")
+}

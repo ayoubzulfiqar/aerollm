@@ -617,6 +617,8 @@ func main() {
 	mux.HandleFunc("/v1/rsi/cycles", rsiHandler.Cycles())
 	mux.HandleFunc("/v1/rsi/cycle", rsiHandler.TriggerCycle())
 	mux.HandleFunc("/v1/rsi/current", rsiHandler.CurrentCycle())
+	mux.HandleFunc("/v1/rsi/config", rsiHandler.GetConfig())
+	mux.HandleFunc("/v1/rsi/config/", rsiHandler.UpdateConfig())
 
 	graphStore := graphrag.NewBboltGraphStore()
 	_ = graphStore

@@ -729,6 +729,8 @@ PUT  /v1/rsi/config          # Configure RSI parameters
 aerollm rsi headroom    # Print HCI assessment for all dimensions
 aerollm rsi cycles      # List RSI cycle history
 aerollm rsi trigger     # Manually trigger an RSI cycle
+aerollm rsi config get   # Print current RSI configuration
+aerollm rsi config set  # Update RSI configuration (pass JSON via --json)
 ```
 
 ## Community
