@@ -26,6 +26,15 @@ All notable changes to this project will be documented in this file.
   - Concrete policies: RoutingPolicy, CachePolicy, GuardrailPolicy, AgentWorkflowPolicy
   - Composite scoreMetrics scoring in [0, 1] across latency, cost, errors, cache-hit-rate
   - 54 new tests: partition correctness, policy apply/mutate/clone, exploration improvement
+- RSI Engine Step 3: Orchestrator + API/CLI integration
+  - RSIOrchestrator with full lifecycle: assess → explore → evaluate → deploy
+  - RSIConfig with improvement threshold, broad/deep iterations, cycle interval, k-fold
+  - RSICycle history tracking with JSON serialization
+  - OnDeploy callback for policy deployment via AIOps
+  - API handler (internal/api/rsi_handler.go): GET /v1/rsi/headroom, GET /v1/rsi/cycles, POST /v1/rsi/cycle, GET /v1/rsi/current
+  - CLI subcommands (cmd/cli/rsi.go): aerollm rsi headroom, aerollm rsi cycles, aerollm rsi trigger
+  - CLI command registered in root command tree (cmd/cli/main.go)
+  - routerProviderLister adapter wires router.Providers() to rsi.ProviderLister
 
 ## [1.0.0] - 2026-09-01
 

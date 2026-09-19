@@ -652,7 +652,7 @@ The `internal/rsi` package implements Phase 32 of the AeroLLM roadmap, integrati
 | Dream Simulator | `internal/rsi/dream.go` | Replays cached ledger responses to evaluate policies offline — no real LLM calls |
 | Modular Evaluator | `internal/rsi/modular.go` | Benchmark-disjoint evaluation with k-fold partitioning and diversity guarantees |
 | Autonomous Explorer | `internal/rsi/explore.go` | Broad-then-deep policy exploration with mutation and deep optimization |
-| RSI Orchestrator | `internal/rsi/orchestrator.go` | Full RSI lifecycle: assess → explore → evaluate → deploy via AIOps |
+| RSI Orchestrator | `internal/rsi/orchestrator.go` | Full lifecycle: assess → explore → evaluate → deploy, with cycle history |
 
 ### Architecture
 
@@ -726,9 +726,9 @@ PUT  /v1/rsi/config          # Configure RSI parameters
 ### CLI Commands
 
 ```bash
-aerollm rsi headroom    # Print HCI assessment
+aerollm rsi headroom    # Print HCI assessment for all dimensions
 aerollm rsi cycles      # List RSI cycle history
-aerollm rsi trigger     # Manually trigger RSI cycle
+aerollm rsi trigger     # Manually trigger an RSI cycle
 ```
 
 ## Community

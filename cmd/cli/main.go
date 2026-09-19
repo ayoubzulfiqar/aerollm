@@ -43,6 +43,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newSecretsCmd())
 	root.AddCommand(newRegionCmd())
 	root.AddCommand(newMigrateCmd())
+	root.AddCommand(newRSICmd())
 
 	return root
 }

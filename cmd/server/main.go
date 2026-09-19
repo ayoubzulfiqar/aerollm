@@ -69,6 +69,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/notification"
 	"github.com/ayoubzulfiqar/aerollm/internal/redteam"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
+	"github.com/ayoubzulfiqar/aerollm/internal/rsi"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
 	"github.com/ayoubzulfiqar/aerollm/internal/evolution"
 	"github.com/ayoubzulfiqar/aerollm/internal/learning"
@@ -223,6 +224,19 @@ func getenvOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+type routerProviderLister struct {
+	r *router.Router
+}
+
+func (l *routerProviderLister) ProviderNames() []string {
+	providers := l.r.Providers()
+	names := make([]string, len(providers))
+	for i, p := range providers {
+		names[i] = p.Name()
+	}
+	return names
 }
 
 func main() {
@@ -590,6 +604,19 @@ func main() {
 	})
 	mux.HandleFunc("/v1/chaos/fault", chaos.Handler(chaos.NewInjector(chaos.Config{})))
 	mux.HandleFunc("/v1/trace/metrics", traceProvider.MetricsHandler())
+
+	// RSI Engine (Phase 32): Recursive Self-Improvement.
+	rsiOrch := rsi.NewRSIOrchestrator(ledgerStore, traceProvider, costTracker, &routerProviderLister{r: r}, rsi.DefaultRSIConfig())
+	rsiOrch.OnDeploy = func(ctx context.Context, policy rsi.Policy, cycle rsi.RSICycle) error {
+		logger.Info("RSI cycle deploying policy", "cycle", cycle.ID, "policy", fmt.Sprintf("%T", policy), "improvement", cycle.ImprovementPct)
+		return nil
+	}
+	go rsiOrch.Run(ctx)
+	rsiHandler := api.NewRSIHandler(rsiOrch)
+	mux.HandleFunc("/v1/rsi/headroom", rsiHandler.Headroom())
+	mux.HandleFunc("/v1/rsi/cycles", rsiHandler.Cycles())
+	mux.HandleFunc("/v1/rsi/cycle", rsiHandler.TriggerCycle())
+	mux.HandleFunc("/v1/rsi/current", rsiHandler.CurrentCycle())
 
 	graphStore := graphrag.NewBboltGraphStore()
 	_ = graphStore
