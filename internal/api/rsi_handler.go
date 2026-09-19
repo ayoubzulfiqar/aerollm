@@ -33,13 +33,8 @@ func (h *RSIHandler) Headroom() http.HandlerFunc {
 			return
 		}
 
-		out := make(map[string]interface{}, len(assessments))
-		for dim, a := range assessments {
-			out[string(dim)] = a
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
+		_ = json.NewEncoder(w).Encode(assessments)
 	}
 }
 
@@ -96,46 +91,37 @@ func (h *RSIHandler) CurrentCycle() http.HandlerFunc {
 
 		cycle := h.orchestrator.CurrentCycle()
 		w.Header().Set("Content-Type", "application/json")
-		if cycle == nil {
-			_ = json.NewEncoder(w).Encode(nil)
-			return
-		}
 		_ = json.NewEncoder(w).Encode(cycle)
 	}
 }
 
-// GetConfig returns the current RSI configuration.
-func (h *RSIHandler) GetConfig() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if h == nil || h.orchestrator == nil {
-			http.Error(w, `{"error":"RSI orchestrator not initialized"}`, http.StatusServiceUnavailable)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(h.orchestrator.Config())
-	}
-}
-
-// UpdateConfig accepts a new RSI configuration in the JSON request body.
-func (h *RSIHandler) UpdateConfig() http.HandlerFunc {
+// Config dispatches GET (return config) and PUT (update config).
+func (h *RSIHandler) Config() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h == nil || h.orchestrator == nil {
 			http.Error(w, `{"error":"RSI orchestrator not initialized"}`, http.StatusServiceUnavailable)
 			return
 		}
 
-		var cfg rsi.RSIConfig
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(h.orchestrator.Config())
+		case http.MethodPut:
+			var cfg rsi.RSIConfig
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+				return
+			}
+			h.orchestrator.SetConfig(cfg)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "ok",
+				"config": cfg,
+			})
+		default:
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		}
-		h.orchestrator.SetConfig(cfg)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
-			"config": cfg,
-		})
 	}
 }

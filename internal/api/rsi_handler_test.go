@@ -177,7 +177,7 @@ func TestRSIHandler_GetConfig(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/rsi/config", nil)
 	w := httptest.NewRecorder()
-	h.GetConfig()(w, req)
+	h.Config()(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var cfg rsi.RSIConfig
@@ -190,9 +190,9 @@ func TestRSIHandler_UpdateConfig(t *testing.T) {
 	h := NewRSIHandler(orch)
 
 	body := `{"improvement_threshold_pct": 10.0, "broad_iterations": 20, "k_fold": 5}`
-	req := httptest.NewRequest(http.MethodPut, "/v1/rsi/config/", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/v1/rsi/config", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	h.UpdateConfig()(w, req)
+	h.Config()(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]interface{}
@@ -209,9 +209,9 @@ func TestRSIHandler_UpdateConfig_InvalidJSON(t *testing.T) {
 	orch := newTestOrchestrator(nil)
 	h := NewRSIHandler(orch)
 
-	req := httptest.NewRequest(http.MethodPut, "/v1/rsi/config/", strings.NewReader("not json"))
+	req := httptest.NewRequest(http.MethodPut, "/v1/rsi/config", strings.NewReader("not json"))
 	w := httptest.NewRecorder()
-	h.UpdateConfig()(w, req)
+	h.Config()(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
