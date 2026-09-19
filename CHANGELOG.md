@@ -19,6 +19,13 @@ All notable changes to this project will be documented in this file.
   - Pluggable Policy interface for routing/caching/guardrail/agent-tool evolution
   - Thread-safe, cached ledger record loading with Refresh support
   - Integration-ready with internal/ledger, internal/trace, internal/finops, internal/aiops
+- RSI Engine Step 2: ModularRSI benchmark-disjoint evaluation + Autonomous Explorer
+  - ModularEvaluator with k-fold partitioning and diversity-based interleaving
+  - EvaluateDisjoint returns train/test scores and generalization gap
+  - AutonomousExplorer with broad-then-deep policy search (ExploreBroad, ExploreDeep, Explore)
+  - Concrete policies: RoutingPolicy, CachePolicy, GuardrailPolicy, AgentWorkflowPolicy
+  - Composite scoreMetrics scoring in [0, 1] across latency, cost, errors, cache-hit-rate
+  - 54 new tests: partition correctness, policy apply/mutate/clone, exploration improvement
 
 ## [1.0.0] - 2026-09-01
 

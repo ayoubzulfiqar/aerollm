@@ -675,6 +675,44 @@ Ledger Records ──→ HCIEngine ──→ HeadroomAssessment
               RSIOrchestrator → AIOps.TunerAction
 ```
 
+### ModularRSI (Benchmark-Disjoint Evaluation)
+
+`internal/rsi/modular.go` implements k-fold disjoint evaluation to detect and prevent policy overfitting during RSI. The `ModularEvaluator` splits Dream replay scenarios into k folds using diversity-based interleaving (sorted by content length) and evaluates each policy on train and test partitions independently.
+
+```go
+// 5-fold split to detect overfitting
+evaluator := NewModularEvaluator(simulator)
+partitions := evaluator.CreatePartitions(scenarios, 5)
+
+metrics, _ := evaluator.EvaluateDisjoint(ctx, policy, partitions)
+fmt.Println(metrics.TrainScore, metrics.TestScore, metrics.GeneralizationGap)
+// High GeneralizationGap → policy is overfitting to training scenarios
+```
+
+- **Diversity guarantee**: scenarios are sorted by content length before interleaving, ensuring each fold contains a balanced mix of short and long requests.
+- **Generalization gap**: `TrainScore - TestScore`; values above 0.2 indicate potential overfitting.
+
+### Autonomous Explorer (Broad-then-Deep Exploration)
+
+`internal/rsi/explore.go` implements RSIAgent-style broad-then-deep policy search. The `AutonomousExplorer` uses the HCI engine to identify the highest-headroom dimension, generates many mutations of the base policy (broad), then exhaustively optimizes the top candidates (deep).
+
+```go
+explorer := NewAutonomousExplorer(simulator, hciEngine)
+
+// Full cycle: assess headroom → explore broad → explore deep → evaluate
+bestPolicy, result, _ := explorer.Explore(ctx, DimensionCache, 10)
+fmt.Println(bestPolicy, result.ImprovementPct)
+```
+
+**Concrete policies** (all implement `Policy` interface with `Apply`, `Mutate`, `Clone`):
+
+| Policy | Dimension | Strategy |
+|---|---|---|
+| `RoutingPolicy` | `routing`, `cost`, `latency` | Weighted provider selection; mutations perturb provider weights ±20% |
+| `CachePolicy` | `cache` | Content-length threshold caching; mutations adjust the threshold |
+| `GuardrailPolicy` | `guardrails` | Length-based blocking; mutations adjust sensitivity thresholds |
+| `AgentWorkflowPolicy` | `agent_tools` | Configurable depth/tool limits; mutations adjust parameters |
+
 ### API Endpoints
 
 ```
