@@ -2,64 +2,92 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net/http"
-	"os"
+	"runtime"
 	"strings"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
 	"github.com/spf13/cobra"
 )
 
 func newOpenStandardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "openstandard",
-		Short: "Interact with Open Standard registry endpoints",
+		Short: "Publish Open Standard capability manifests and receipts to a registry",
 	}
 	cmd.AddCommand(newOpenStandardCapabilityCmd())
 	cmd.AddCommand(newOpenStandardReceiptCmd())
 	return cmd
 }
 
-func openStandardBaseURL() string {
-	if v := strings.TrimSpace(os.Getenv("AEROLLM_SERVER_URL")); v != "" { return v }
-	return "http://localhost:8080"
-}
-
 func newOpenStandardCapabilityCmd() *cobra.Command {
+	var (
+		manifestFile, version, gpuName, currency string
+		gpu, metered                             bool
+		memoryGB                                 int
+		capabilities                             []string
+	)
 	cmd := &cobra.Command{
 		Use:   "capability",
-		Short: "Post Open Standard capability manifest to server registry",
-		Run: func(cmd *cobra.Command, args []string) {
-			body := `{"version":"1.0","hardware":{"has_local_gpu":true,"os":"linux","memory_gb":16},"billing":{"supports_metered":true,"currency":"USD"},"capabilities":["mesh","wasm"]}`
-			resp, err := http.Post(openStandardBaseURL()+"/v1/marketplace/openstandard/capability", "application/json", strings.NewReader(body))
-			if err != nil { fmt.Fprintf(os.Stderr, "capability publish failed: %v\n", err); os.Exit(1) }
-			defer resp.Body.Close()
-			b, _ := io.ReadAll(resp.Body)
-			fmt.Println(string(b))
+		Short: "Publish a capability manifest (POST /v1/marketplace/openstandard/capability)",
+		Example: `  aerollm openstandard capability --gpu --gpu-name "RTX 4090" --memory-gb 64 --capabilities mesh,wasm
+  aerollm openstandard capability --file manifest.json`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var m marketplace.CapabilityManifest
+			if manifestFile != "" {
+				raw, err := readValueArg(cmd, "@"+manifestFile)
+				if err != nil {
+					return err
+				}
+				if err := jsonUnmarshalStrict([]byte(raw), &m); err != nil {
+					return fmt.Errorf("--file: %w", err)
+				}
+			} else {
+				m = marketplace.CapabilityManifest{
+					Version: version,
+					Hardware: marketplace.Hardware{
+						HasLocalGPU: gpu,
+						GPUName:     gpuName,
+						OS:          runtime.GOOS,
+						MemoryGB:    memoryGB,
+					},
+					Billing:      marketplace.Billing{SupportsMetered: metered, Currency: strings.ToUpper(currency)},
+					Capabilities: capabilities,
+				}
+			}
+			if err := m.Validate(); err != nil {
+				return fmt.Errorf("invalid manifest: %w", err)
+			}
+			return serverRequest(cmd, http.MethodPost, "/v1/marketplace/openstandard/capability", nil, m, formatJSON, nil, nil)
 		},
 	}
+	f := cmd.Flags()
+	f.StringVar(&manifestFile, "file", "", "read the manifest from a JSON file instead of flags")
+	f.StringVar(&version, "manifest-version", "1.0", "manifest schema version")
+	f.BoolVar(&gpu, "gpu", false, "node has a local GPU")
+	f.StringVar(&gpuName, "gpu-name", "", "GPU model")
+	f.IntVar(&memoryGB, "memory-gb", 0, "memory in GB")
+	f.BoolVar(&metered, "metered", true, "supports metered billing")
+	f.StringVar(&currency, "currency", "USD", "billing currency")
+	f.StringSliceVar(&capabilities, "capabilities", []string{"mesh", "wasm"}, "advertised capabilities")
 	return cmd
 }
 
 func newOpenStandardReceiptCmd() *cobra.Command {
-	var customerID, eventName, currency string
-	var value float64
+	var rf receiptFlags
 	cmd := &cobra.Command{
 		Use:   "receipt",
-		Short: "Post Open Standard billing receipt to server registry",
-		Run: func(cmd *cobra.Command, args []string) {
-			body := fmt.Sprintf(`{"receipt_id":"cli-%d","customer_id":"%s","provider_id":"server","event_name":"%s","value":%f,"currency":"%s"}`,
-				os.Getpid(), customerID, eventName, value, currency)
-			resp, err := http.Post(openStandardBaseURL()+"/v1/marketplace/openstandard/receipt", "application/json", strings.NewReader(body))
-			if err != nil { fmt.Fprintf(os.Stderr, "receipt publish failed: %v\n", err); os.Exit(1) }
-			defer resp.Body.Close()
-			b, _ := io.ReadAll(resp.Body)
-			fmt.Println(string(b))
+		Short: "Publish a billing receipt (POST /v1/marketplace/openstandard/receipt)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			rec, err := rf.build("server")
+			if err != nil {
+				return err
+			}
+			return serverRequest(cmd, http.MethodPost, "/v1/marketplace/openstandard/receipt", nil, rec, formatJSON, nil, nil)
 		},
 	}
-	cmd.Flags().StringVarP(&customerID, "customer", "c", "cli", "customer id")
-	cmd.Flags().StringVarP(&eventName, "event", "e", "token", "event name")
-	cmd.Flags().Float64VarP(&value, "value", "v", 1, "receipt value")
-	cmd.Flags().StringVarP(&currency, "currency", "u", "USD", "currency")
+	rf.register(cmd)
 	return cmd
 }

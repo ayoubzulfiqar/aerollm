@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,8 +38,10 @@ func (e *EchoTool) Execute(ctx context.Context, args map[string]interface{}) (in
 // CalculatorTool evaluates simple arithmetic expressions.
 type CalculatorTool struct{}
 
-func (c *CalculatorTool) Name() string        { return "calculator" }
-func (c *CalculatorTool) Description() string { return "Evaluates basic math expressions like 2+2 or 3*4" }
+func (c *CalculatorTool) Name() string { return "calculator" }
+func (c *CalculatorTool) Description() string {
+	return "Evaluates arithmetic expressions with + - * / and parentheses, e.g. (2+3)*4"
+}
 func (c *CalculatorTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
@@ -79,37 +84,143 @@ func (t *TimeTool) Execute(ctx context.Context, args map[string]interface{}) (in
 	return map[string]interface{}{"utc": time.Now().UTC().Format(time.RFC3339)}, nil
 }
 
+// maxExprLen bounds calculator input; maxExprDepth bounds parenthesis nesting.
+const (
+	maxExprLen   = 512
+	maxExprDepth = 64
+)
+
+// evaluateSimpleExpr evaluates an arithmetic expression with +, -, *, /,
+// unary minus/plus, decimal numbers and parentheses, honouring the usual
+// precedence. Any other character is rejected (it is never silently dropped,
+// which would change the meaning of the expression).
 func evaluateSimpleExpr(expr string) (float64, error) {
-	// Very small safe evaluator: digits, operators, parentheses, spaces, dot.
-	clean := ""
-	for _, r := range expr {
-		if (r >= '0' && r <= '9') || r == '+' || r == '-' || r == '*' || r == '/' || r == '(' || r == ')' || r == '.' || r == ' ' {
-			clean += string(r)
-		}
-	}
-	if clean == "" {
+	if strings.TrimSpace(expr) == "" {
 		return 0, fmt.Errorf("empty expression")
 	}
-	var a, b float64
-	var op rune
-	_, err := fmt.Sscanf(clean, "%f %c %f", &a, &op, &b)
-	if err != nil {
-		return 0, fmt.Errorf("unsupported expression: %w", err)
+	if len(expr) > maxExprLen {
+		return 0, fmt.Errorf("expression too long (max %d characters)", maxExprLen)
 	}
-	switch op {
-	case '+':
-		return a + b, nil
-	case '-':
-		return a - b, nil
-	case '*':
-		return a * b, nil
-	case '/':
-		if b == 0 {
-			return 0, fmt.Errorf("division by zero")
+	p := &exprParser{s: expr}
+	v, err := p.parseExpr(0)
+	if err != nil {
+		return 0, err
+	}
+	p.skipSpace()
+	if p.pos != len(p.s) {
+		return 0, fmt.Errorf("unexpected character %q at position %d", p.s[p.pos], p.pos)
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("result is not a finite number")
+	}
+	return v, nil
+}
+
+type exprParser struct {
+	s   string
+	pos int
+}
+
+func (p *exprParser) skipSpace() {
+	for p.pos < len(p.s) && (p.s[p.pos] == ' ' || p.s[p.pos] == '\t') {
+		p.pos++
+	}
+}
+
+func (p *exprParser) parseExpr(depth int) (float64, error) {
+	left, err := p.parseTerm(depth)
+	if err != nil {
+		return 0, err
+	}
+	for {
+		p.skipSpace()
+		if p.pos >= len(p.s) || (p.s[p.pos] != '+' && p.s[p.pos] != '-') {
+			return left, nil
 		}
-		return a / b, nil
+		op := p.s[p.pos]
+		p.pos++
+		right, err := p.parseTerm(depth)
+		if err != nil {
+			return 0, err
+		}
+		if op == '+' {
+			left += right
+		} else {
+			left -= right
+		}
+	}
+}
+
+func (p *exprParser) parseTerm(depth int) (float64, error) {
+	left, err := p.parseFactor(depth)
+	if err != nil {
+		return 0, err
+	}
+	for {
+		p.skipSpace()
+		if p.pos >= len(p.s) || (p.s[p.pos] != '*' && p.s[p.pos] != '/') {
+			return left, nil
+		}
+		op := p.s[p.pos]
+		p.pos++
+		right, err := p.parseFactor(depth)
+		if err != nil {
+			return 0, err
+		}
+		if op == '*' {
+			left *= right
+		} else {
+			if right == 0 {
+				return 0, fmt.Errorf("division by zero")
+			}
+			left /= right
+		}
+	}
+}
+
+func (p *exprParser) parseFactor(depth int) (float64, error) {
+	if depth > maxExprDepth {
+		return 0, fmt.Errorf("expression nested too deeply")
+	}
+	p.skipSpace()
+	if p.pos >= len(p.s) {
+		return 0, fmt.Errorf("unexpected end of expression")
+	}
+	switch c := p.s[p.pos]; {
+	case c == '-' || c == '+':
+		p.pos++
+		v, err := p.parseFactor(depth + 1)
+		if err != nil {
+			return 0, err
+		}
+		if c == '-' {
+			return -v, nil
+		}
+		return v, nil
+	case c == '(':
+		p.pos++
+		v, err := p.parseExpr(depth + 1)
+		if err != nil {
+			return 0, err
+		}
+		p.skipSpace()
+		if p.pos >= len(p.s) || p.s[p.pos] != ')' {
+			return 0, fmt.Errorf("missing closing parenthesis")
+		}
+		p.pos++
+		return v, nil
+	case (c >= '0' && c <= '9') || c == '.':
+		start := p.pos
+		for p.pos < len(p.s) && ((p.s[p.pos] >= '0' && p.s[p.pos] <= '9') || p.s[p.pos] == '.') {
+			p.pos++
+		}
+		v, err := strconv.ParseFloat(p.s[start:p.pos], 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number %q", p.s[start:p.pos])
+		}
+		return v, nil
 	default:
-		return 0, fmt.Errorf("unsupported operator: %c", op)
+		return 0, fmt.Errorf("unexpected character %q at position %d", c, p.pos)
 	}
 }
 

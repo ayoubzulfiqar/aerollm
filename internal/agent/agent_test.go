@@ -95,7 +95,9 @@ func TestRunToolExecutionLoopMaxIterations(t *testing.T) {
 	registry.Register(&counterTool{})
 	a := NewAgentEngine(&mockToolProvider{response: respWithTools}, registry)
 	a.MaxIterations = 2
-	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{})
+	_, err := a.RunToolExecutionLoop(context.Background(), &models.LLMRequest{
+		Tools: []models.ToolDefinition{{Name: "counter"}},
+	})
 	if err == nil {
 		t.Fatal("expected max iterations error")
 	}
@@ -112,8 +114,8 @@ func TestExecuteToolsContextCancel(t *testing.T) {
 
 	a := NewAgentEngine(nil, nil)
 	toolCalls := []models.ToolCall{{
-		ID:      "call-1",
-		Type:    "function",
+		ID:       "call-1",
+		Type:     "function",
 		Function: models.ToolFunction{Name: "test_tool", Arguments: "{}"},
 	}}
 	_, err := a.ExecuteTools(ctx, toolCalls)
@@ -162,8 +164,8 @@ func TestExecuteToolsBillsToolCalls(t *testing.T) {
 	a := NewAgentEngine(provider, registry)
 	a.ToolBilling = &fakeToolBilling{}
 	_, err := a.ExecuteTools(context.Background(), []models.ToolCall{{
-		ID:      "call-1",
-		Type:    "function",
+		ID:       "call-1",
+		Type:     "function",
 		Function: models.ToolFunction{Name: "counter", Arguments: `{}`},
 	}})
 	if err != nil {

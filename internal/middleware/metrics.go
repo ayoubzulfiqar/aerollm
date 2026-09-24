@@ -9,11 +9,11 @@ import (
 
 // MetricsResponse represents the metrics response.
 type MetricsResponse struct {
-	Requests    int64         `json:"requests"`
-	CacheHits   int64         `json:"cache_hits"`
-	Errors      int64         `json:"errors"`
-	AvgLatency  float64       `json:"avg_latency_ms"`
-	Providers   []ProviderMetric `json:"providers"`
+	Requests   int64            `json:"requests"`
+	CacheHits  int64            `json:"cache_hits"`
+	Errors     int64            `json:"errors"`
+	AvgLatency float64          `json:"avg_latency_ms"`
+	Providers  []ProviderMetric `json:"providers"`
 }
 
 // ProviderMetric represents metrics for a single provider.

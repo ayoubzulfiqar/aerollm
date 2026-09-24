@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
+	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/router"
 )
 
@@ -24,9 +26,9 @@ const (
 
 // Node represents a graph node for frontend visualization.
 type Node struct {
-	ID    string   `json:"id"`
-	Label string   `json:"label"`
-	Type  NodeType `json:"type"`
+	ID    string                 `json:"id"`
+	Label string                 `json:"label"`
+	Type  NodeType               `json:"type"`
 	Meta  map[string]interface{} `json:"meta,omitempty"`
 }
 
@@ -93,6 +95,16 @@ type pricingProvider interface {
 	Models() []string
 }
 
+// pricingLookup is optionally implemented by pricing providers (e.g.
+// *finops.PricingMap) to price ledger usage.
+type pricingLookup interface {
+	Get(model string) (finops.Pricing, bool)
+}
+
+// MaxCostTimeSeriesPoints caps the number of points returned by AnalyticsCost
+// (the most recent points are kept).
+const MaxCostTimeSeriesPoints = 1000
+
 // Handler handles studio API requests.
 type Handler struct {
 	mu         sync.RWMutex
@@ -125,14 +137,19 @@ func NewHandler(
 	ledgerStore ledgerStore,
 	marketRecorder marketplaceRecorder,
 ) *Handler {
-	return &Handler{
+	h := &Handler{
 		router:     router,
 		swarms:     swarms,
-		pricing:    pricing,
 		ledger:     ledgerStore,
 		market:     marketRecorder,
 		meshStatus: MeshStatus{SyncInterval: "5s"},
 	}
+	// Never store a typed nil pointer in the interface: h.pricing != nil would
+	// then be true and calling Models() would panic.
+	if pricing != nil {
+		h.pricing = pricing
+	}
+	return h
 }
 
 // SetMeshStatus updates mesh status shown in topology.
@@ -144,13 +161,16 @@ func (h *Handler) SetMeshStatus(status MeshStatus) {
 
 // Topology returns the current system topology as graph nodes/edges.
 func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 
 	resp := TopologyResponse{
 		Timestamp: time.Now().UTC(),
+		// Every edge below originates at the router, so it is always present.
+		Nodes: []Node{{ID: "router", Label: "Router", Type: NodeTypeProvider}},
+		Edges: []Edge{},
 	}
 
 	if h.router != nil {
@@ -162,10 +182,10 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 				Label: p.Name(),
 				Type:  NodeTypeProvider,
 				Meta: map[string]interface{}{
-					"type":          string(p.Type()),
-					"latency_ms":    health.LatencyMs,
-					"circuit_open":  health.CircuitOpen,
-					"healthy":       health.Healthy,
+					"type":         string(p.Type()),
+					"latency_ms":   health.LatencyMs,
+					"circuit_open": health.CircuitOpen,
+					"healthy":      health.Healthy,
 				},
 			})
 			resp.Edges = append(resp.Edges, Edge{
@@ -216,17 +236,16 @@ func (h *Handler) Topology(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if len(resp.Nodes) == 0 {
-		resp.Nodes = append(resp.Nodes, Node{ID: "router", Label: "Router", Type: NodeTypeProvider})
-	}
-
 	writeJSON(w, resp)
 }
 
-// AnalyticsCost returns cost analytics data aggregated from ledger/marketplace state.
+// AnalyticsCost returns cost analytics data aggregated from ledger/marketplace
+// state. Token counts and models are read from the ledger request/response
+// payloads; costs are computed from the pricing map when it can price the
+// model (prices are interpreted as USD per 1K tokens).
 func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 
@@ -247,14 +266,38 @@ func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
 
 	if h.ledger != nil {
 		records, err := h.ledger.All(r.Context())
-		if err == nil {
-			for _, rec := range records {
-				resp.TimeSeries = append(resp.TimeSeries, CostTimeSeries{
-					Timestamp: rec.Timestamp,
-					CostUSD:   0,
-					Tokens:    0,
-				})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read ledger")
+			return
+		}
+		lookup, _ := h.pricing.(pricingLookup)
+		for _, rec := range records {
+			model, usage := ledgerUsage(rec)
+			point := CostTimeSeries{Timestamp: rec.Timestamp}
+			if usage != nil {
+				point.Tokens = int64(usage.TotalTokens)
+				if point.Tokens == 0 {
+					point.Tokens = int64(usage.PromptTokens) + int64(usage.CompletionTokens)
+				}
+				if lookup != nil && model != "" {
+					if p, ok := lookup.Get(model); ok {
+						point.CostUSD = (float64(usage.PromptTokens)*p.PromptPrice + float64(usage.CompletionTokens)*p.CompletionPrice) / 1000
+					}
+				}
 			}
+			if model != "" {
+				resp.Breakdown.ByModel[model] += point.CostUSD
+			}
+			if tenant, ok := rec.Metadata["tenant"].(string); ok && tenant != "" {
+				resp.Breakdown.ByTenant[tenant] += point.CostUSD
+			}
+			resp.TimeSeries = append(resp.TimeSeries, point)
+		}
+		sort.SliceStable(resp.TimeSeries, func(i, j int) bool {
+			return resp.TimeSeries[i].Timestamp.Before(resp.TimeSeries[j].Timestamp)
+		})
+		if over := len(resp.TimeSeries) - MaxCostTimeSeriesPoints; over > 0 {
+			resp.TimeSeries = resp.TimeSeries[over:]
 		}
 	}
 
@@ -265,6 +308,29 @@ func (h *Handler) AnalyticsCost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, resp)
+}
+
+// ledgerUsage extracts the requested model and token usage from a ledger
+// record's payloads. Malformed payloads yield ("", nil).
+func ledgerUsage(rec ledger.LedgerRecord) (string, *models.Usage) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	var resp struct {
+		Model string        `json:"model"`
+		Usage *models.Usage `json:"usage"`
+	}
+	if rec.RequestPayload != "" {
+		_ = json.Unmarshal([]byte(rec.RequestPayload), &req)
+	}
+	if rec.ResponsePayload != "" {
+		_ = json.Unmarshal([]byte(rec.ResponsePayload), &resp)
+	}
+	model := req.Model
+	if model == "" {
+		model = resp.Model
+	}
+	return model, resp.Usage
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

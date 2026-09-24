@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 )
@@ -9,9 +9,10 @@ import (
 func newResilienceCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resilience",
-		Short: "Show local resilience/status snapshot",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println(`{"state":"ok"}`)
+		Short: "Show the gateway's resilience status (/resilience/status)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return serverRequest(cmd, http.MethodGet, "/resilience/status", nil, nil, formatJSON, nil, nil)
 		},
 	}
 }

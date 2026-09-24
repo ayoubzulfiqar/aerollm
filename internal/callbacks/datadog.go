@@ -1,216 +1,208 @@
 package callbacks
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 )
 
-// DatadogCallback sends custom metrics and logs to Datadog.
-// It sends metrics as Datadog statsd-style JSON payloads to the Datadog API
-// and logs as structured events to the Datadog logs endpoint.
+// Datadog metric intake types (v2 series API).
+const (
+	ddTypeCount = 1
+	ddTypeGauge = 3
+)
+
+var ddSiteRe = regexp.MustCompile(`^[a-z0-9]+([.-][a-z0-9]+)*$`)
+
+// DatadogCallback sends metrics (v2 series API) and logs (v2 logs intake)
+// to Datadog, authenticating with the DD-API-KEY header.
 type DatadogCallback struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
-	site       string // e.g. "datadoghq.com"
+	site       string // e.g. "datadoghq.com", "datadoghq.eu", "us5.datadoghq.com"
+	service    string
 }
 
-// NewDatadogCallback creates a new Datadog callback handler.
+// NewDatadogCallback creates a new Datadog callback handler. site selects
+// the regional intake (default "datadoghq.com"). baseURL, when set,
+// overrides both intake hosts (useful for proxies and tests).
 func NewDatadogCallback(apiKey, baseURL, site string) *DatadogCallback {
+	site = strings.ToLower(strings.TrimSpace(site))
 	if site == "" {
 		site = "datadoghq.com"
 	}
 	return &DatadogCallback{
-		apiKey:    apiKey,
-		baseURL:   baseURL,
-		site:      site,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		apiKey:     apiKey,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		site:       site,
+		service:    "aerollm",
+		httpClient: newHTTPClient(10 * time.Second),
 	}
 }
 
 // Name implements CallbackHandler.
 func (d *DatadogCallback) Name() string { return "datadog" }
 
-// datadogMetric represents a single Datadog metric payload.
-type datadogMetric struct {
-	Metric string                 `json:"metric"`
-	Points []map[string]interface{} `json:"points"`
-	Type   string                 `json:"type,omitempty"`
-	Tags   []string               `json:"tags,omitempty"`
-	Host   string                 `json:"host,omitempty"`
+type ddPoint struct {
+	Timestamp int64   `json:"timestamp"`
+	Value     float64 `json:"value"`
 }
 
-// datadogEvent represents a Datadog log event.
-type datadogEvent struct {
-	Title     string                 `json:"title"`
-	Text      string                 `json:"text"`
-	AlertType string                 `json:"alert_type"`
-	Tags      []string               `json:"tags"`
-	SourceType string                 `json:"source_type_name"`
-	Timestamp int64                  `json:"timestamp"`
+type ddSeries struct {
+	Metric string    `json:"metric"`
+	Type   int       `json:"type"`
+	Points []ddPoint `json:"points"`
+	Tags   []string  `json:"tags,omitempty"`
 }
 
-// OnSuccess sends a metric for successful LLM calls and logs the result.
-func (d *DatadogCallback) OnSuccess(ctx context.Context, req *CallbackRequestData, resp *CallbackResponseData) error {
-	tags := []string{
-		fmt.Sprintf("model:%s", req.Model),
-		fmt.Sprintf("provider:%s", req.Provider),
-		fmt.Sprintf("request_id:%s", req.RequestID),
-	}
+type ddLog struct {
+	DDSource  string                 `json:"ddsource"`
+	DDTags    string                 `json:"ddtags"`
+	Service   string                 `json:"service"`
+	Status    string                 `json:"status"`
+	Message   string                 `json:"message"`
+	RequestID string                 `json:"request_id,omitempty"`
+	Model     string                 `json:"model,omitempty"`
+	Provider  string                 `json:"provider,omitempty"`
+	LatencyMs int64                  `json:"latency_ms,omitempty"`
+	CostUSD   float64                `json:"cost_usd,omitempty"`
+	Usage     map[string]int         `json:"usage,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
 
-	// Send metric.
-	metric := datadogMetric{
-		Metric: "aerollm.llm.latency_ms",
-		Points: []map[string]interface{}{
-			{"timestamp": time.Now().Unix(), "value": resp.LatencyMs},
-		},
-		Type: "gauge",
-		Tags: tags,
+func (d *DatadogCallback) endpoints() (metrics, logs string, err error) {
+	if d.baseURL != "" {
+		return d.baseURL + "/api/v2/series", d.baseURL + "/api/v2/logs", nil
 	}
-	metricPayload := []datadogMetric{metric}
-	now := time.Now()
+	if !ddSiteRe.MatchString(d.site) {
+		return "", "", fmt.Errorf("datadog: invalid site %q", d.site)
+	}
+	return "https://api." + d.site + "/api/v2/series", "https://http-intake.logs." + d.site + "/api/v2/logs", nil
+}
 
-	// Also send token usage metrics.
-	for tokenType, count := range resp.TokenCount {
-		tokMetric := datadogMetric{
-			Metric: fmt.Sprintf("aerollm.llm.tokens.%s", tokenType),
-			Points: []map[string]interface{}{
-				{"timestamp": now.Unix(), "value": count},
-			},
-			Type: "count",
-			Tags: tags,
+// ddTag sanitises a tag value: lower-case, no commas/whitespace, bounded.
+func ddTag(k, v string) string {
+	if v == "" {
+		v = "unknown"
+	}
+	v = strings.ToLower(v)
+	v = strings.Map(func(r rune) rune {
+		switch {
+		case r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			return '_'
 		}
-		metricPayload = append(metricPayload, tokMetric)
+		return r
+	}, v)
+	if len(v) > 150 {
+		v = v[:150]
 	}
+	return k + ":" + v
+}
 
-	// Cost metric.
-	if req.CostUSD > 0 {
-		costMetric := datadogMetric{
-			Metric: "aerollm.llm.cost_usd",
-			Points: []map[string]interface{}{
-				{"timestamp": now.Unix(), "value": req.CostUSD},
-			},
-			Type: "gauge",
-			Tags: tags,
-		}
-		metricPayload = append(metricPayload, costMetric)
-	}
-
-	body, err := json.Marshal(metricPayload)
+func (d *DatadogCallback) post(ctx context.Context, endpoint string, payload interface{}) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal datadog metrics: %w", err)
+		return fmt.Errorf("datadog: marshal: %w", err)
 	}
-
-	metricURL := fmt.Sprintf("https://api.%s/api/v2/series", d.site)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", metricURL, bytes.NewReader(body))
-	if err != nil {
+	if err := validateEndpoint(endpoint); err != nil {
 		return err
 	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("API-Key %s", d.apiKey))
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	metricResp, err := d.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("datadog metric send failed: %w", err)
-	}
-	metricResp.Body.Close()
-
-	// Send log event.
-	event := datadogEvent{
-		Title:      fmt.Sprintf("LLM Call Success: %s", req.Model),
-		Text:       fmt.Sprintf("Provider: %s, Latency: %dms, Tokens: %v", req.Provider, resp.LatencyMs, resp.TokenCount),
-		AlertType:  "info",
-		Tags:        tags,
-		SourceType: "aerollm",
-		Timestamp:  now.Unix(),
-	}
-	eventBody, err := json.Marshal(struct {
-		Events []datadogEvent `json:"events"`
-	}{Events: []datadogEvent{event}})
-	if err != nil {
-		return fmt.Errorf("failed to marshal datadog event: %w", err)
-	}
-	logURL := fmt.Sprintf("https://http-intake.logs.%s/v1/input", d.site)
-	logReq, err := http.NewRequestWithContext(ctx, "POST", logURL, bytes.NewReader(eventBody))
-	if err != nil {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("DD-API-KEY", d.apiKey)
+	h.Set("User-Agent", "AeroLLM-Callbacks/1.0")
+	if _, _, err := doRequest(ctx, d.httpClient, http.MethodPost, endpoint, body, h); err != nil {
 		return err
 	}
-	logReq.Header.Set("DD-API-KEY", d.apiKey)
-	logReq.Header.Set("Content-Type", "application/json")
-
-	logResp, err := d.httpClient.Do(logReq)
-	if err != nil {
-		return fmt.Errorf("datadog log send failed: %w", err)
-	}
-	logResp.Body.Close()
-
 	return nil
 }
 
-// OnError sends an error metric and event to Datadog.
-func (d *DatadogCallback) OnError(ctx context.Context, req *CallbackRequestData, err error) error {
-	tags := []string{
-		fmt.Sprintf("model:%s", req.Model),
-		fmt.Sprintf("provider:%s", req.Provider),
-		fmt.Sprintf("request_id:%s", req.RequestID),
-		"error_type:llm_error",
+// OnSuccess sends latency/token/cost metrics and a structured log.
+func (d *DatadogCallback) OnSuccess(ctx context.Context, req *CallbackRequestData, resp *CallbackResponseData) error {
+	if d.apiKey == "" {
+		return fmt.Errorf("datadog: missing api key")
 	}
-
-	// Send error metric.
-	metric := datadogMetric{
-		Metric: "aerollm.llm.errors",
-		Points: []map[string]interface{}{
-			{"timestamp": time.Now().Unix(), "value": 1},
-		},
-		Type: "count",
-		Tags: tags,
+	if req == nil {
+		req = &CallbackRequestData{}
 	}
-	body, _ := json.Marshal([]datadogMetric{metric})
-
-	metricURL := fmt.Sprintf("https://api.%s/api/v2/series", d.site)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", metricURL, bytes.NewReader(body))
+	if resp == nil {
+		resp = &CallbackResponseData{}
+	}
+	metricsURL, logsURL, err := d.endpoints()
 	if err != nil {
 		return err
 	}
-	httpReq.Header.Set("Authorization", fmt.Sprintf("API-Key %s", d.apiKey))
-	httpReq.Header.Set("Content-Type", "application/json")
+	// request_id is deliberately not a metric tag (unbounded cardinality).
+	tags := []string{ddTag("model", req.Model), ddTag("provider", req.Provider), ddTag("service", d.service)}
+	now := time.Now().Unix()
 
-	resp, err := d.httpClient.Do(httpReq)
+	series := []ddSeries{
+		{Metric: "aerollm.llm.latency_ms", Type: ddTypeGauge, Points: []ddPoint{{now, float64(resp.LatencyMs)}}, Tags: tags},
+		{Metric: "aerollm.llm.requests", Type: ddTypeCount, Points: []ddPoint{{now, 1}}, Tags: tags},
+	}
+	tokenTypes := make([]string, 0, len(resp.TokenCount))
+	for k := range resp.TokenCount {
+		tokenTypes = append(tokenTypes, k)
+	}
+	sort.Strings(tokenTypes)
+	for _, k := range tokenTypes {
+		series = append(series, ddSeries{Metric: "aerollm.llm.tokens", Type: ddTypeCount, Points: []ddPoint{{now, float64(resp.TokenCount[k])}}, Tags: append(append([]string{}, tags...), ddTag("token_type", k))})
+	}
+	if req.CostUSD > 0 {
+		series = append(series, ddSeries{Metric: "aerollm.llm.cost_usd", Type: ddTypeCount, Points: []ddPoint{{now, req.CostUSD}}, Tags: tags})
+	}
+	if err := d.post(ctx, metricsURL, map[string]interface{}{"series": series}); err != nil {
+		return fmt.Errorf("datadog metric send failed: %w", err)
+	}
+
+	logEntry := ddLog{
+		DDSource: "aerollm", DDTags: strings.Join(tags, ","), Service: d.service, Status: "info",
+		Message:   fmt.Sprintf("LLM call succeeded: model=%s provider=%s latency_ms=%d", req.Model, req.Provider, resp.LatencyMs),
+		RequestID: req.RequestID, Model: req.Model, Provider: req.Provider, LatencyMs: resp.LatencyMs,
+		CostUSD: req.CostUSD, Usage: resp.TokenCount, Metadata: req.Metadata,
+	}
+	if err := d.post(ctx, logsURL, []ddLog{logEntry}); err != nil {
+		return fmt.Errorf("datadog log send failed: %w", err)
+	}
+	return nil
+}
+
+// OnError sends an error-count metric and an error log.
+func (d *DatadogCallback) OnError(ctx context.Context, req *CallbackRequestData, callErr error) error {
+	if d.apiKey == "" {
+		return fmt.Errorf("datadog: missing api key")
+	}
+	if req == nil {
+		req = &CallbackRequestData{}
+	}
+	msg := "unknown error"
+	if callErr != nil {
+		msg = callErr.Error()
+	}
+	metricsURL, logsURL, err := d.endpoints()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	// Send error event.
-	event := datadogEvent{
-		Title:      fmt.Sprintf("LLM Call Error: %s", req.Model),
-		Text:       fmt.Sprintf("Provider: %s, Error: %s", req.Provider, err.Error()),
-		AlertType:  "error",
-		Tags:        tags,
-		SourceType: "aerollm",
-		Timestamp:  time.Now().Unix(),
+	tags := []string{ddTag("model", req.Model), ddTag("provider", req.Provider), ddTag("service", d.service), "error_type:llm_error"}
+	now := time.Now().Unix()
+	series := []ddSeries{{Metric: "aerollm.llm.errors", Type: ddTypeCount, Points: []ddPoint{{now, 1}}, Tags: tags}}
+	if err := d.post(ctx, metricsURL, map[string]interface{}{"series": series}); err != nil {
+		return fmt.Errorf("datadog metric send failed: %w", err)
 	}
-	eventBody, _ := json.Marshal(struct {
-		Events []datadogEvent `json:"events"`
-	}{Events: []datadogEvent{event}})
-
-	logURL := fmt.Sprintf("https://http-intake.logs.%s/v1/input", d.site)
-	logReq, err := http.NewRequestWithContext(ctx, "POST", logURL, bytes.NewReader(eventBody))
-	if err != nil {
-		return err
+	logEntry := ddLog{
+		DDSource: "aerollm", DDTags: strings.Join(tags, ","), Service: d.service, Status: "error",
+		Message:   fmt.Sprintf("LLM call failed: model=%s provider=%s", req.Model, req.Provider),
+		RequestID: req.RequestID, Model: req.Model, Provider: req.Provider, Error: msg, Metadata: req.Metadata,
 	}
-	logReq.Header.Set("DD-API-KEY", d.apiKey)
-	logReq.Header.Set("Content-Type", "application/json")
-
-	logResp, err := d.httpClient.Do(logReq)
-	if err != nil {
-		return err
+	if err := d.post(ctx, logsURL, []ddLog{logEntry}); err != nil {
+		return fmt.Errorf("datadog log send failed: %w", err)
 	}
-	defer logResp.Body.Close()
-
 	return nil
 }

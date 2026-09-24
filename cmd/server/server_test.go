@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
 	"github.com/ayoubzulfiqar/aerollm/internal/trace"
-	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 )
 
 func TestPQCKeysRoute(t *testing.T) {
@@ -103,7 +103,9 @@ func TestFederatedAggregateRoute(t *testing.T) {
 
 func TestFederatedVerifyEdgeCases(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
-	if err != nil { t.Fatalf("keygen failed: %v", err) }
+	if err != nil {
+		t.Fatalf("keygen failed: %v", err)
+	}
 	agg := federated.NewFedAvgAggregatorWithVerify(priv)
 	m := &federated.LoRAMatrix{Rows: 1, Cols: 1, Data: []float64{1}, Owner: "e1"}
 	payload := []byte(fmt.Sprintf("%s:%d:%s", m.Owner, m.Rows, m.Checksum()))

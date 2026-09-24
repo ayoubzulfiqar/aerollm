@@ -1,9 +1,7 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/admission"
@@ -21,32 +19,33 @@ func newAdmissionCmd() *cobra.Command {
 }
 
 func newAdmissionValidateCmd() *cobra.Command {
+	var resource, path, method, body string
 	cmd := &cobra.Command{
-		Use:   "validate",
-		Short: "Run a local admission validation test against /v1/admission/validate",
-		Run: func(_ *cobra.Command, _ []string) {
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v1/admission/validate", admission.WebhookHandler(admission.ValidatorFunc(func(req admission.AdmissionRequest) admission.AdmissionResponse {
-				return admission.AdmissionResponse{Allowed: true, Reason: "admission allow"}
-			})))
-
-			server := httptest.NewServer(mux)
-			defer server.Close()
-
-			client := server.Client()
-			body := strings.NewReader(`{"resource":"models","path":"/v1/models","method":"POST"}`)
-			req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/admission/validate", body)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
+		Use:     "validate",
+		Short:   "Ask the gateway to validate a request (POST /v1/admission/validate)",
+		Example: "  aerollm admission validate --resource models --path /v1/models --method POST",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			m, err := requireOneOf("method", method, "get", "head", "post", "put", "patch", "delete")
 			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+				return err
 			}
-			defer resp.Body.Close()
-			buf := make([]byte, 4096)
-			n, _ := resp.Body.Read(buf)
-			fmt.Println(strings.TrimSpace(string(buf[:n])))
+			reqBody, err := readValueArg(cmd, body)
+			if err != nil {
+				return err
+			}
+			req := admission.AdmissionRequest{
+				Resource: resource,
+				Path:     path,
+				Method:   strings.ToUpper(m),
+				Body:     reqBody,
+			}
+			return serverRequest(cmd, http.MethodPost, "/v1/admission/validate", nil, req, formatJSON, nil, nil)
 		},
 	}
+	cmd.Flags().StringVar(&resource, "resource", "models", "resource being accessed")
+	cmd.Flags().StringVar(&path, "path", "/v1/models", "request path to validate")
+	cmd.Flags().StringVar(&method, "method", "POST", "HTTP method to validate")
+	cmd.Flags().StringVar(&body, "body", "", "request body to validate (literal, @file, or - for stdin)")
 	return cmd
 }

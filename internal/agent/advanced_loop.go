@@ -28,130 +28,53 @@ type ToolDeficitSignal struct {
 // NoopLoopHook is a zero-value hook implementation.
 type NoopLoopHook struct{}
 
-func (n *NoopLoopHook) BeforeLLM(_ context.Context, _ *models.LLMRequest) {}
-func (n *NoopLoopHook) AfterLLM(_ context.Context, _ *models.LLMResponse) {}
-func (n *NoopLoopHook) BeforeTools(_ context.Context, _ []models.ToolCall) {}
-func (n *NoopLoopHook) AfterTools(_ context.Context, _ []*ToolResult)     {}
+func (n *NoopLoopHook) BeforeLLM(_ context.Context, _ *models.LLMRequest)    {}
+func (n *NoopLoopHook) AfterLLM(_ context.Context, _ *models.LLMResponse)    {}
+func (n *NoopLoopHook) BeforeTools(_ context.Context, _ []models.ToolCall)   {}
+func (n *NoopLoopHook) AfterTools(_ context.Context, _ []*ToolResult)        {}
 func (n *NoopLoopHook) OnToolDeficit(_ context.Context, _ ToolDeficitSignal) {}
 
 // AdvancedLoopOptions configures the advanced agent loop.
 type AdvancedLoopOptions struct {
-	Hooks            []LoopHook
-	RetryToolErrors  bool
-	MaxToolRetries   int
-	ToolRetryDelay   time.Duration
+	Hooks []LoopHook
+	// RetryToolErrors re-executes failed tool calls whose error may be
+	// transient (not unknown tools, invalid arguments or approval refusals).
+	RetryToolErrors bool
+	// MaxToolRetries is the number of retry rounds (default 1).
+	MaxToolRetries int
+	// ToolRetryDelay is the pause before each retry round (default 200ms).
+	ToolRetryDelay time.Duration
 }
 
-// RunAdvancedExecutionLoop runs the agentic loop with hooks, retry, and deficit handling.
+func (o AdvancedLoopOptions) withDefaults() AdvancedLoopOptions {
+	if o.MaxToolRetries <= 0 {
+		o.MaxToolRetries = 1
+	}
+	if o.ToolRetryDelay <= 0 {
+		o.ToolRetryDelay = 200 * time.Millisecond
+	}
+	return o
+}
+
+// RunAdvancedExecutionLoop runs the agentic loop (same semantics as
+// RunToolExecutionLoop) with hooks, optional tool retries and deficit
+// signalling: OnToolDeficit fires when the model calls a tool that is not
+// available.
 func (e *AgentEngine) RunAdvancedExecutionLoop(ctx context.Context, req *models.LLMRequest, opts AdvancedLoopOptions) (*models.LLMResponse, error) {
-	if opts.MaxToolRetries <= 0 {
-		opts.MaxToolRetries = 1
-	}
-	if opts.ToolRetryDelay <= 0 {
-		opts.ToolRetryDelay = 200 * time.Millisecond
-	}
-
-	iteration := 0
-	for {
-		if iteration >= e.MaxIterations {
-			return nil, &MaxIterationsError{Iteration: iteration}
-		}
-		iteration++
-
-		for _, hook := range opts.Hooks {
-			hook.BeforeLLM(ctx, req)
-		}
-
-		resp, err := e.Provider.CallLLM(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, hook := range opts.Hooks {
-			hook.AfterLLM(ctx, resp)
-		}
-
-		toolCalls := extractToolCalls(resp)
-		if len(toolCalls) == 0 {
-			return resp, nil
-		}
-
-		for _, hook := range opts.Hooks {
-			hook.BeforeTools(ctx, toolCalls)
-		}
-
-		results, err := e.ExecuteToolsWithRetry(ctx, toolCalls, opts)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, hook := range opts.Hooks {
-			hook.AfterTools(ctx, results)
-		}
-
-		for _, r := range results {
-			if r != nil && r.Error != nil {
-				missing := unknownToolPattern.FindStringSubmatch(r.Error.Error())
-				if len(missing) == 2 {
-					signal := ToolDeficitSignal{RequestID: req.Model, MissingTool: missing[1], Reason: r.Error.Error()}
-					for _, hook := range opts.Hooks {
-						hook.OnToolDeficit(ctx, signal)
-					}
-				}
-			}
-		}
-
-		toolMessages := buildToolMessages(toolCalls, results)
-		req.Messages = append(req.Messages, toolMessages...)
-	}
+	resp, _, err := e.runLoop(ctx, req, loopOptions{hooks: opts.Hooks, retry: opts.withDefaults()})
+	return resp, err
 }
 
-// ExecuteToolsWithRetry executes tool calls with optional retry on transient errors.
+// ExecuteToolsWithRetry executes tool calls and, when opts.RetryToolErrors is
+// set, retries the calls that failed with a potentially transient error up to
+// opts.MaxToolRetries times, waiting opts.ToolRetryDelay between rounds.
+// Per-call failures remain in the results; the returned error is non-nil only
+// when ctx is cancelled.
 func (e *AgentEngine) ExecuteToolsWithRetry(ctx context.Context, toolCalls []models.ToolCall, opts AdvancedLoopOptions) ([]*ToolResult, error) {
-	results, err := e.ExecuteTools(ctx, toolCalls)
-	if err == nil || !opts.RetryToolErrors {
-		return results, err
+	if opts.RetryToolErrors {
+		opts = opts.withDefaults()
 	}
-
-	var lastErr error
-	for attempt := 0; attempt < opts.MaxToolRetries; attempt++ {
-		select {
-		case <-ctx.Done():
-			return results, ctx.Err()
-		case <-time.After(opts.ToolRetryDelay):
-		}
-
-		failed := make([]models.ToolCall, 0, len(results))
-		for i, r := range results {
-			if r != nil && r.Error != nil {
-				failed = append(failed, toolCalls[i])
-			}
-		}
-		if len(failed) == 0 {
-			return results, nil
-		}
-
-		retryResults, retryErr := e.ExecuteTools(ctx, failed)
-		if retryErr != nil {
-			lastErr = retryErr
-			continue
-		}
-		j := 0
-		for i, r := range results {
-			if r != nil && r.Error != nil {
-				if j < len(retryResults) {
-					results[i] = retryResults[j]
-					j++
-				}
-			}
-		}
-		return results, nil
-	}
-
-	if lastErr != nil {
-		return results, lastErr
-	}
-	return results, err
+	return e.executeCalls(ctx, toolCalls, nil, opts)
 }
 
 // ToolDeficitHandler converts synthesis-style deficit signals into agent loop events.
@@ -160,17 +83,28 @@ type ToolDeficitHandler struct {
 	deficits map[string]ToolDeficitSignal
 }
 
-var unknownToolPattern = regexp.MustCompile(`(?i)unknown tool:\s*([A-Za-z0-9_]+)`)
+// maxRecordedDeficits bounds the memory used by ToolDeficitHandler.
+const maxRecordedDeficits = 10000
+
+// unknownToolPattern extracts the tool name from an "unknown tool: X" message.
+var unknownToolPattern = regexp.MustCompile(`(?i)unknown tool:\s*([A-Za-z0-9_-]+)`)
 
 // NewToolDeficitHandler creates a new handler.
 func NewToolDeficitHandler() *ToolDeficitHandler {
 	return &ToolDeficitHandler{deficits: make(map[string]ToolDeficitSignal)}
 }
 
-// Record stores a deficit signal by request ID.
+// Record stores a deficit signal by request ID. When the handler is full an
+// arbitrary older entry is evicted so memory stays bounded.
 func (h *ToolDeficitHandler) Record(reqID string, signal ToolDeficitSignal) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if _, exists := h.deficits[reqID]; !exists && len(h.deficits) >= maxRecordedDeficits {
+		for k := range h.deficits {
+			delete(h.deficits, k)
+			break
+		}
+	}
 	h.deficits[reqID] = signal
 }
 
@@ -180,4 +114,17 @@ func (h *ToolDeficitHandler) Get(reqID string) (ToolDeficitSignal, bool) {
 	defer h.mu.RUnlock()
 	s, ok := h.deficits[reqID]
 	return s, ok
+}
+
+// MissingToolFromError extracts the tool name from an "unknown tool: X" error
+// message, reporting whether one was found.
+func MissingToolFromError(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	m := unknownToolPattern.FindStringSubmatch(err.Error())
+	if len(m) != 2 {
+		return "", false
+	}
+	return m[1], true
 }

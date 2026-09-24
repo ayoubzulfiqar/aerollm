@@ -1,11 +1,10 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/meter"
 	"github.com/spf13/cobra"
@@ -22,45 +21,41 @@ func newMeterCmd() *cobra.Command {
 }
 
 func newMeterUsageCmd() *cobra.Command {
+	var (
+		keyID, provider, model string
+		tokensIn, tokensOut    int64
+		latencyMs              float64
+	)
 	cmd := &cobra.Command{
-		Use:   "usage",
-		Short: "Record a usage event",
-		Run: func(_ *cobra.Command, _ []string) {
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v1/meter/usage", func(w http.ResponseWriter, r *http.Request) {
-				if r == nil || r.Body == nil {
-					http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
-					return
-				}
-				defer r.Body.Close()
-				var req meter.UsageRecord
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
-					return
-				}
-				recorder := meter.NewRecorder()
-				recorder.Record(req)
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(recorder.Records())
-			})
-
-			server := httptest.NewServer(mux)
-			defer server.Close()
-
-			client := server.Client()
-			body := strings.NewReader(`{"api_key":"k1","provider":"p1","model":"m1","tokens_in":10,"tokens_out":20,"latency_ms":100}`)
-			req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/meter/usage", body)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+		Use:     "usage",
+		Short:   "Record a usage event (POST /v1/meter/usage)",
+		Example: "  aerollm meter usage --key-id team-a --provider openai --model gpt-4o --tokens-in 120 --tokens-out 480 --latency-ms 950",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if provider == "" || model == "" {
+				return errors.New("--provider and --model are required")
 			}
-			defer resp.Body.Close()
-			buf := make([]byte, 4096)
-			n, _ := resp.Body.Read(buf)
-			fmt.Println(strings.TrimSpace(string(buf[:n])))
+			if tokensIn < 0 || tokensOut < 0 || latencyMs < 0 {
+				return fmt.Errorf("token counts and latency must not be negative")
+			}
+			rec := meter.UsageRecord{
+				Timestamp: time.Now().UTC(),
+				APIKey:    keyID,
+				Provider:  provider,
+				Model:     model,
+				TokensIn:  tokensIn,
+				TokensOut: tokensOut,
+				LatencyMs: latencyMs,
+			}
+			return serverRequest(cmd, http.MethodPost, "/v1/meter/usage", nil, rec, formatJSON, nil, nil)
 		},
 	}
+	f := cmd.Flags()
+	f.StringVar(&keyID, "key-id", "", "identifier of the API key / tenant the usage is attributed to (not a secret key)")
+	f.StringVar(&provider, "provider", "", "provider name")
+	f.StringVar(&model, "model", "", "model name")
+	f.Int64Var(&tokensIn, "tokens-in", 0, "prompt tokens")
+	f.Int64Var(&tokensOut, "tokens-out", 0, "completion tokens")
+	f.Float64Var(&latencyMs, "latency-ms", 0, "request latency in milliseconds")
 	return cmd
 }

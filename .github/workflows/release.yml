@@ -39,22 +39,28 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
 
       - name: Install zip
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y zip
 
+      - name: Vet
+        run: go vet ./...
+
       - name: Run Tests
-        run: |
-          go test ./... -v
-          go vet ./...
+        if: matrix.os != 'ubuntu-latest'
+        run: go test ./...
+
+      - name: Run Tests (race detector)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./...
 
       - name: Build Backend Binary
         run: |
           mkdir -p bin
-          go build -o bin/aerollm-${{ matrix.target }}${{ matrix.ext }} ./cmd/server
+          go build -trimpath -ldflags="-s -w -X github.com/ayoubzulfiqar/aerollm/internal/config.buildVersion=${{ github.ref_name }}" -o bin/aerollm-${{ matrix.target }}${{ matrix.ext }} ./cmd/server
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -64,12 +70,13 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: chmod +x bin/aerollm-${{ matrix.target }}
 
-      - name: Package bin folder
+      - name: Package binary
+        shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell -Command "Compress-Archive -Path 'bin/*' -DestinationPath 'bin/aerollm-binaries.zip' -Force"
+            powershell -Command "Compress-Archive -Path 'bin/aerollm-${{ matrix.target }}${{ matrix.ext }}' -DestinationPath 'bin/aerollm-${{ matrix.target }}.zip' -Force"
           else
-            zip -r bin/aerollm-binaries.zip bin
+            (cd bin && zip aerollm-${{ matrix.target }}.zip aerollm-${{ matrix.target }})
           fi
 
       - name: Upload to GitHub Release
@@ -77,6 +84,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            bin/aerollm-binaries.zip
+            bin/aerollm-${{ matrix.target }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

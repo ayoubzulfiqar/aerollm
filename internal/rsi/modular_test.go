@@ -126,8 +126,8 @@ func TestCreatePartitions_DiversityGuarantee(t *testing.T) {
 		req := makeRequest("gpt-4o", content)
 		resp := makeResponse("openai", "ok", nil, nil)
 		scenarios[i] = &DreamReplay{
-			Request:  req,
-			Response: resp,
+			Request:   req,
+			Response:  resp,
 			Timestamp: time.Now(),
 		}
 	}

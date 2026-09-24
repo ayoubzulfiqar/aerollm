@@ -1,10 +1,15 @@
 package swarm
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +28,7 @@ type KnowledgeFragment struct {
 
 // KnowledgeStore persists swarm knowledge fragments.
 type KnowledgeStore struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	fragments []KnowledgeFragment
 }
 
@@ -62,43 +67,88 @@ func NewFederatedLearning(store state.StateStore) *FederatedLearning {
 	}
 }
 
-// ShareKnowledge writes a fragment to shared state and local store.
+// ShareKnowledge writes a fragment to the local store and, when a state store
+// is configured and the fragment carries an embedding, to shared short-term
+// memory. Errors from the state store are returned (the fragment is still kept
+// locally). Fragments with non-finite embeddings are rejected.
 func (f *FederatedLearning) ShareKnowledge(ctx context.Context, fragment KnowledgeFragment) error {
 	if f == nil {
-		return nil
+		return errors.New("federated learning not configured")
+	}
+	for _, x := range fragment.Embedding {
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return errors.New("knowledge fragment embedding contains NaN or Inf")
+		}
 	}
 	if fragment.ID == "" {
-		fragment.ID = time.Now().UTC().Format("20060102T150405.000Z")
+		fragment.ID = newID("frag")
 	}
 	fragment.CreatedAt = time.Now().UTC()
+	if fragment.Embedding != nil {
+		fragment.Embedding = append([]float64(nil), fragment.Embedding...)
+	}
 	f.knowledge.Add(fragment)
-	if f.stateStore != nil {
-		_ = f.stateStore.StoreShortTermMemory(ctx, "swarm-knowledge", []state.Vector{
+	if f.stateStore != nil && len(fragment.Embedding) > 0 {
+		if err := f.stateStore.StoreShortTermMemory(ctx, "swarm-knowledge", []state.Vector{
 			{ID: fragment.ID, Data: fragment.Embedding, Meta: map[string]string{"topic": fragment.Topic, "source": fragment.Source}},
-		})
+		}); err != nil {
+			return fmt.Errorf("share knowledge %s: %w", fragment.ID, err)
+		}
 	}
 	return nil
 }
 
-// ExportCheckpoint writes current knowledge to a JSONL checkpoint file.
-func (f *FederatedLearning) ExportCheckpoint(ctx context.Context, path string) error {
-	_ = ctx
-	if f == nil || path == "" {
-		return nil
+// ExportCheckpoint writes current knowledge to a JSONL checkpoint file. The
+// file is written atomically (temp file + rename) with 0600 permissions. The
+// path must be chosen by the operator, never taken from untrusted input.
+func (f *FederatedLearning) ExportCheckpoint(ctx context.Context, path string) (err error) {
+	if f == nil {
+		return errors.New("federated learning not configured")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("checkpoint path is required")
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fragments := f.knowledge.All()
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	path = filepath.Clean(path)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	for _, frag := range fragments {
-		b, _ := json.Marshal(frag)
-		file.Write(b)
-		file.Write([]byte("\n"))
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err = tmp.Chmod(0o600); err != nil {
+		return err
 	}
-	return nil
+	w := bufio.NewWriter(tmp)
+	for _, frag := range f.knowledge.All() {
+		b, mErr := json.Marshal(frag)
+		if mErr != nil {
+			err = fmt.Errorf("encode fragment %s: %w", frag.ID, mErr)
+			return err
+		}
+		if _, err = w.Write(append(b, '\n')); err != nil {
+			return err
+		}
+	}
+	if err = w.Flush(); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

@@ -6,15 +6,27 @@ import (
 	"net/http"
 )
 
-// ServeHTTP satisfies http.Handler for /readyz.
+// ServeHTTP satisfies http.Handler for /readyz: 200 when ready, 503 when not.
+// Only GET and HEAD are allowed.
 func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req == nil {
 		return
 	}
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"error":"method not allowed"}`))
+		return
+	}
 	checks := r.Checks(req.Context())
-	out, _ := ReadinessResponse(checks)
+	out, code := ReadinessResponse(checks)
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	if req.Method == http.MethodHead {
+		return
+	}
 	_, _ = w.Write(out)
 }
 

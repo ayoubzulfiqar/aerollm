@@ -2,8 +2,12 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/spf13/cobra"
@@ -12,7 +16,7 @@ import (
 func newFederatedCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "federated",
-		Short: "Federated learning utilities",
+		Short: "Federated learning utilities (aggregate and verify LoRA updates)",
 		Long:  "Aggregate LoRA updates, inspect matrices, and verify signatures.",
 	}
 
@@ -26,27 +30,17 @@ func newFederatedAggregateCmd() *cobra.Command {
 	var input string
 	cmd := &cobra.Command{
 		Use:   "aggregate",
-		Short: "Aggregate federated LoRA updates",
-		Run: func(_ *cobra.Command, _ []string) {
-			if input == "" {
-				fmt.Println("error: --input is required")
-				return
-			}
-			var updates []*federated.LoRAMatrix
-			if err := json.Unmarshal([]byte(input), &updates); err != nil {
-				fmt.Println("error: " + err.Error())
-				return
-			}
-			agg := federated.NewFedAvgAggregator()
-			out, err := agg.Aggregate(nil, updates)
+		Short: "Aggregate federated LoRA updates locally (FedAvg)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			updates, err := parseLoRAUpdates(cmd, input)
 			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+				return err
 			}
-			fmt.Printf("aggregated rows=%d cols=%d checksum=%s\n", out.Rows, out.Cols, out.Checksum())
+			return aggregateAndPrint(cmd, updates)
 		},
 	}
-	cmd.Flags().StringVarP(&input, "input", "i", "", "JSON array of LoRAMatrix updates")
+	cmd.Flags().StringVarP(&input, "input", "i", "", "JSON array of LoRAMatrix updates (literal, @file, or - for stdin)")
 	return cmd
 }
 
@@ -54,45 +48,86 @@ func newFederatedListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List supported federation features",
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Println("fedavg")
-			fmt.Println("secure-verify")
-			fmt.Println("lora")
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			w := cmd.OutOrStdout()
+			for _, f := range []string{"fedavg", "secure-verify", "lora"} {
+				if _, err := fmt.Fprintln(w, f); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 	return cmd
 }
 
 func newFederatedVerifyCmd() *cobra.Command {
-	var matrixJSON string
-	var signature string
+	var matrixJSON, signature, publicKey string
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Verify a federated update signature",
-		Run: func(_ *cobra.Command, _ []string) {
-			if matrixJSON == "" || signature == "" {
-				fmt.Println("error: --matrix and --signature are required")
-				return
+		Short: "Verify an update's ed25519 signature against its owner's public key",
+		Long: `Verify that --signature is a valid ed25519 signature by --public-key over
+the canonical payload of the LoRA update (owner:rows:checksum). The signature
+and public key may be hex or base64 encoded. Exits 1 if verification fails.`,
+		Example: `  aerollm federated verify -m @update.json -s <base64-sig> -k <hex-pubkey>`,
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if matrixJSON == "" || signature == "" || publicKey == "" {
+				return errors.New("--matrix, --signature and --public-key are required")
+			}
+			raw, err := readValueArg(cmd, matrixJSON)
+			if err != nil {
+				return err
 			}
 			var m federated.LoRAMatrix
-			if err := json.Unmarshal([]byte(matrixJSON), &m); err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+			if err := json.Unmarshal([]byte(raw), &m); err != nil {
+				return fmt.Errorf("--matrix: %w", err)
 			}
-			_, priv, err := ed25519.GenerateKey(nil)
+			if m.Owner == "" {
+				return errors.New("--matrix: update has no Owner")
+			}
+			pub, err := decodeKeyBytes(publicKey)
 			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+				return fmt.Errorf("--public-key: %w", err)
 			}
-			agg := federated.NewFedAvgAggregatorWithVerify(priv)
-			if err := agg.Verify(nil, &m, []byte(signature)); err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+			if len(pub) != ed25519.PublicKeySize {
+				return fmt.Errorf("--public-key: expected %d bytes, got %d", ed25519.PublicKeySize, len(pub))
 			}
-			fmt.Println("ok")
+			sig, err := decodeKeyBytes(signature)
+			if err != nil {
+				return fmt.Errorf("--signature: %w", err)
+			}
+			agg, err := federated.NewFedAvgAggregatorWithPublicKeys(map[string]ed25519.PublicKey{m.Owner: pub})
+			if err != nil {
+				return err
+			}
+			if err := agg.Verify(cmd.Context(), &m, sig); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), "ok")
+			return err
 		},
 	}
-	cmd.Flags().StringVarP(&matrixJSON, "matrix", "m", "", "JSON LoRAMatrix")
-	cmd.Flags().StringVarP(&signature, "signature", "s", "", "signature bytes")
+	cmd.Flags().StringVarP(&matrixJSON, "matrix", "m", "", "JSON LoRAMatrix (literal, @file, or - for stdin)")
+	cmd.Flags().StringVarP(&signature, "signature", "s", "", "signature (hex or base64)")
+	cmd.Flags().StringVarP(&publicKey, "public-key", "k", "", "owner's ed25519 public key (hex or base64)")
 	return cmd
+}
+
+// decodeKeyBytes decodes hex, standard base64 or URL-safe base64.
+func decodeKeyBytes(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, errors.New("empty value")
+	}
+	if b, err := hex.DecodeString(s); err == nil {
+		return b, nil
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
+		}
+	}
+	return nil, errors.New("not valid hex or base64")
 }

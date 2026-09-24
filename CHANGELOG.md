@@ -2,7 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-09-01
+## [Unreleased] - 2026-09-24 — Security & correctness audit
+
+### Security
+- All control-plane endpoints (secrets, config, keys, policy, flags, chaos, RSI, cache, spend, incidents, …) now require an admin key; inference endpoints require a client, admin or virtual key. Previously most were unauthenticated and the `NewAuthMiddleware(h).Next` pattern bypassed auth entirely.
+- No more well-known defaults (`sk-demo`, `default-master-key`): a random admin key is generated and printed once if none is configured.
+- Virtual keys: 256-bit random, stored as SHA-256 only, constant-time lookup, budgets, expiry, model allow-lists, per-key rate limits.
+- Secrets encrypted with AES-256-GCM; webhook payloads HMAC-signed with replay protection; SSRF protection for notifications and shadow traffic; git argument-injection and path-traversal fixes; WebSocket/MCP origin checks; request body caps everywhere; per-key cache namespaces (no cross-tenant cache hits).
+- Real Ed25519 manifest signing for the marketplace, real ML-KEM-768 / X-Wing KEM, honest labelling of simulated subsystems (WASM, autoscale, mesh transport).
+
+### Fixed
+- Config defaults and `AEROLLM_*` env overrides never applied (viper key delimiter); `${VAR}` placeholders never expanded; `/config/yaml` wiped live API keys.
+- Rate limiter was a no-op; spend was never recorded; cost was overstated ~1000×; budget webhooks never fired.
+- Graceful shutdown hung (root context never cancelled); streaming cut off by a 15s write timeout; Swagger UI broken; data races across telemetry, router, webhooks, keymanager, ledger, cache and more.
+- Dockerfile could not build (Go 1.22 image vs go 1.26 module); release workflow overwrote per-platform assets.
+
+### Added
+- OpenAI-compatible SSE streaming (native per provider, with fallback), `/v1/models`, provider fallback with circuit breakers, OpenAI error envelope, typed upstream errors with `Retry-After`.
+- Anthropic-compatible `/v1/messages` (content blocks, tools, streaming events).
+- Redis-backed distributed rate limiting with in-memory fallback; Prometheus `/metrics`; request IDs, structured JSON logs, CORS, security headers.
+- Batch API: list, cancel, owner scoping, JSONL results/errors, per-owner billing.
+- Server-side tool loop semantics, HITL approvals that store the paused conversation, MCP JSON-RPC server, realtime WebSocket bridged to real providers, context-window trimming, BM25 + hashed-embedding RAG.
+- RSI deploy gate on held-out data with a paired t-test, dry-run by default, rollback; statistically sound eval judge wired to a real model.
+- CLI: `chat --stream`, `models list`, `keys`, `metrics`, `health`, shared HTTP client; LiteLLM migration rewritten against the real format.
+
+## [0.x] - 2026-09-01
 
 ### Added
 - Full project initialization: Go module, Docker, Docker Compose, config system

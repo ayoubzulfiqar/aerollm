@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/keymanager"
 )
@@ -15,82 +14,60 @@ type virtualKeyContextKey struct{}
 // VirtualKeyFromContext retrieves the validated virtual key from the request context.
 func VirtualKeyFromContext(ctx context.Context) (*keymanager.VirtualKey, bool) {
 	vk, ok := ctx.Value(virtualKeyContextKey{}).(*keymanager.VirtualKey)
-	return vk, ok
+	return vk, ok && vk != nil
 }
 
-// VirtualKeyAuthMiddleware validates virtual keys against the key manager.
-// If the Bearer token starts with "sk-", it is treated as a virtual key.
-// Otherwise, the static API key list from the guardrails scoper is checked.
+// VirtualKeyAuthMiddleware validates static keys and key-manager virtual keys.
+// Static keys are checked first (by digest, see Authenticator), so a static
+// key that starts with "sk-" is not mistaken for an invalid virtual key.
+//
+// Deprecated: use Authenticator.RequireKey.
 type VirtualKeyAuthMiddleware struct {
 	Next       http.HandlerFunc
 	KeyManager *keymanager.Manager
 	StaticKeys map[string]bool
-	mu         sync.RWMutex
+
+	auth *Authenticator
 }
 
 // NewVirtualKeyAuthMiddleware creates a middleware that validates virtual keys.
 func NewVirtualKeyAuthMiddleware(next http.HandlerFunc, km *keymanager.Manager, staticKeys map[string]bool) *VirtualKeyAuthMiddleware {
+	keys := make([]string, 0, len(staticKeys))
+	for k, ok := range staticKeys {
+		if ok {
+			keys = append(keys, k)
+		}
+	}
+	var validator VirtualKeyValidator
+	if km != nil {
+		validator = km
+	}
 	return &VirtualKeyAuthMiddleware{
 		Next:       next,
 		KeyManager: km,
 		StaticKeys: staticKeys,
+		auth:       NewAuthenticator(nil, keys, validator),
 	}
 }
 
 // ServeHTTP validates the incoming API key.
 func (m *VirtualKeyAuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
-		http.Error(w, `{"error":"missing api key"}`, http.StatusUnauthorized)
-		return
-	}
-
-	// Strip "Bearer " prefix.
-	apiKey := auth
-	if len(apiKey) > 7 && apiKey[:7] == "Bearer " {
-		apiKey = apiKey[7:]
-	}
-
-	if keymanager.IsVirtualKey(auth) && m.KeyManager != nil {
-		vk, err := m.KeyManager.Validate(r.Context(), apiKey)
-		if err != nil {
-			http.Error(w, `{"error":"invalid virtual key"}`, http.StatusUnauthorized)
-			return
-		}
-		ctx := context.WithValue(r.Context(), virtualKeyContextKey{}, vk)
-		m.Next(w, r.WithContext(ctx))
-		return
-	}
-
-	// Static key fallback.
-	m.mu.RLock()
-	valid := m.StaticKeys[apiKey]
-	m.mu.RUnlock()
-	if valid {
-		m.Next(w, r)
-		return
-	}
-
-	http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	m.auth.RequireKey()(m.Next).ServeHTTP(w, r)
 }
 
-// AddStaticKey adds or removes a static key (for backward compat).
+// AddStaticKey adds a static key.
 func (m *VirtualKeyAuthMiddleware) AddStaticKey(key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.StaticKeys[key] = true
+	m.auth.AddAPIKey(key)
 }
 
 // RemoveStaticKey removes a static key.
 func (m *VirtualKeyAuthMiddleware) RemoveStaticKey(key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.StaticKeys, key)
+	m.auth.RemoveAPIKey(key)
 }
 
-// IsVirtualKeyAuth reports whether the auth token is a virtual key.
+// IsVirtualKeyAuth reports whether the auth token looks like a virtual key.
 func IsVirtualKeyAuth(auth string) bool {
-	if len(auth) > 7 && auth[:7] == "Bearer " {
+	if len(auth) > 7 && strings.EqualFold(auth[:7], "Bearer ") {
 		auth = auth[7:]
 	}
 	return strings.HasPrefix(auth, "sk-")

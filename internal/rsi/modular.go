@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-
-	"github.com/ayoubzulfiqar/aerollm/internal/models"
 )
 
 // ---------------------------------------------------------------------------
@@ -23,11 +21,11 @@ type EvaluationPartition struct {
 // The detailed per-partition metrics are stored in TrainEval and TestEval as
 // averaged SimulatedMetrics values.
 type DisjointMetrics struct {
-	TrainScore         float64
-	TestScore          float64
-	GeneralizationGap  float64
-	TrainEval          *SimulatedMetrics
-	TestEval           *SimulatedMetrics
+	TrainScore        float64
+	TestScore         float64
+	GeneralizationGap float64
+	TrainEval         *SimulatedMetrics
+	TestEval          *SimulatedMetrics
 }
 
 // ModularEvaluator performs k-fold disjoint evaluation using a DreamSimulator
@@ -48,8 +46,9 @@ func (m *ModularEvaluator) CreatePartitions(scenarios []*DreamReplay, kFolds int
 	if len(scenarios) == 0 {
 		return nil
 	}
-	if kFolds <= 0 {
-		// Default to a single partition with an 80/20 train/test split.
+	if kFolds <= 1 {
+		// k<=0 selects, and k==1 (a "fold" with no training data) degrades
+		// to, a single partition with an 80/20 train/test split.
 		split := len(scenarios) * 4 / 5 // 80% train
 		if split == 0 {
 			split = 1
@@ -112,6 +111,9 @@ func (m *ModularEvaluator) EvaluateDisjoint(ctx context.Context, policy Policy, 
 	var trainAccum, testAccum *SimulatedMetrics
 
 	for _, part := range partitions {
+		if part == nil {
+			continue
+		}
 		// Evaluate on train scenarios.
 		if len(part.TrainScenarios) > 0 {
 			trainM, err := m.sim.ReplayTraffic(ctx, policy, part.TrainScenarios)
@@ -156,16 +158,10 @@ func (m *ModularEvaluator) EvaluateDisjoint(ctx context.Context, policy Policy, 
 // ---------------------------------------------------------------------------
 
 func scenarioContentLength(s *DreamReplay) int {
-	if s == nil || s.Request == nil || len(s.Request.Messages) == 0 {
+	if s == nil {
 		return 0
 	}
-	total := 0
-	for _, m := range s.Request.Messages {
-		if m.Content != nil {
-			total += len(*m.Content)
-		}
-	}
-	return total
+	return requestContentLength(s.Request)
 }
 
 func accumulateSimulated(dst, src *SimulatedMetrics) {
@@ -177,6 +173,7 @@ func accumulateSimulated(dst, src *SimulatedMetrics) {
 	dst.Cost += src.Cost
 	dst.ErrorRate += src.ErrorRate
 	dst.CacheHitRate += src.CacheHitRate
+	dst.Requests += src.Requests
 }
 
 func finalizeSimulated(m *SimulatedMetrics, count int) *SimulatedMetrics {
@@ -189,6 +186,9 @@ func finalizeSimulated(m *SimulatedMetrics, count int) *SimulatedMetrics {
 		Cost:         m.Cost / float64(count),
 		ErrorRate:    m.ErrorRate / float64(count),
 		CacheHitRate: m.CacheHitRate / float64(count),
+		// Cost and Requests are both averaged, so Cost/Requests remains the
+		// per-request cost. Round to nearest to limit integer truncation.
+		Requests: (m.Requests + count/2) / count,
 	}
 }
 
@@ -202,6 +202,3 @@ func averageScores(scores []float64) float64 {
 	}
 	return total / float64(len(scores))
 }
-
-// keep models import for type reference in future extensions
-var _ = models.LLMRequest{}

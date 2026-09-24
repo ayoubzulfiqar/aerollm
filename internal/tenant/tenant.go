@@ -7,20 +7,20 @@ type TenantID string
 
 // Organization represents a top-level tenant.
 type Organization struct {
-	ID          TenantID
-	Name        string
-	Settings    map[string]string
-	CreatedAt   int64
+	ID        TenantID
+	Name      string
+	Settings  map[string]string
+	CreatedAt int64
 }
 
 // Team represents a sub-tenant within an organization.
 type Team struct {
-	ID            TenantID
-	OrgID         TenantID
-	Name          string
-	ParentTeamID  *TenantID
-	Settings      map[string]string
-	CreatedAt     int64
+	ID           TenantID
+	OrgID        TenantID
+	Name         string
+	ParentTeamID *TenantID
+	Settings     map[string]string
+	CreatedAt    int64
 }
 
 // User represents a user within a team.
@@ -46,6 +46,37 @@ type APIKey struct {
 	Active        bool
 	CreatedAt     int64
 	LastUsedAt    int64
+}
+
+// clone returns a copy of k that shares no mutable state with it.
+func (k *APIKey) clone() *APIKey {
+	if k == nil {
+		return nil
+	}
+	out := *k
+	if k.TeamID != nil {
+		t := *k.TeamID
+		out.TeamID = &t
+	}
+	if k.UserID != nil {
+		u := *k.UserID
+		out.UserID = &u
+	}
+	out.Scopes = append([]string(nil), k.Scopes...)
+	return &out
+}
+
+// HasScope reports whether the key grants scope (exact match, or "*").
+func (k *APIKey) HasScope(scope string) bool {
+	if k == nil {
+		return false
+	}
+	for _, s := range k.Scopes {
+		if s == "*" || s == scope {
+			return true
+		}
+	}
+	return false
 }
 
 // TenantResolver resolves tenant hierarchy from an API key or token.

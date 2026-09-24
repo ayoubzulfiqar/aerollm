@@ -108,15 +108,15 @@ func TestOpenAICompatibleAdapterMethods(t *testing.T) {
 func TestNewAdapters(t *testing.T) {
 	adapters := []struct {
 		name string
-		fn   func() *OpenAICompatibleAdapter
+		fn   func() ProviderAdapter
 	}{
-		{"gemini", func() *OpenAICompatibleAdapter { return NewGeminiAdapter("key", "https://generativelanguage.googleapis.com") }},
-		{"bedrock", func() *OpenAICompatibleAdapter { return NewBedrockAdapter("key", "https://bedrock.us-east-1.amazonaws.com") }},
-		{"anthropic", func() *OpenAICompatibleAdapter { return NewAnthropicAdapter("key", "https://api.anthropic.com") }},
-		{"groq", func() *OpenAICompatibleAdapter { return NewGroqAdapter("key", "https://api.groq.com/openai/v1") }},
-		{"cohere", func() *OpenAICompatibleAdapter { return NewCohereAdapter("key", "https://api.cohere.com") }},
-		{"deepseek", func() *OpenAICompatibleAdapter { return NewDeepSeekAdapter("key", "https://api.deepseek.com") }},
-		{"azure", func() *OpenAICompatibleAdapter { return NewAzureOpenAIAdapter("key", "https://azure.openai.com", "myresource") }},
+		{"gemini", func() ProviderAdapter { return NewGeminiAdapter("key", "https://generativelanguage.googleapis.com") }},
+		{"bedrock", func() ProviderAdapter { return NewBedrockAdapter("key", "https://bedrock.us-east-1.amazonaws.com") }},
+		{"anthropic", func() ProviderAdapter { return NewAnthropicAdapter("key", "https://api.anthropic.com") }},
+		{"groq", func() ProviderAdapter { return NewGroqAdapter("key", "https://api.groq.com/openai/v1") }},
+		{"cohere", func() ProviderAdapter { return NewCohereAdapter("key", "https://api.cohere.com") }},
+		{"deepseek", func() ProviderAdapter { return NewDeepSeekAdapter("key", "https://api.deepseek.com") }},
+		{"azure", func() ProviderAdapter { return NewAzureOpenAIAdapter("key", "https://azure.openai.com", "myresource") }},
 	}
 	for _, tc := range adapters {
 		a := tc.fn()

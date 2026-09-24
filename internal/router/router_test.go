@@ -12,14 +12,14 @@ import (
 
 // mockProvider is a mock implementation of providers.Provider.
 type mockProvider struct {
-	name       string
+	name         string
 	providerType providers.ProviderType
-	available  bool
-	latencyMs  float64
+	available    bool
+	latencyMs    float64
 }
 
-func (m *mockProvider) Name() string                          { return m.name }
-func (m *mockProvider) Type() providers.ProviderType         { return m.providerType }
+func (m *mockProvider) Name() string                 { return m.name }
+func (m *mockProvider) Type() providers.ProviderType { return m.providerType }
 func (m *mockProvider) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
 	return &models.LLMResponse{}, nil
 }

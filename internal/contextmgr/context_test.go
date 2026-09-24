@@ -76,7 +76,7 @@ func TestContextManagerMaybeSummarizeTriggers(t *testing.T) {
 	if !res.Summarized {
 		t.Fatal("expected summarization to trigger")
 	}
-	if len(res.Messages) != 3 {
-		t.Fatalf("expected compressed message list, got %d", len(res.Messages))
+	if len(res.Messages) != 2 || res.Messages[0].Role != models.RoleSystem || res.Messages[1].Content != messages[19].Content {
+		t.Fatalf("expected [summary, latest message], got %d: %+v", len(res.Messages), res.Messages)
 	}
 }

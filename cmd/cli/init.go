@@ -3,21 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
 
-func newInitCmd() *cobra.Command {
-	var target string
-	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Generate starter config, docker-compose, and plugin template",
-		Run: func(cmd *cobra.Command, args []string) {
-			if target == "" {
-				target = "."
-			}
-
-			config := `server:
+const initConfigTemplate = `# AeroLLM configuration. API keys are read from the environment:
+# export OPENAI_API_KEY / ANTHROPIC_API_KEY before starting the gateway.
+server:
   port: 8080
   read_timeout: 15s
   write_timeout: 15s
@@ -38,8 +31,8 @@ providers:
     api_key: ${ANTHROPIC_API_KEY}
 
 finops:
-  default_budget_usd: 100
-  currency: USD
+  enabled: true
+  default_max_usd: 100
 
 mesh:
   enabled: false
@@ -53,14 +46,12 @@ economy:
   enabled: true
   currency: USD
 `
-			_ = os.WriteFile(target+"/config.yaml", []byte(config), 0644)
 
-			dockerCompose := `version: "3.8"
-services:
+const initComposeTemplate = `services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
 
@@ -70,18 +61,20 @@ services:
       - "8080:8080"
     environment:
       - AEROLLM_REDIS_ADDR=redis:6379
+      - AEROLLM_API_KEY=${AEROLLM_API_KEY}
       - AEROLLM_LICENSE_KEY=${AEROLLM_LICENSE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - redis
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.yaml:/app/config.yaml:ro
 
 volumes:
   redis_data:
 `
-			_ = os.WriteFile(target+"/docker-compose.yml", []byte(dockerCompose), 0644)
 
-			pluginTemplate := `package main
+const initPluginTemplate = `package main
 
 import (
 	"context"
@@ -118,9 +111,6 @@ func Metadata() plugins.Metadata {
 		Version:  "0.1.0",
 		Enabled:  true,
 		Filename: "plugin.wasm",
-		SizeBytes: 0,
-		CreatedAt: 0,
-		UpdatedAt: 0,
 	}
 }
 
@@ -128,11 +118,51 @@ func main() {
 	fmt.Println("weather plugin loaded")
 }
 `
-			_ = os.WriteFile(target+"/plugin.go", []byte(pluginTemplate), 0644)
 
-			fmt.Println("created config.yaml, docker-compose.yml, and plugin.go")
+func newInitCmd() *cobra.Command {
+	var target string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Generate starter config.yaml, docker-compose.yml and plugin template",
+		Long: `Scaffold a new AeroLLM project in --dir. Existing files are never
+overwritten unless --force is given. config.yaml is created with mode 0600.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if target == "" {
+				target = "."
+			}
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("creating %s: %w", target, err)
+			}
+			files := []struct {
+				name    string
+				content string
+				perm    os.FileMode
+			}{
+				{"config.yaml", initConfigTemplate, 0o600},
+				{"docker-compose.yml", initComposeTemplate, 0o644},
+				{"plugin.go", initPluginTemplate, 0o644},
+			}
+			// Check everything first so a refusal leaves no partial scaffold.
+			if !force {
+				for _, f := range files {
+					p := filepath.Join(target, f.name)
+					if _, err := os.Lstat(p); err == nil {
+						return fmt.Errorf("%s already exists (use --force to overwrite)", p)
+					}
+				}
+			}
+			for _, f := range files {
+				if err := writeFileSafely(filepath.Join(target, f.name), []byte(f.content), f.perm, force); err != nil {
+					return err
+				}
+			}
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), "created config.yaml, docker-compose.yml, and plugin.go")
+			return err
 		},
 	}
 	cmd.Flags().StringVarP(&target, "dir", "d", ".", "target directory")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
 	return cmd
 }

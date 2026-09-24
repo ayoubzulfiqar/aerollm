@@ -2,6 +2,7 @@ package intelligence
 
 import (
 	"context"
+	"math"
 	"sort"
 )
 
@@ -19,15 +20,16 @@ type ModelSelector interface {
 	Select(ctx context.Context, opts []ModelOption, policy Policy) (ModelOption, error)
 }
 
-// Policy configures selection behavior.
+// Policy configures selection behavior. Zero or negative limits are unset.
 type Policy struct {
 	MaxCostPer1KTokens float64
-	MaxLatencyMs      float64
-	MinQuality        float64
-	PreferCheapest    bool
+	MaxLatencyMs       float64
+	MinQuality         float64
+	PreferCheapest     bool
 }
 
-// HeuristicSelector picks the cheapest model that meets quality threshold.
+// HeuristicSelector picks the cheapest (or highest-quality) model that meets
+// the policy.
 type HeuristicSelector struct{}
 
 // NewHeuristicSelector creates a new selector.
@@ -35,32 +37,79 @@ func NewHeuristicSelector() *HeuristicSelector {
 	return &HeuristicSelector{}
 }
 
-// Select implements a simple cost-quality heuristic.
-func (s *HeuristicSelector) Select(ctx context.Context, opts []ModelOption, policy Policy) (ModelOption, error) {
-	_ = ctx
-	if len(opts) == 0 {
-		return ModelOption{}, context.DeadlineExceeded
+// meetsLimits reports whether an option satisfies the given limits. NaN
+// metrics never satisfy a limit that is set.
+func meetsLimits(o ModelOption, maxCost, maxLatency, minQuality float64) bool {
+	if minQuality > 0 && !(o.Quality >= minQuality) {
+		return false
 	}
-	var candidates []ModelOption
+	if maxLatency > 0 && !(o.Latency <= maxLatency) {
+		return false
+	}
+	if maxCost > 0 && !(o.Cost <= maxCost) {
+		return false
+	}
+	return true
+}
+
+// costKey maps NaN cost to +Inf so it sorts last when ascending.
+func costKey(v float64) float64 {
+	if math.IsNaN(v) {
+		return math.Inf(1)
+	}
+	return v
+}
+
+// qualityKey maps NaN quality to -Inf so it sorts last when descending.
+func qualityKey(v float64) float64 {
+	if math.IsNaN(v) {
+		return math.Inf(-1)
+	}
+	return v
+}
+
+// rankOptions sorts options in place: cheapest first (ties: higher quality)
+// when preferCheapest, otherwise highest quality first (ties: cheaper).
+// NaN metrics always rank worst.
+func rankOptions(opts []ModelOption, preferCheapest bool) {
+	sort.SliceStable(opts, func(i, j int) bool {
+		ci, cj := costKey(opts[i].Cost), costKey(opts[j].Cost)
+		qi, qj := qualityKey(opts[i].Quality), qualityKey(opts[j].Quality)
+		if preferCheapest {
+			if ci != cj {
+				return ci < cj
+			}
+			return qi > qj
+		}
+		if qi != qj {
+			return qi > qj
+		}
+		return ci < cj
+	})
+}
+
+// Select implements a simple cost-quality heuristic. It returns
+// ErrNoCandidates for an empty option list. The policy is soft: when no
+// option satisfies it, the best-ranked option overall is returned instead of
+// an error (use SLASelector for hard requirements).
+func (s *HeuristicSelector) Select(ctx context.Context, opts []ModelOption, policy Policy) (ModelOption, error) {
+	if len(opts) == 0 {
+		return ModelOption{}, ErrNoCandidates
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return ModelOption{}, err
+		}
+	}
+	candidates := make([]ModelOption, 0, len(opts))
 	for _, o := range opts {
-		if policy.MinQuality > 0 && o.Quality < policy.MinQuality {
-			continue
+		if meetsLimits(o, policy.MaxCostPer1KTokens, policy.MaxLatencyMs, policy.MinQuality) {
+			candidates = append(candidates, o)
 		}
-		if policy.MaxLatencyMs > 0 && o.Latency > policy.MaxLatencyMs {
-			continue
-		}
-		if policy.MaxCostPer1KTokens > 0 && o.Cost > policy.MaxCostPer1KTokens {
-			continue
-		}
-		candidates = append(candidates, o)
 	}
 	if len(candidates) == 0 {
-		return opts[0], nil
+		candidates = append(candidates, opts...)
 	}
-	if policy.PreferCheapest {
-		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Cost < candidates[j].Cost })
-		return candidates[0], nil
-	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Quality > candidates[j].Quality })
+	rankOptions(candidates, policy.PreferCheapest)
 	return candidates[0], nil
 }

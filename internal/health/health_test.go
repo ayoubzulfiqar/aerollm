@@ -12,7 +12,7 @@ type fakeChecker struct {
 	healthy bool
 }
 
-func (f *fakeChecker) Name() string        { return f.name }
+func (f *fakeChecker) Name() string { return f.name }
 func (f *fakeChecker) Check(ctx context.Context) Check {
 	return Check{Name: f.name, Healthy: f.healthy, Latency: 0, CheckedAt: time.Now()}
 }
@@ -44,8 +44,8 @@ func TestReadinessResponseMarksNotReady(t *testing.T) {
 		{Name: "b", Healthy: false},
 	}
 	out, code := ReadinessResponse(checks)
-	if code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", code)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when not ready, got %d", code)
 	}
 	if string(out) == `{"status":"ready"}` {
 		t.Fatalf("expected not_ready when any check is unhealthy")

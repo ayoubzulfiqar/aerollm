@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,15 +135,27 @@ type HCIConfig struct {
 	// DuplicateRequestThreshold is the fraction of duplicate (cacheable)
 	// requests above which caching headroom is considered significant.
 	DuplicateRequestThreshold float64
+
+	// MaxRecords bounds how many (most recent) ledger records are analysed
+	// per assessment, keeping CPU and memory bounded on large ledgers.
+	// Zero or negative selects the default.
+	MaxRecords int
+
+	// CacheTTL is how long loaded ledger records are reused before being
+	// reloaded automatically (Refresh forces an immediate reload). Zero or
+	// negative selects the default.
+	CacheTTL time.Duration
 }
 
 // DefaultHCIConfig returns a sensible default configuration for the HCI engine.
 func DefaultHCIConfig() HCIConfig {
 	return HCIConfig{
-		MinRecords:               20,
-		TargetLatencyMs:          500.0,
-		CostEfficiencyThreshold:  0.01,
+		MinRecords:                20,
+		TargetLatencyMs:           500.0,
+		CostEfficiencyThreshold:   0.01,
 		DuplicateRequestThreshold: 0.10,
+		MaxRecords:                50000,
+		CacheTTL:                  30 * time.Second,
 	}
 }
 
@@ -156,12 +169,12 @@ func DefaultHCIConfig() HCIConfig {
 // Assess calls within a single session. Call Refresh() to reload from the
 // ledger after new data has been written.
 type HCIEngine struct {
-	mu            sync.RWMutex
-	ledger        LedgerReader
-	metrics       MetricsProvider
-	costCalc      CostCalculator
-	providers     ProviderLister
-	cfg           HCIConfig
+	mu        sync.RWMutex
+	ledger    LedgerReader
+	metrics   MetricsProvider
+	costCalc  CostCalculator
+	providers ProviderLister
+	cfg       HCIConfig
 
 	// Cached ledger records, loaded lazily on first Assess/AssessAll call.
 	records       []ledger.LedgerRecord
@@ -182,17 +195,27 @@ type HCIEngine struct {
 //   - providers: provider lister for routing assessment (optional, can be nil)
 //   - cfg: configuration parameters; pass DefaultHCIConfig() for sensible defaults
 func NewHCIEngine(store LedgerReader, metrics MetricsProvider, costCalc CostCalculator, providers ProviderLister, cfg HCIConfig) *HCIEngine {
-	if cfg.MinRecords == 0 {
-		cfg.MinRecords = DefaultHCIConfig().MinRecords
+	def := DefaultHCIConfig()
+	// Zero, negative and non-finite values are nonsensical for every field
+	// (a negative latency target would make every latency look perfect), so
+	// they all fall back to the defaults.
+	if cfg.MinRecords <= 0 {
+		cfg.MinRecords = def.MinRecords
 	}
-	if cfg.TargetLatencyMs == 0 {
-		cfg.TargetLatencyMs = DefaultHCIConfig().TargetLatencyMs
+	if !(cfg.TargetLatencyMs > 0) || !isFinite(cfg.TargetLatencyMs) {
+		cfg.TargetLatencyMs = def.TargetLatencyMs
 	}
-	if cfg.CostEfficiencyThreshold == 0 {
-		cfg.CostEfficiencyThreshold = DefaultHCIConfig().CostEfficiencyThreshold
+	if !(cfg.CostEfficiencyThreshold > 0) || !isFinite(cfg.CostEfficiencyThreshold) {
+		cfg.CostEfficiencyThreshold = def.CostEfficiencyThreshold
 	}
-	if cfg.DuplicateRequestThreshold == 0 {
-		cfg.DuplicateRequestThreshold = DefaultHCIConfig().DuplicateRequestThreshold
+	if !(cfg.DuplicateRequestThreshold > 0) || !isFinite(cfg.DuplicateRequestThreshold) {
+		cfg.DuplicateRequestThreshold = def.DuplicateRequestThreshold
+	}
+	if cfg.MaxRecords <= 0 {
+		cfg.MaxRecords = def.MaxRecords
+	}
+	if cfg.CacheTTL <= 0 {
+		cfg.CacheTTL = def.CacheTTL
 	}
 	return &HCIEngine{
 		ledger:    store,
@@ -216,10 +239,15 @@ func (e *HCIEngine) Refresh() {
 }
 
 // loadRecords returns cached ledger records, loading them from the ledger store
-// on first access. Uses double-checked locking for thread safety.
+// on first access (or once the cache TTL has expired). Uses double-checked
+// locking for thread safety. Only the most recent cfg.MaxRecords records are
+// retained.
 func (e *HCIEngine) loadRecords(ctx context.Context) ([]ledger.LedgerRecord, error) {
+	if e == nil {
+		return nil, fmt.Errorf("hci: engine is nil")
+	}
 	e.mu.RLock()
-	if e.recordsLoaded {
+	if e.recordsLoaded && time.Since(e.refreshTime) < e.cfg.CacheTTL {
 		records := e.records
 		e.mu.RUnlock()
 		return records, nil
@@ -228,17 +256,24 @@ func (e *HCIEngine) loadRecords(ctx context.Context) ([]ledger.LedgerRecord, err
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.recordsLoaded {
+	if e.recordsLoaded && time.Since(e.refreshTime) < e.cfg.CacheTTL {
 		return e.records, nil
 	}
 
 	if e.ledger == nil {
 		return nil, fmt.Errorf("hci: ledger reader is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	records, err := e.ledger.All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("hci: failed to load ledger records: %w", err)
+	}
+	if e.cfg.MaxRecords > 0 && len(records) > e.cfg.MaxRecords {
+		// Keep the most recent records (ledgers are chronological).
+		records = records[len(records)-e.cfg.MaxRecords:]
 	}
 
 	e.records = records
@@ -383,7 +418,7 @@ func (e *HCIEngine) emptyAssessment(dim HeadroomDimension) *HeadroomAssessment {
 }
 
 // Prioritize returns the dimension with the highest combined
-// (HeadroomPct × Actionability) score. This identifies where RSI should
+// (HeadroomPct × Actionability × Confidence) score. This identifies where RSI should
 // focus its evolution effort first — a dimension with high headroom but low
 // actionability may be deprioritized in favor of one with lower headroom
 // but higher actionability.
@@ -404,16 +439,30 @@ func (e *HCIEngine) Prioritize() HeadroomDimension {
 	bestScore := -1.0
 	for _, dim := range AllDimensions() {
 		a, ok := assessments[dim]
-		if !ok {
+		if !ok || a == nil {
 			continue
 		}
-		score := a.HeadroomPct * float64(a.Actionability)
+		score := priorityScore(a)
 		if score > bestScore {
 			bestScore = score
 			best = dim
 		}
 	}
 	return best
+}
+
+// priorityScore is HeadroomPct × Actionability × Confidence. Weighting by
+// confidence stops RSI from chasing dimensions that merely look like they
+// have 100% headroom because no data exists for them.
+func priorityScore(a *HeadroomAssessment) float64 {
+	if a == nil {
+		return 0
+	}
+	s := a.HeadroomPct * float64(a.Actionability) * clamp(a.Confidence, 0, 1)
+	if !isFinite(s) || s < 0 {
+		return 0
+	}
+	return s
 }
 
 // prioritizeFromLedger performs a one-shot assessment if no cached results
@@ -429,7 +478,7 @@ func (e *HCIEngine) prioritizeFromLedger() HeadroomDimension {
 	bestScore := -1.0
 	for _, dim := range AllDimensions() {
 		a := e.assessDimension(dim, records)
-		score := a.HeadroomPct * float64(a.Actionability)
+		score := priorityScore(a)
 		if score > bestScore {
 			bestScore = score
 			best = dim
@@ -512,11 +561,11 @@ func (e *HCIEngine) assessRouting(records []ledger.LedgerRecord) *HeadroomAssess
 		Confidence:    confidence,
 		Actionability: ActionabilityHigh,
 		Details: map[string]interface{}{
-			"total_requests":      totalRequests,
-			"providers_used":      len(providerCounts),
+			"total_requests":       totalRequests,
+			"providers_used":       len(providerCounts),
 			"providers_registered": availableProviders,
-			"distribution_score":  distScore,
-			"cost_efficiency":     costScore,
+			"distribution_score":   distScore,
+			"cost_efficiency":      costScore,
 		},
 	}
 }
@@ -572,7 +621,7 @@ func (e *HCIEngine) computeRoutingCostScore(records []ledger.LedgerRecord) float
 			continue
 		}
 		cost := e.costCalc.CalculateCost(req.Model, resp.Usage)
-		if cost <= 0 {
+		if !(cost > 0) || !isFinite(cost) {
 			continue
 		}
 		totalCost += cost
@@ -582,14 +631,14 @@ func (e *HCIEngine) computeRoutingCostScore(records []ledger.LedgerRecord) float
 		}
 	}
 
-	if requestCount == 0 || totalCost == 0 {
+	if requestCount == 0 || !(totalCost > 0) || !isFinite(totalCost) {
 		return 1.0
 	}
 	avgCost := totalCost / float64(requestCount)
-	if avgCost == 0 {
+	if !(avgCost > 0) || !isFinite(avgCost) {
 		return 1.0
 	}
-	return minCost / avgCost // 1.0 = all requests at min cost
+	return clamp(minCost/avgCost, 0, 1) // 1.0 = all requests at min cost
 }
 
 // assessCache evaluates the caching dimension.
@@ -600,7 +649,8 @@ func (e *HCIEngine) computeRoutingCostScore(records []ledger.LedgerRecord) float
 // improvement through exact-match or semantic caching.
 //
 // The simulator counts unique request payloads and computes:
-//   cacheHitRate = (totalRequests - uniqueRequests) / totalRequests
+//
+//	cacheHitRate = (totalRequests - uniqueRequests) / totalRequests
 //
 // CurrentScore = cacheHitRate (0 = no caching, 1 = everything cached).
 func (e *HCIEngine) assessCache(records []ledger.LedgerRecord) *HeadroomAssessment {
@@ -647,10 +697,10 @@ func (e *HCIEngine) assessCache(records []ledger.LedgerRecord) *HeadroomAssessme
 		Confidence:    confidence,
 		Actionability: ActionabilityMedium,
 		Details: map[string]interface{}{
-			"total_requests":   totalRequests,
-			"unique_requests":  len(uniquePayloads),
-			"cache_hits":       cacheHits,
-			"cache_misses":     totalRequests - cacheHits,
+			"total_requests":  totalRequests,
+			"unique_requests": len(uniquePayloads),
+			"cache_hits":      cacheHits,
+			"cache_misses":    totalRequests - cacheHits,
 		},
 	}
 }
@@ -680,14 +730,16 @@ func (e *HCIEngine) assessGuardrails(records []ledger.LedgerRecord) *HeadroomAss
 		req := parseRequest(rec.RequestPayload)
 		resp := parseResponse(rec.ResponsePayload)
 
-		var requestContent string
+		var reqSB strings.Builder
 		if req != nil {
 			for _, msg := range req.Messages {
 				if msg.Content != nil {
-					requestContent += *msg.Content + " "
+					reqSB.WriteString(*msg.Content)
+					reqSB.WriteByte(' ')
 				}
 			}
 		}
+		requestContent := reqSB.String()
 		if requestContent == "" {
 			requestContent = rec.RequestPayload
 		}
@@ -699,18 +751,21 @@ func (e *HCIEngine) assessGuardrails(records []ledger.LedgerRecord) *HeadroomAss
 		}
 
 		// Check for PII in the response message content only (data exfiltration risk).
-		var responseContent string
+		var respSB strings.Builder
 		if resp != nil {
 			for _, choice := range resp.Choices {
 				if choice.Message.Content != nil {
-					responseContent += *choice.Message.Content + " "
+					respSB.WriteString(*choice.Message.Content)
+					respSB.WriteByte(' ')
 				}
 				// Also check tool call arguments.
 				for _, tc := range choice.Message.ToolCalls {
-					responseContent += tc.Function.Arguments + " "
+					respSB.WriteString(tc.Function.Arguments)
+					respSB.WriteByte(' ')
 				}
 			}
 		}
+		responseContent := respSB.String()
 		if responseContent == "" {
 			responseContent = rec.ResponsePayload
 		}
@@ -745,10 +800,10 @@ func (e *HCIEngine) assessGuardrails(records []ledger.LedgerRecord) *HeadroomAss
 		Confidence:    confidence,
 		Actionability: ActionabilityMedium,
 		Details: map[string]interface{}{
-			"total_requests":      totalRequests,
-			"violations":          violations,
+			"total_requests":       totalRequests,
+			"violations":           violations,
 			"injection_violations": injectionViolations,
-			"pii_violations":      piiViolations,
+			"pii_violations":       piiViolations,
 		},
 	}
 }
@@ -825,9 +880,9 @@ func (e *HCIEngine) assessAgentTools(records []ledger.LedgerRecord) *HeadroomAss
 		Confidence:    confidence,
 		Actionability: ActionabilityHigh,
 		Details: map[string]interface{}{
-			"total_tool_calls":    totalToolCalls,
+			"total_tool_calls":     totalToolCalls,
 			"duplicate_tool_calls": duplicateToolCalls,
-			"distinct_tools":      len(toolCounts),
+			"distinct_tools":       len(toolCounts),
 		},
 	}
 }
@@ -848,6 +903,7 @@ func (e *HCIEngine) assessCost(records []ledger.LedgerRecord) *HeadroomAssessmen
 	costlyRequests := 0
 	var totalCostUSD float64
 
+	pricedRequests := 0
 	for _, rec := range records {
 		req := parseRequest(rec.RequestPayload)
 		resp := parseResponse(rec.ResponsePayload)
@@ -858,6 +914,11 @@ func (e *HCIEngine) assessCost(records []ledger.LedgerRecord) *HeadroomAssessmen
 
 		if e.costCalc != nil {
 			cost := e.costCalc.CalculateCost(req.Model, resp.Usage)
+			if !isFinite(cost) || cost < 0 {
+				// A broken price table must not poison the totals.
+				continue
+			}
+			pricedRequests++
 			totalCostUSD += cost
 			if cost > e.cfg.CostEfficiencyThreshold {
 				costlyRequests++
@@ -877,9 +938,27 @@ func (e *HCIEngine) assessCost(records []ledger.LedgerRecord) *HeadroomAssessmen
 		}
 	}
 
-	costlyRate := float64(costlyRequests) / float64(totalRequests)
+	if pricedRequests == 0 {
+		// Without prices we cannot know whether requests are costly. Report
+		// the neutral score the dimension has always reported, but with zero
+		// confidence so Prioritize does not act on it.
+		return &HeadroomAssessment{
+			Dimension:     DimensionCost,
+			CurrentScore:  1.0,
+			OptimalScore:  1.0,
+			HeadroomPct:   0,
+			Confidence:    0,
+			Actionability: ActionabilityHigh,
+			Details: map[string]interface{}{
+				"reason":         "no cost data (cost calculator unavailable or returned invalid prices)",
+				"total_requests": totalRequests,
+			},
+		}
+	}
+
+	costlyRate := float64(costlyRequests) / float64(pricedRequests)
 	currentScore := 1.0 - costlyRate
-	confidence := e.confidence(totalRequests)
+	confidence := e.confidence(pricedRequests)
 
 	return &HeadroomAssessment{
 		Dimension:     DimensionCost,
@@ -889,11 +968,12 @@ func (e *HCIEngine) assessCost(records []ledger.LedgerRecord) *HeadroomAssessmen
 		Confidence:    confidence,
 		Actionability: ActionabilityHigh,
 		Details: map[string]interface{}{
-			"total_requests":     totalRequests,
-			"costly_requests":    costlyRequests,
-			"costly_rate":        costlyRate,
-			"total_cost_usd":     totalCostUSD,
-			"avg_cost_per_request": avgOrZero(totalCostUSD, float64(totalRequests)),
+			"total_requests":       totalRequests,
+			"costly_requests":      costlyRequests,
+			"costly_rate":          costlyRate,
+			"total_cost_usd":       totalCostUSD,
+			"priced_requests":      pricedRequests,
+			"avg_cost_per_request": avgOrZero(totalCostUSD, float64(pricedRequests)),
 		},
 	}
 }
@@ -918,13 +998,9 @@ func (e *HCIEngine) assessLatency(records []ledger.LedgerRecord) *HeadroomAssess
 	for _, rec := range records {
 		// Ledger records may contain latency in metadata (written by the
 		// trace middleware or cost tracker). Extract if present.
-		if rec.Metadata != nil {
-			if lat, ok := rec.Metadata["latency_ms"]; ok {
-				if latMs, err := strconv.ParseFloat(fmt.Sprintf("%v", lat), 64); err == nil {
-					avgLatencyMs += latMs
-					sampleCount++
-				}
-			}
+		if latMs, ok := metadataLatency(rec.Metadata); ok {
+			avgLatencyMs += latMs
+			sampleCount++
 		}
 	}
 
@@ -933,10 +1009,18 @@ func (e *HCIEngine) assessLatency(records []ledger.LedgerRecord) *HeadroomAssess
 		avgLatencyMs /= float64(sampleCount)
 	}
 
-	// Prefer trace provider's AvgLatency if available (more accurate).
-	if e.metrics != nil && e.metrics.AvgLatency() > 0 {
-		avgLatencyMs = e.metrics.AvgLatency()
-		sampleCount = int(e.metrics.RequestCount())
+	// Prefer trace provider's AvgLatency if available (more accurate), but
+	// only when it is a sane value backed by at least one request.
+	if e.metrics != nil {
+		lat := e.metrics.AvgLatency()
+		n := e.metrics.RequestCount()
+		if lat > 0 && isFinite(lat) && n > 0 {
+			avgLatencyMs = lat
+			if n > math.MaxInt32 {
+				n = math.MaxInt32
+			}
+			sampleCount = int(n)
+		}
 	}
 
 	if sampleCount == 0 {
@@ -966,10 +1050,10 @@ func (e *HCIEngine) assessLatency(records []ledger.LedgerRecord) *HeadroomAssess
 		Confidence:    confidence,
 		Actionability: ActionabilityMedium,
 		Details: map[string]interface{}{
-			"avg_latency_ms":      avgLatencyMs,
-			"target_latency_ms":   e.cfg.TargetLatencyMs,
-			"sample_count":        sampleCount,
-			"latency_ratio":       latencyRatio,
+			"avg_latency_ms":    avgLatencyMs,
+			"target_latency_ms": e.cfg.TargetLatencyMs,
+			"sample_count":      sampleCount,
+			"latency_ratio":     latencyRatio,
 		},
 	}
 }
@@ -995,8 +1079,52 @@ func actionabilityFor(dim HeadroomDimension) Actionability {
 	}
 }
 
-// clamp constrains a value to the range [lo, hi].
+// metadataLatency extracts a finite, non-negative "latency_ms" value from
+// ledger/replay metadata. Values such as "NaN", "Inf" or negative numbers are
+// rejected so they cannot poison averages (and break JSON encoding).
+func metadataLatency(meta map[string]interface{}) (float64, bool) {
+	if meta == nil {
+		return 0, false
+	}
+	raw, ok := meta["latency_ms"]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	var v float64
+	switch x := raw.(type) {
+	case float64:
+		v = x
+	case float32:
+		v = float64(x)
+	case int:
+		v = float64(x)
+	case int64:
+		v = float64(x)
+	case json.Number:
+		f, err := x.Float64()
+		if err != nil {
+			return 0, false
+		}
+		v = f
+	default:
+		f, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprintf("%v", raw)), 64)
+		if err != nil {
+			return 0, false
+		}
+		v = f
+	}
+	if !isFinite(v) || v < 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+// clamp constrains a value to the range [lo, hi]. NaN maps to lo so that a
+// single bad input can never propagate NaN into scores or JSON output.
 func clamp(v, lo, hi float64) float64 {
+	if math.IsNaN(v) {
+		return lo
+	}
 	if v < lo {
 		return lo
 	}

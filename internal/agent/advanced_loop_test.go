@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,16 +32,17 @@ type captureHook struct {
 	toolDeficit []ToolDeficitSignal
 }
 
-func (c *captureHook) BeforeLLM(_ context.Context, _ *models.LLMRequest)              { c.beforeLLM++ }
-func (c *captureHook) AfterLLM(_ context.Context, _ *models.LLMResponse)             { c.afterLLM++ }
-func (c *captureHook) BeforeTools(_ context.Context, _ []models.ToolCall)            { c.beforeTools++ }
-func (c *captureHook) AfterTools(_ context.Context, _ []*ToolResult)                { c.afterTools++ }
+func (c *captureHook) BeforeLLM(_ context.Context, _ *models.LLMRequest)  { c.beforeLLM++ }
+func (c *captureHook) AfterLLM(_ context.Context, _ *models.LLMResponse)  { c.afterLLM++ }
+func (c *captureHook) BeforeTools(_ context.Context, _ []models.ToolCall) { c.beforeTools++ }
+func (c *captureHook) AfterTools(_ context.Context, _ []*ToolResult)      { c.afterTools++ }
 func (c *captureHook) OnToolDeficit(_ context.Context, s ToolDeficitSignal) {
 	c.toolDeficit = append(c.toolDeficit, s)
 }
 
 type errorTool struct {
-	msg string
+	msg   string
+	calls atomic.Int32
 }
 
 func (e *errorTool) Name() string        { return "echo" }
@@ -49,6 +51,7 @@ func (e *errorTool) Parameters() map[string]interface{} {
 	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 }
 func (e *errorTool) Execute(_ context.Context, _ map[string]interface{}) (interface{}, error) {
+	e.calls.Add(1)
 	return nil, errors.New(e.msg)
 }
 
@@ -73,6 +76,7 @@ func TestRunAdvancedExecutionLoopCallsHooks(t *testing.T) {
 	engine := &AgentEngine{Provider: provider, Registry: reg, MaxIterations: 2, ToolTimeout: time.Second}
 	resp, err := engine.RunAdvancedExecutionLoop(context.Background(), &models.LLMRequest{
 		Messages: []models.Message{{Role: models.RoleUser, Content: ptr("hi")}},
+		Tools:    []models.ToolDefinition{{Name: "echo"}},
 	}, AdvancedLoopOptions{Hooks: []LoopHook{hook}})
 	if err != nil {
 		t.Fatalf("loop failed: %v", err)
@@ -85,17 +89,43 @@ func TestRunAdvancedExecutionLoopCallsHooks(t *testing.T) {
 	}
 }
 
-func TestExecuteToolsWithRetryRespectsDelay(t *testing.T) {
+func TestExecuteToolsWithRetryFeedsErrorBack(t *testing.T) {
 	provider := &fakeProvider{responses: []*models.LLMResponse{toolResponse("echo"), textResponse()}}
 	reg := NewToolRegistry()
-	_ = reg.Register(&errorTool{msg: "boom"})
+	tool := &errorTool{msg: "boom"}
+	_ = reg.Register(tool)
 
 	engine := &AgentEngine{Provider: provider, Registry: reg, MaxIterations: 2, ToolTimeout: time.Second}
+	resp, err := engine.RunAdvancedExecutionLoop(context.Background(), &models.LLMRequest{
+		Messages: []models.Message{{Role: models.RoleUser, Content: ptr("hi")}},
+		Tools:    []models.ToolDefinition{{Name: "echo"}},
+	}, AdvancedLoopOptions{RetryToolErrors: true, MaxToolRetries: 2, ToolRetryDelay: time.Millisecond})
+	if err != nil {
+		t.Fatalf("tool errors must be fed back to the model, not abort the loop: %v", err)
+	}
+	if resp == nil || *resp.Choices[0].Message.Content != "done" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if got := tool.calls.Load(); got != 3 {
+		t.Fatalf("expected 1 attempt + 2 retries, got %d", got)
+	}
+}
+
+func TestRunAdvancedExecutionLoopSignalsDeficit(t *testing.T) {
+	provider := &fakeProvider{responses: []*models.LLMResponse{toolResponse("web_search"), textResponse()}}
+	reg := NewToolRegistry()
+	_ = reg.Register(&EchoTool{})
+	hook := &captureHook{}
+	engine := &AgentEngine{Provider: provider, Registry: reg, MaxIterations: 3}
 	_, err := engine.RunAdvancedExecutionLoop(context.Background(), &models.LLMRequest{
 		Messages: []models.Message{{Role: models.RoleUser, Content: ptr("hi")}},
-	}, AdvancedLoopOptions{RetryToolErrors: true, MaxToolRetries: 1, ToolRetryDelay: 0})
-	if err == nil {
-		t.Fatalf("expected retry loop to return error")
+		Tools:    []models.ToolDefinition{{Name: "echo"}},
+	}, AdvancedLoopOptions{Hooks: []LoopHook{hook}})
+	if err != nil {
+		t.Fatalf("loop failed: %v", err)
+	}
+	if len(hook.toolDeficit) != 1 || hook.toolDeficit[0].MissingTool != "web_search" {
+		t.Fatalf("expected deficit for web_search, got %+v", hook.toolDeficit)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 	"github.com/ayoubzulfiqar/aerollm/internal/cache"
+	"github.com/ayoubzulfiqar/aerollm/internal/finops"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
@@ -24,13 +25,15 @@ type mockProvider struct {
 	name string
 }
 
-func (m *mockProvider) Name() string                          { return m.name }
-func (m *mockProvider) Type() providers.ProviderType         { return providers.ProviderOpenAI }
+func (m *mockProvider) Name() string                 { return m.name }
+func (m *mockProvider) Type() providers.ProviderType { return providers.ProviderOpenAI }
 func (m *mockProvider) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
 	return &models.LLMResponse{Model: m.name, Choices: []models.Choice{{Message: models.Message{Role: models.RoleAssistant, Content: strPtr("ok")}}}}, nil
 }
-func (m *mockProvider) Health() providers.ProviderHealth     { return providers.ProviderHealth{Name: m.name, Healthy: true} }
-func (m *mockProvider) Close() error                          { return nil }
+func (m *mockProvider) Health() providers.ProviderHealth {
+	return providers.ProviderHealth{Name: m.name, Healthy: true}
+}
+func (m *mockProvider) Close() error { return nil }
 
 type mockRateLimiter struct{}
 
@@ -79,7 +82,7 @@ func strPtr(s string) *string { return &s }
 
 type testLogger struct{}
 
-func (t *testLogger) Info(msg string, keysAndValues ...interface{})   {}
+func (t *testLogger) Info(msg string, keysAndValues ...interface{})  {}
 func (t *testLogger) Error(msg string, keysAndValues ...interface{}) {}
 
 func newTestTelemetry() *telemetry.Provider {
@@ -213,7 +216,7 @@ type mockBudgetChecker struct {
 
 func (m *mockBudgetChecker) CheckBudget(ctx context.Context, apiKey string, estimatedCost float64) (float64, error) {
 	if m.fail {
-		return 0, fmt.Errorf("budget exceeded")
+		return 0, fmt.Errorf("key-1: %w", finops.ErrBudgetExceeded)
 	}
 	return estimatedCost, nil
 }

@@ -66,5 +66,5 @@ func TestRateLimitMiddleware(t *testing.T) {
 
 type testLogger struct{}
 
-func (t *testLogger) Info(msg string, keysAndValues ...interface{})   {}
+func (t *testLogger) Info(msg string, keysAndValues ...interface{})  {}
 func (t *testLogger) Error(msg string, keysAndValues ...interface{}) {}

@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -15,132 +15,123 @@ import (
 func newRSICmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rsi",
-		Short: "RSI engine — recursive self-improvement cycles",
-		Long:  "Inspect headroom assessments, list cycle history, and trigger RSI cycles.",
+		Short: "Inspect and trigger RSI (recursive self-improvement) cycles",
+		Long:  "Inspect headroom assessments, list cycle history, trigger RSI cycles and manage RSI configuration.",
 	}
 	cmd.AddCommand(newRSIHeadroomCmd())
 	cmd.AddCommand(newRSICyclesCmd())
-	cmd.AddCommand(newRSIITriggerCmd())
+	cmd.AddCommand(newRSICurrentCmd())
+	cmd.AddCommand(newRSITriggerCmd())
 	cmd.AddCommand(newRSIConfigCmd())
 	return cmd
 }
 
-var rsiAddr string
-
-func init() {
-	// Register the rsi command group on the root command.
+// addDeprecatedAddrFlag keeps the historical --addr/-a flag working as an
+// alias for the global --server flag.
+func addDeprecatedAddrFlag(cmd *cobra.Command) {
+	cmd.Flags().StringP("addr", "a", "", "base address of the aerollm server")
+	_ = cmd.Flags().MarkDeprecated("addr", "use --server instead")
 }
 
-// --- rsi headroom ---
+// rsiGet fetches an RSI endpoint and renders it.
+func rsiGet(cmd *cobra.Command, path string, def string, columns []string) error {
+	client, err := newServerClient(cmd)
+	if err != nil {
+		return err
+	}
+	data, err := client.call(cmd.Context(), http.MethodGet, path, nil, nil)
+	if err != nil {
+		return err
+	}
+	return renderResult(cmd, data, def, columns, nil)
+}
 
 func newRSIHeadroomCmd() *cobra.Command {
-	var addr string
 	cmd := &cobra.Command{
 		Use:   "headroom",
-		Short: "Print HCI headroom assessment for all dimensions",
-		Run: func(_ *cobra.Command, _ []string) {
-			if addr == "" {
-				addr = "http://localhost:8080"
-			}
-			resp, err := http.Get(addr + "/v1/rsi/headroom")
-			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			var out map[string]interface{}
-			if err := json.Unmarshal(body, &out); err != nil {
-				fmt.Println(string(body))
-				return
-			}
-			pretty, _ := json.MarshalIndent(out, "", "  ")
-			fmt.Println(string(pretty))
+		Short: "Print the HCI headroom assessment for all dimensions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rsiGet(cmd, "/v1/rsi/headroom", formatJSON, nil)
 		},
 	}
-	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
+	addDeprecatedAddrFlag(cmd)
 	return cmd
 }
 
-// --- rsi cycles ---
-
 func newRSICyclesCmd() *cobra.Command {
-	var addr string
 	cmd := &cobra.Command{
 		Use:   "cycles",
 		Short: "List RSI cycle history",
-		Run: func(_ *cobra.Command, _ []string) {
-			if addr == "" {
-				addr = "http://localhost:8080"
-			}
-			resp, err := http.Get(addr + "/v1/rsi/cycles")
-			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			var out []map[string]interface{}
-			if err := json.Unmarshal(body, &out); err != nil {
-				fmt.Println(string(body))
-				return
-			}
-			for _, c := range out {
-				id, _ := json.Marshal(c["id"])
-				dim, _ := json.Marshal(c["dimension"])
-				imp, _ := json.Marshal(c["improvement_pct"])
-				deployed, _ := json.Marshal(c["deployed"])
-				ts, _ := json.Marshal(c["timestamp"])
-				fmt.Printf("cycle %s | dim=%s | improvement=%s%% | deployed=%s | ts=%s\n",
-					id, dim, imp, deployed, ts)
-			}
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rsiGet(cmd, "/v1/rsi/cycles", formatTable,
+				[]string{"id", "dimension", "improvement_pct", "deployed", "timestamp"})
 		},
 	}
-	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
+	addDeprecatedAddrFlag(cmd)
 	return cmd
 }
 
-// --- rsi trigger ---
+func newRSICurrentCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "current",
+		Short: "Show the most recent RSI cycle",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rsiGet(cmd, "/v1/rsi/current", formatJSON, nil)
+		},
+	}
+	addDeprecatedAddrFlag(cmd)
+	return cmd
+}
 
-func newRSIITriggerCmd() *cobra.Command {
-	var addr string
+func newRSITriggerCmd() *cobra.Command {
 	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "trigger",
-		Short: "Trigger an RSI cycle on the server",
-		Run: func(_ *cobra.Command, _ []string) {
-			if addr == "" {
-				addr = "http://localhost:8080"
-			}
-			resp, err := http.Post(addr+"/v1/rsi/cycle", "application/json", nil)
+		Short: "Run one RSI cycle on the server and print the result",
+		Long: `Trigger an RSI cycle. The server runs the cycle synchronously, so the
+command waits for it to finish; --wait bounds how long to wait (it overrides
+--timeout for this request).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newServerClient(cmd)
 			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
+				return err
+			}
+			if wait > 0 {
+				client.timeout = wait
+				client.http = &http.Client{Timeout: wait}
+			}
+			req, err := client.newRequest(cmd.Context(), http.MethodPost, "/v1/rsi/cycle", nil, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := client.do(req)
+			if err != nil {
+				return err
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-
-			if wait > 0 {
-				// Poll for completion.
-				go func() {
-					time.Sleep(wait)
-				}()
+			data, err := readAllLimited(resp.Body, "response")
+			if err != nil {
+				return err
 			}
-			fmt.Println(string(body))
+			if resp.StatusCode == http.StatusPartialContent {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: the cycle completed with errors (HTTP 206); result is partial")
+			}
+			return renderResult(cmd, []byte(data), formatJSON, nil, nil)
 		},
 	}
-	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
-	cmd.Flags().DurationVarP(&wait, "wait", "w", 0, "wait for cycle to complete (duration)")
+	addDeprecatedAddrFlag(cmd)
+	cmd.Flags().DurationVarP(&wait, "wait", "w", 0, "maximum time to wait for the cycle to complete (default: --timeout)")
 	return cmd
 }
-
-// --- rsi config ---
 
 func newRSIConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Get or set RSI configuration",
-		Long:  "Without flags: show current config. With --set: update config via JSON string.",
 	}
 	cmd.AddCommand(newRSIConfigGetCmd())
 	cmd.AddCommand(newRSIConfigSetCmd())
@@ -148,74 +139,49 @@ func newRSIConfigCmd() *cobra.Command {
 }
 
 func newRSIConfigGetCmd() *cobra.Command {
-	var addr string
 	cmd := &cobra.Command{
 		Use:   "get",
 		Short: "Get current RSI configuration",
-		Run: func(_ *cobra.Command, _ []string) {
-			if addr == "" {
-				addr = "http://localhost:8080"
-			}
-			resp, err := http.Get(addr + "/v1/rsi/config")
-			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			var out interface{}
-			if err := json.Unmarshal(body, &out); err != nil {
-				fmt.Println(string(body))
-				return
-			}
-			pretty, _ := json.MarshalIndent(out, "", "  ")
-			fmt.Println(string(pretty))
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rsiGet(cmd, "/v1/rsi/config", formatJSON, nil)
 		},
 	}
-	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
+	addDeprecatedAddrFlag(cmd)
 	return cmd
 }
 
 func newRSIConfigSetCmd() *cobra.Command {
-	var addr string
 	var cfgJSON string
 	cmd := &cobra.Command{
-		Use:   "set",
-		Short: "Update RSI configuration (pass JSON via --json)",
-		Run: func(_ *cobra.Command, _ []string) {
-			if addr == "" {
-				addr = "http://localhost:8080"
+		Use:     "set",
+		Short:   "Update RSI configuration (JSON via --json, @file or - for stdin)",
+		Example: "  aerollm rsi config set --json @rsi.json\n  aerollm rsi config set --json '{\"enabled\":true}'",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(cfgJSON) == "" {
+				return errors.New("--json is required")
 			}
-			if cfgJSON == "" {
-				fmt.Println("error: --json flag is required")
-				return
-			}
-			req, err := http.NewRequest(http.MethodPut, addr+"/v1/rsi/config", nil)
+			raw, err := readValueArg(cmd, cfgJSON)
 			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
+				return err
 			}
-			req.Header.Set("Content-Type", "application/json")
-			req.ContentLength = int64(len(cfgJSON))
-			req.Body = io.NopCloser(strings.NewReader(cfgJSON))
-			client := &http.Client{}
-			httpResp, err := client.Do(req)
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+				return fmt.Errorf("--json must be a JSON object: %w", err)
+			}
+			client, err := newServerClient(cmd)
 			if err != nil {
-				fmt.Printf("error: %v\n", err)
-				return
+				return err
 			}
-			defer httpResp.Body.Close()
-			body, _ := io.ReadAll(httpResp.Body)
-			var out interface{}
-			if err := json.Unmarshal(body, &out); err != nil {
-				fmt.Println(string(body))
-				return
+			data, err := client.call(cmd.Context(), http.MethodPut, "/v1/rsi/config", nil, json.RawMessage(raw))
+			if err != nil {
+				return err
 			}
-			pretty, _ := json.MarshalIndent(out, "", "  ")
-			fmt.Println(string(pretty))
+			return renderResult(cmd, data, formatJSON, nil, nil)
 		},
 	}
-	cmd.Flags().StringVarP(&addr, "addr", "a", "", "base address of the aerollm server")
-	cmd.Flags().StringVarP(&cfgJSON, "json", "j", "", "JSON config string to set")
+	addDeprecatedAddrFlag(cmd)
+	cmd.Flags().StringVarP(&cfgJSON, "json", "j", "", "JSON config to set (literal, @file, or - for stdin)")
 	return cmd
 }

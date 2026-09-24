@@ -1,13 +1,15 @@
 package api
 
 import (
-	"encoding/json"
+	"crypto/sha256"
+	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/analytics"
+	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 )
 
 // SpendHandler handles global spend analytics endpoints.
@@ -38,7 +40,7 @@ func NewSpendHandler(engine *analytics.AnalyticsEngine, logger func(msg string, 
 // @Router /global/spend/report [get]
 func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -57,7 +59,7 @@ func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 	if startStr != "" {
 		start, err := time.Parse(time.RFC3339, startStr)
 		if err != nil {
-			http.Error(w, `{"error":"invalid start timestamp"}`, http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid start timestamp (want RFC3339)")
 			return
 		}
 		tr.Start = start
@@ -68,7 +70,7 @@ func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 	if endStr != "" {
 		end, err := time.Parse(time.RFC3339, endStr)
 		if err != nil {
-			http.Error(w, `{"error":"invalid end timestamp"}`, http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid end timestamp (want RFC3339)")
 			return
 		}
 		tr.End = end
@@ -77,19 +79,22 @@ func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if tr.Start.After(tr.End) {
-		http.Error(w, `{"error":"start must be before end"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "start must be before end")
 		return
 	}
 
 	report, err := h.Engine.GenerateReport(ctx, tr, groupBy)
 	if err != nil {
 		h.Logger("spend report generation failed", "error", err)
-		http.Error(w, `{"error":"report generation failed"}`, http.StatusInternalServerError)
+		if errors.Is(err, analytics.ErrInvalidGroupBy) || errors.Is(err, analytics.ErrInvalidTimeRange) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "report generation failed")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(report)
+	writeJSON(w, http.StatusOK, report)
 }
 
 // SpendLogs handles GET /global/spend/logs.
@@ -103,7 +108,7 @@ func (h *SpendHandler) SpendReport(w http.ResponseWriter, r *http.Request) {
 // @Router /global/spend/logs [get]
 func (h *SpendHandler) SpendLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -111,53 +116,70 @@ func (h *SpendHandler) SpendLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	filter := q.Get("filter")
-	page, _ := strconv.Atoi(q.Get("page"))
-	pageSize, _ := strconv.Atoi(q.Get("page_size"))
+	page, pageSize := 1, 50
+	if v := q.Get("page"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			writeError(w, http.StatusBadRequest, "page must be a positive integer")
+			return
+		}
+		page = n
+	}
+	if v := q.Get("page_size"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "page_size must be between 1 and 500")
+			return
+		}
+		pageSize = n
+	}
 
 	logs, err := h.Engine.GetLogs(ctx, filter, page, pageSize)
 	if err != nil {
 		h.Logger("spend logs query failed", "error", err)
-		http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(logs)
+	writeJSON(w, http.StatusOK, logs)
 }
 
-// IsAdminRequest checks if the request comes from an admin/master API key.
-// This is a helper for the middleware to enforce admin-only access.
+// IsAdminRequest checks if the request carries one of the admin API keys.
+// Keys are compared by SHA-256 digest in constant time.
 func IsAdminRequest(r *http.Request, validAdminKeys map[string]bool) bool {
-	auth := r.Header.Get("Authorization")
-	if auth == "" {
+	key := middleware.APIKeyFromRequest(r)
+	if key == "" {
 		return false
 	}
-	if len(auth) > 7 && auth[:7] == "Bearer " {
-		auth = auth[7:]
+	want := sha256.Sum256([]byte(key))
+	match := 0
+	for k, ok := range validAdminKeys {
+		if !ok || k == "" {
+			continue
+		}
+		have := sha256.Sum256([]byte(k))
+		match |= subtle.ConstantTimeCompare(want[:], have[:])
 	}
-	return validAdminKeys[auth]
+	return match == 1
 }
 
 // AdminAuthMiddleware wraps handlers with admin-only API key validation.
-// Unlike the standard auth middleware, this rejects virtual keys (sk-)
-// and only accepts master/admin API keys.
+// Only the listed admin keys are accepted; virtual and client keys get 403.
+//
+// Deprecated: use middleware.Authenticator.RequireAdmin.
 func AdminAuthMiddleware(validAdminKeys map[string]bool, logger func(msg string, kv ...interface{})) func(http.Handler) http.Handler {
+	if logger == nil {
+		logger = func(string, ...interface{}) {}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				http.Error(w, `{"error":"missing api key"}`, http.StatusUnauthorized)
+			if middleware.APIKeyFromRequest(r) == "" {
+				writeError(w, http.StatusUnauthorized, "missing api key")
 				return
 			}
-			if len(auth) > 7 && auth[:7] == "Bearer " {
-				auth = auth[7:]
-			}
-			if strings.HasPrefix(auth, "sk-") {
-				http.Error(w, `{"error":"admin access required"}`, http.StatusForbidden)
-				return
-			}
-			if !validAdminKeys[auth] {
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			if !IsAdminRequest(r, validAdminKeys) {
+				logger("admin access denied", "path", r.URL.Path)
+				writeError(w, http.StatusForbidden, "admin access required")
 				return
 			}
 			next.ServeHTTP(w, r)

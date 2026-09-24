@@ -93,7 +93,9 @@ func TestRunToolExecutionLoopWithHITL(t *testing.T) {
 	registry.Register(&approvalTool{})
 	a := NewAdvancedAgentEngine(&mockToolProviderWithApproval{response: resp}, registry, store)
 
-	_, approvalID, err := a.RunToolExecutionLoopWithHITL(context.Background(), &models.LLMRequest{})
+	_, approvalID, err := a.RunToolExecutionLoopWithHITL(context.Background(), &models.LLMRequest{
+		Tools: []models.ToolDefinition{{Name: "approval_tool"}},
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -2,10 +2,10 @@ package rsi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
@@ -64,8 +64,8 @@ type DreamReplay struct {
 // observe from a live policy deployment, but computed entirely from
 // recorded data — zero provider API calls.
 type SimulatedMetrics struct {
-	// AvgLatency is the average request latency in milliseconds
-	// across all replayed scenarios.
+	// AvgLatency is the average request latency in milliseconds across
+	// the replayed scenarios that produced an outcome.
 	AvgLatency float64 `json:"avg_latency_ms"`
 
 	// P99Latency is the 99th-percentile request latency in milliseconds,
@@ -84,7 +84,38 @@ type SimulatedMetrics struct {
 	// CacheHitRate is the fraction of requests served from cache
 	// under the simulated policy.
 	CacheHitRate float64 `json:"cache_hit_rate"`
+
+	// Requests is the number of scenarios replayed. It lets scorers
+	// normalise Cost to a per-request figure so that scores do not depend on
+	// how many scenarios happened to be replayed. Zero means "unknown"
+	// (hand-built metrics), in which case Cost is treated as per-request.
+	Requests int `json:"requests"`
 }
+
+// ScenarioOutcome is the simulated outcome of one scenario under a policy.
+// Per-scenario outcomes let the orchestrator run paired statistical tests
+// between a baseline and a candidate policy on the same scenarios.
+type ScenarioOutcome struct {
+	LatencyMs float64 `json:"latency_ms"`
+	CostUSD   float64 `json:"cost_usd"`
+	Cached    bool    `json:"cached"`
+	Error     bool    `json:"error"`
+	// Skipped is true for nil scenarios, which are excluded from all
+	// aggregates.
+	Skipped bool `json:"skipped,omitempty"`
+	// Score is the per-scenario composite score in [0,1] (see scoreOutcome).
+	Score float64 `json:"score"`
+}
+
+// MaxReplayScenarios bounds how many scenarios LoadFromLedger keeps. When the
+// ledger holds more matching records (and no smaller sampleSize is given),
+// records are down-sampled deterministically. This keeps memory and replay
+// CPU bounded no matter how large the ledger grows.
+const MaxReplayScenarios = 50000
+
+// ErrNoScenarios is returned by LoadFromLedger when no usable scenarios could
+// be built (empty ledger, empty time range, or only unparseable records).
+var ErrNoScenarios = errors.New("dream: no replayable scenarios")
 
 // DreamSimulator is the replay-based policy evaluation engine.
 //
@@ -104,6 +135,12 @@ type DreamSimulator struct {
 	metrics   MetricsProvider
 	scenarios []*DreamReplay
 	loaded    bool
+
+	// providers, when set and non-empty, lists the providers that actually
+	// exist. A non-cached decision routed to any other provider is simulated
+	// as an error: RSI must never "discover" a policy that routes traffic to
+	// a provider the gateway does not have.
+	providers func() []string
 }
 
 // NewDreamSimulator creates a new DreamSimulator with the given dependencies.
@@ -120,6 +157,19 @@ func NewDreamSimulator(store LedgerReader, costCalc CostCalculator, metrics Metr
 	}
 }
 
+// SetProviderFilter installs a function returning the names of providers
+// that are currently available. When it returns a non-empty list, replayed
+// decisions that route (non-cached) traffic to an unknown provider are
+// counted as errors. Pass nil to disable the check.
+func (s *DreamSimulator) SetProviderFilter(fn func() []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.providers = fn
+	s.mu.Unlock()
+}
+
 // LoadFromLedger populates the simulator's replay scenarios from the ledger.
 //
 // This is the "Construct Replay Simulator" stage of Dream-RSI: recorded
@@ -131,10 +181,15 @@ func NewDreamSimulator(store LedgerReader, costCalc CostCalculator, metrics Metr
 //  4. Parses each record's RequestPayload and ResponsePayload into
 //     typed DreamReplay structs with extracted metadata.
 //
-// If sampleSize is 0 or negative, all matching records are loaded.
-// The loaded scenarios are cached internally and can be retrieved via
-// Scenarios() for use with ReplayTraffic.
+// If sampleSize is 0 or negative, all matching records are loaded, capped at
+// MaxReplayScenarios. The loaded scenarios are cached internally and can be
+// retrieved via Scenarios() for use with ReplayTraffic. When no usable
+// scenario results, the pool is cleared and an error wrapping ErrNoScenarios
+// is returned.
 func (s *DreamSimulator) LoadFromLedger(ctx context.Context, timeRange TimeRange, sampleSize int) error {
+	if s == nil {
+		return fmt.Errorf("dream: simulator is nil")
+	}
 	if s.ledger == nil {
 		return fmt.Errorf("dream: ledger reader is nil")
 	}
@@ -158,20 +213,25 @@ func (s *DreamSimulator) LoadFromLedger(ctx context.Context, timeRange TimeRange
 	}
 
 	if len(filtered) == 0 {
-		s.mu.Lock()
-		s.scenarios = nil
-		s.loaded = true
-		s.mu.Unlock()
-		return fmt.Errorf("dream: no ledger records match the given time range")
+		s.setScenarios(nil)
+		return fmt.Errorf("%w: no ledger records match the given time range", ErrNoScenarios)
 	}
 
 	// Deterministic stride-based sampling to preserve temporal ordering.
+	if sampleSize <= 0 || sampleSize > MaxReplayScenarios {
+		sampleSize = MaxReplayScenarios
+	}
 	sampled := sampleRecords(filtered, sampleSize)
 
 	// Parse records into DreamReplay scenarios.
 	scenarios := make([]*DreamReplay, 0, len(sampled))
-	for _, rec := range sampled {
-		scenario, err := s.recordToReplay(&rec)
+	for i := range sampled {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("dream: loading cancelled: %w", err)
+			}
+		}
+		scenario, err := s.recordToReplay(&sampled[i])
 		if err != nil {
 			// Skip unparseable records but continue processing the rest.
 			continue
@@ -179,24 +239,43 @@ func (s *DreamSimulator) LoadFromLedger(ctx context.Context, timeRange TimeRange
 		scenarios = append(scenarios, scenario)
 	}
 
+	s.setScenarios(scenarios)
+	if len(scenarios) == 0 {
+		return fmt.Errorf("%w: all %d ledger records were unparseable", ErrNoScenarios, len(sampled))
+	}
+	return nil
+}
+
+func (s *DreamSimulator) setScenarios(scenarios []*DreamReplay) {
 	s.mu.Lock()
 	s.scenarios = scenarios
 	s.loaded = true
 	s.mu.Unlock()
-
-	return nil
 }
 
 // Scenarios returns the most recently loaded replay scenarios.
-// Returns nil if LoadFromLedger has not been called or failed.
+// Returns nil if LoadFromLedger has not been called or failed. The returned
+// slice is a copy; the scenarios themselves are shared and must be treated
+// as read-only.
 func (s *DreamSimulator) Scenarios() []*DreamReplay {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.scenarios
+	if s.scenarios == nil {
+		return nil
+	}
+	out := make([]*DreamReplay, len(s.scenarios))
+	copy(out, s.scenarios)
+	return out
 }
 
 // ScenarioCount returns the number of loaded replay scenarios.
 func (s *DreamSimulator) ScenarioCount() int {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.scenarios)
@@ -213,13 +292,14 @@ func (s *DreamSimulator) ScenarioCount() int {
 //  1. The policy's Apply method is called with the scenario's request,
 //     yielding a decision Response (provider selection, cache decision,
 //     latency/cost hints, error flag).
-//  2. If the policy decides to cache: the simulated latency is reduced to
+//  2. If the policy signals an error (or routes to an unavailable provider,
+//     see SetProviderFilter): the request is counted as failed.
+//  3. If the policy decides to cache: the simulated latency is reduced to
 //     near-zero (cache lookup) and the cost is zero (no LLM call).
-//  3. If the policy selects a provider: the cost is computed using the
-//     recorded token usage and the CostCalculator, and the latency is
-//     estimated from the policy's hint, the trace metrics baseline, or
-//     the recorded metadata.
-//  4. If the policy signals an error: the request is counted as failed.
+//  4. Otherwise the cost is computed from the recorded token usage and the
+//     CostCalculator (or the policy's estimate when it routes to a different
+//     provider than the one recorded), and the latency is taken from the
+//     policy's hint, the recorded per-request latency, or the trace baseline.
 //
 // The simulator MUST NOT make real LLM calls. All outcomes are derived
 // from the recorded Request/Response pairs and the injected dependencies
@@ -230,32 +310,54 @@ func (s *DreamSimulator) ReplayTraffic(
 	policy Policy,
 	scenarios []*DreamReplay,
 ) (*SimulatedMetrics, error) {
+	m, _, err := s.ReplayDetailed(ctx, policy, scenarios)
+	return m, err
+}
+
+// ReplayDetailed is ReplayTraffic that also returns one ScenarioOutcome per
+// input scenario (same order; nil scenarios are marked Skipped).
+func (s *DreamSimulator) ReplayDetailed(
+	ctx context.Context,
+	policy Policy,
+	scenarios []*DreamReplay,
+) (*SimulatedMetrics, []ScenarioOutcome, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("dream: simulator is nil")
+	}
 	if policy == nil {
-		return nil, fmt.Errorf("dream: policy cannot be nil")
+		return nil, nil, fmt.Errorf("dream: policy cannot be nil")
 	}
 	if len(scenarios) == 0 {
 		// Return zero-value metrics rather than an error — an empty
 		// scenario set is a valid (if uninformative) evaluation result.
-		return &SimulatedMetrics{}, nil
+		return &SimulatedMetrics{}, nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	available := s.availableProviders()
 
+	outcomes := make([]ScenarioOutcome, len(scenarios))
 	// Collect latencies for percentile computation.
 	latencies := make([]float64, 0, len(scenarios))
 
 	var (
-		totalCost    float64
-		errorCount   int
+		totalCost     float64
+		errorCount    int
 		cacheHitCount int
+		total         int
 	)
 
-	for _, scenario := range scenarios {
+	for i, scenario := range scenarios {
 		// Check for context cancellation between scenarios.
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("dream: replay cancelled: %w", err)
+			return nil, nil, fmt.Errorf("dream: replay cancelled: %w", err)
 		}
+		if scenario == nil {
+			outcomes[i] = ScenarioOutcome{Skipped: true}
+			continue
+		}
+		total++
 
 		// Apply the policy to the scenario's request.
 		// The policy returns a decision: which provider to route to,
@@ -263,23 +365,26 @@ func (s *DreamSimulator) ReplayTraffic(
 		decision, err := policy.Apply(ctx, scenario.Request)
 		if err != nil || decision == nil {
 			errorCount++
+			outcomes[i] = ScenarioOutcome{Error: true}
 			continue
 		}
 
 		// Simulate the outcome based on the policy decision.
-		latency, cost := s.simulateOutcome(decision, scenario)
-		latencies = append(latencies, latency)
-		totalCost += cost
-
-		if decision.Error {
+		out := s.outcomeFor(decision, scenario, available)
+		outcomes[i] = out
+		latencies = append(latencies, out.LatencyMs)
+		totalCost += out.CostUSD
+		if out.Error {
 			errorCount++
 		}
-		if decision.Cached {
+		if out.Cached {
 			cacheHitCount++
 		}
 	}
 
-	total := len(scenarios)
+	if total == 0 {
+		return &SimulatedMetrics{}, outcomes, nil
+	}
 	errorRate := float64(errorCount) / float64(total)
 	cacheHitRate := float64(cacheHitCount) / float64(total)
 
@@ -290,8 +395,11 @@ func (s *DreamSimulator) ReplayTraffic(
 	for _, l := range latencies {
 		avgLatency += l
 	}
-	if total > 0 {
-		avgLatency /= float64(total)
+	if len(latencies) > 0 {
+		// Average over the scenarios that actually produced a latency;
+		// dividing by all scenarios would bias the mean towards zero
+		// whenever a policy fails outright.
+		avgLatency /= float64(len(latencies))
 	}
 
 	p99Latency := percentile(latencies, 0.99)
@@ -302,7 +410,8 @@ func (s *DreamSimulator) ReplayTraffic(
 		Cost:         totalCost,
 		ErrorRate:    errorRate,
 		CacheHitRate: cacheHitRate,
-	}, nil
+		Requests:     total,
+	}, outcomes, nil
 }
 
 // ReplayLoaded is a convenience method that evaluates a policy against
@@ -315,6 +424,24 @@ func (s *DreamSimulator) ReplayLoaded(ctx context.Context, policy Policy) (*Simu
 		return nil, fmt.Errorf("dream: no scenarios loaded; call LoadFromLedger first")
 	}
 	return s.ReplayTraffic(ctx, policy, scenarios)
+}
+
+func (s *DreamSimulator) availableProviders() map[string]struct{} {
+	s.mu.RLock()
+	fn := s.providers
+	s.mu.RUnlock()
+	if fn == nil {
+		return nil
+	}
+	names := fn()
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +481,7 @@ func (s *DreamSimulator) recordToReplay(rec *ledger.LedgerRecord) (*DreamReplay,
 		// calculator is available. The request's Model field holds
 		// the LLM model name used for pricing.
 		if s.costCalc != nil {
-			meta["cost_usd"] = s.costCalc.CalculateCost(req.Model, resp.Usage)
+			meta["cost_usd"] = sanitizeNonNegative(s.costCalc.CalculateCost(req.Model, resp.Usage))
 		}
 	}
 
@@ -378,9 +505,10 @@ func (s *DreamSimulator) recordToReplay(rec *ledger.LedgerRecord) (*DreamReplay,
 	// If no latency was found in metadata, populate from the trace provider
 	// baseline. This is an approximation — the trace AvgLatency is a global
 	// average, not per-request.
-	if _, ok := meta["latency_ms"]; !ok {
-		if s.metrics != nil && s.metrics.AvgLatency() > 0 {
-			meta["latency_ms"] = s.metrics.AvgLatency()
+	if _, ok := metadataLatency(meta); !ok {
+		delete(meta, "latency_ms") // drop unusable values such as "NaN"
+		if base := s.baselineLatency(); base > 0 {
+			meta["latency_ms"] = base
 		}
 	}
 
@@ -401,71 +529,136 @@ func (s *DreamSimulator) recordToReplay(rec *ledger.LedgerRecord) (*DreamReplay,
 // scenario based on the policy's decision and the recorded replay data.
 //
 // Decision logic:
-//   - Cached=true  → latency ≈ cache lookup cost, cost = 0 (no LLM call)
 //   - Error=true   → latency = decision hint (or baseline), cost = 0
-//   - Otherwise    → cost = recorded cost for the request model;
-//                    latency = decision hint, trace baseline, or recorded metadata
+//   - Cached=true  → latency ≈ cache lookup cost, cost = 0 (no LLM call)
+//   - Otherwise    → cost = recorded cost for the request model (or the
+//     policy's estimate when it routes to a different provider);
+//     latency = decision hint, recorded per-request latency, or trace baseline
 //
 // The method never invokes a real provider. All cost estimates use the
 // CostCalculator against recorded token usage, and all latency estimates
-// use pre-computed values from trace metrics or ledger metadata.
+// use pre-computed values from ledger metadata or trace metrics.
 func (s *DreamSimulator) simulateOutcome(decision *Response, scenario *DreamReplay) (latency float64, cost float64) {
+	out := s.outcomeFor(decision, scenario, nil)
+	return out.LatencyMs, out.CostUSD
+}
+
+// outcomeFor simulates one scenario. available, when non-nil, is the set of
+// providers that exist; routing elsewhere is simulated as an error.
+func (s *DreamSimulator) outcomeFor(decision *Response, scenario *DreamReplay, available map[string]struct{}) ScenarioOutcome {
+	if decision == nil {
+		return ScenarioOutcome{Error: true}
+	}
+	hint := sanitizeNonNegative(decision.LatencyMs)
+
+	isError := decision.Error
+	if !isError && !decision.Cached && available != nil && decision.Provider != "" {
+		if _, ok := available[decision.Provider]; !ok {
+			isError = true
+		}
+	}
+
+	// Error: no cost (request failed before reaching the provider).
+	if isError {
+		latency := hint
+		if latency <= 0 {
+			latency = s.baselineLatency()
+		}
+		out := ScenarioOutcome{LatencyMs: latency, Error: true}
+		out.Score = scoreOutcome(out)
+		return out
+	}
+
 	// Cache hit: near-zero latency, zero marginal cost.
 	if decision.Cached {
 		// Use the policy's latency hint if provided (represents cache
 		// lookup time, typically < 1ms), otherwise default to 1ms.
-		if decision.LatencyMs > 0 {
-			latency = decision.LatencyMs
-		} else {
+		latency := hint
+		if latency <= 0 {
 			latency = 1.0
 		}
-		cost = 0
-		return latency, cost
+		out := ScenarioOutcome{LatencyMs: latency, Cached: true}
+		out.Score = scoreOutcome(out)
+		return out
 	}
 
-	// Error: no cost (request failed before reaching the provider).
-	if decision.Error {
-		if decision.LatencyMs > 0 {
-			latency = decision.LatencyMs
-		} else if s.metrics != nil {
-			latency = s.metrics.AvgLatency()
-		} else {
-			latency = 0
+	var cost float64
+	recorded := recordedProvider(scenario)
+	policyEstimate := sanitizeNonNegative(decision.CostUSD)
+	switch {
+	case decision.Provider != "" && recorded != "" && decision.Provider != recorded && policyEstimate > 0:
+		// Counterfactual routing: the recorded price belongs to a different
+		// provider, so the policy's own estimate is the best available.
+		cost = policyEstimate
+	case scenario != nil && scenario.Response != nil && scenario.Response.Usage != nil && s.costCalc != nil:
+		// Provider routing: compute cost from recorded usage and the
+		// request's model name (which determines per-model pricing).
+		model := ""
+		if scenario.Request != nil {
+			model = scenario.Request.Model
 		}
-		cost = 0
-		return latency, cost
-	}
-
-	// Provider routing: compute cost from recorded usage and the
-	// request's model name (which determines per-model pricing).
-	if scenario.Response != nil && scenario.Response.Usage != nil && s.costCalc != nil {
-		model := scenario.Request.Model
 		if model == "" {
 			model = scenario.Response.Model
 		}
-		cost = s.costCalc.CalculateCost(model, scenario.Response.Usage)
+		cost = sanitizeNonNegative(s.costCalc.CalculateCost(model, scenario.Response.Usage))
+	default:
+		cost = policyEstimate
 	}
 
 	// Determine latency:
 	// 1. Policy-provided hint (highest priority — policy has learned
 	//    provider-specific latency profiles during training).
-	// 2. Trace metrics baseline (global average).
-	// 3. Recorded latency from ledger metadata (per-request).
+	// 2. Recorded latency from the scenario's metadata (per-request).
+	// 3. Trace metrics baseline (global average).
 	// 4. Zero (no data available).
-	latency = decision.LatencyMs
+	latency := hint
 	if latency <= 0 {
-		if s.metrics != nil && s.metrics.AvgLatency() > 0 {
-			latency = s.metrics.AvgLatency()
-		} else if scenario.Metadata != nil {
-			if l, ok := scenario.Metadata["latency_ms"]; ok {
-				if lf, err := strconv.ParseFloat(fmt.Sprintf("%v", l), 64); err == nil {
-					latency = lf
-				}
+		if scenario != nil {
+			if l, ok := metadataLatency(scenario.Metadata); ok {
+				latency = l
 			}
+		}
+		if latency <= 0 {
+			latency = s.baselineLatency()
 		}
 	}
 
-	return latency, cost
+	out := ScenarioOutcome{LatencyMs: latency, CostUSD: cost}
+	out.Score = scoreOutcome(out)
+	return out
+}
+
+// baselineLatency returns the trace provider's average latency when it is a
+// sane value, otherwise 0.
+func (s *DreamSimulator) baselineLatency() float64 {
+	if s.metrics == nil {
+		return 0
+	}
+	return sanitizeNonNegative(s.metrics.AvgLatency())
+}
+
+// recordedProvider returns the provider that served the recorded response.
+func recordedProvider(scenario *DreamReplay) string {
+	if scenario == nil {
+		return ""
+	}
+	if scenario.Metadata != nil {
+		if p, ok := scenario.Metadata["provider"].(string); ok && p != "" {
+			return p
+		}
+	}
+	if scenario.Response != nil {
+		return scenario.Response.Model
+	}
+	return ""
+}
+
+// sanitizeNonNegative maps NaN, ±Inf and negative values to 0.
+func sanitizeNonNegative(v float64) float64 {
+	if !isFinite(v) || v < 0 {
+		return 0
+	}
+	return v
 }
 
 // sampleRecords performs deterministic stride-based sampling to select
@@ -524,6 +717,9 @@ func countToolCalls(resp *models.LLMResponse) int {
 func percentile(sortedValues []float64, p float64) float64 {
 	if len(sortedValues) == 0 {
 		return 0
+	}
+	if math.IsNaN(p) {
+		p = 0
 	}
 	if p < 0 {
 		p = 0

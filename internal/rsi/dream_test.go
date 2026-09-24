@@ -177,9 +177,10 @@ func TestDreamSimulator_LoadFromLedgerMalformedRecords(t *testing.T) {
 	sim := NewDreamSimulator(store, nil, nil)
 
 	err := sim.LoadFromLedger(context.Background(), TimeRange{}, 0)
-	// LoadFromLedger should succeed (records are skipped, not fatal).
-	// But since both records are malformed and skipped, we get 0 scenarios.
-	require.NoError(t, err)
+	// Malformed records are skipped rather than fatal, but when nothing
+	// usable remains the caller is told explicitly (ErrNoScenarios) instead
+	// of silently getting an empty replay pool.
+	require.ErrorIs(t, err, ErrNoScenarios)
 	assert.Equal(t, 0, sim.ScenarioCount(), "malformed records should be skipped")
 }
 
@@ -204,8 +205,8 @@ func TestDreamSimulator_ReplayTrafficBasic(t *testing.T) {
 
 	// Policy: route to provider, no cache, no error, latency=120ms.
 	policy := &mockPolicy{
-		provider:  "openai",
-		latency:   120,
+		provider: "openai",
+		latency:  120,
 	}
 
 	metrics_result, err := sim.ReplayTraffic(context.Background(), policy, scenarios)
@@ -300,9 +301,9 @@ func TestDreamSimulator_ReplayTrafficMixedDecisions(t *testing.T) {
 	// Using sequencePolicy to return different decisions per call.
 	policy := &sequencePolicy{
 		responses: []*Response{
-			{Cached: true, LatencyMs: 1.0}, // cache
-			{Cached: true, LatencyMs: 1.0}, // cache
-			{Cached: true, LatencyMs: 1.0}, // cache
+			{Cached: true, LatencyMs: 1.0},       // cache
+			{Cached: true, LatencyMs: 1.0},       // cache
+			{Cached: true, LatencyMs: 1.0},       // cache
 			{Provider: "openai", LatencyMs: 100}, // route
 			{Provider: "openai", LatencyMs: 100}, // route
 			{Provider: "openai", LatencyMs: 100}, // route

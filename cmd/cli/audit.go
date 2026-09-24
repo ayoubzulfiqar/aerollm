@@ -1,14 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
-	"time"
 
-	"github.com/ayoubzulfiqar/aerollm/internal/compliance"
 	"github.com/spf13/cobra"
 )
 
@@ -26,48 +21,23 @@ func newAuditEventsCmd() *cobra.Command {
 	var limit int
 	cmd := &cobra.Command{
 		Use:   "events",
-		Short: "Show recent audit events",
-		Run: func(_ *cobra.Command, _ []string) {
+		Short: "Show recent audit events (/v1/audit/events)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if limit <= 0 {
-				limit = 20
+				return fmt.Errorf("--limit must be positive, got %d", limit)
 			}
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v1/audit/events", func(w http.ResponseWriter, r *http.Request) {
-				if r == nil || r.Body == nil {
-					http.Error(w, `{"error":"missing body"}`, http.StatusBadRequest)
-					return
+			// The endpoint requires a JSON body; send the limit so servers that
+			// support it can apply it, and truncate client-side as well.
+			body := map[string]int{"limit": limit}
+			truncate := func(v any) any {
+				if list, ok := v.([]any); ok && len(list) > limit {
+					return list[:limit]
 				}
-				defer r.Body.Close()
-				var req struct{}
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
-					return
-				}
-				logger := compliance.NewMemoryAuditLogger()
-				logger.Log(&compliance.AuditEvent{Timestamp: time.Now(), Policy: "default", Decision: "allow", Reason: "audit endpoint"})
-				events := logger.Events()
-				if limit > 0 && len(events) > limit {
-					events = events[:limit]
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(events)
-			})
-			server := httptest.NewServer(mux)
-			defer server.Close()
-
-			client := server.Client()
-			body := strings.NewReader("{}")
-			req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/audit/events", body)
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+				return v
 			}
-			defer resp.Body.Close()
-			buf := make([]byte, 4096)
-			n, _ := resp.Body.Read(buf)
-			fmt.Println(strings.TrimSpace(string(buf[:n])))
+			return serverRequest(cmd, http.MethodPost, "/v1/audit/events", nil, body, formatTable,
+				[]string{"Timestamp", "Policy", "Decision", "Reason"}, truncate)
 		},
 	}
 	cmd.Flags().IntVarP(&limit, "limit", "l", 20, "max events to return")

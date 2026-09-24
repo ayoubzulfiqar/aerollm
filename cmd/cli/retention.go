@@ -1,10 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
+	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/retention"
 	"github.com/spf13/cobra"
@@ -16,31 +16,40 @@ func newRetentionCmd() *cobra.Command {
 	var maxItems int
 	cmd := &cobra.Command{
 		Use:   "retention",
-		Short: "Manage data retention policies",
+		Short: "List, get or upsert data retention policies (/v1/retention)",
+		Example: `  aerollm retention
+  aerollm retention --id logs-30d --resource request_logs --ttl 720 --max-items 100000`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store := retention.NewRetentionStore()
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v1/retention", retention.WebhookHandler(store))
-
-			if id != "" && resource != "" {
-				body := fmt.Sprintf(`{"id":"%s","resource":"%s","ttl":%d,"max_items":%d}`, id, resource, ttl, maxItems)
-				req := httptest.NewRequest(http.MethodPost, "/v1/retention", strings.NewReader(body))
-				req.Header.Set("Content-Type", "application/json")
-				rec := httptest.NewRecorder()
-				mux.ServeHTTP(rec, req)
-				fmt.Println(rec.Body.String())
-				return nil
+			if resource != "" {
+				if id == "" {
+					return errors.New("--id is required when creating a policy")
+				}
+				if ttl <= 0 {
+					return fmt.Errorf("--ttl must be a positive number of hours, got %d", ttl)
+				}
+				if maxItems < 0 {
+					return fmt.Errorf("--max-items must not be negative, got %d", maxItems)
+				}
+				// RetentionPolicy.TTL is a time.Duration, which JSON encodes as
+				// nanoseconds: convert the hours given on the command line.
+				p := retention.RetentionPolicy{
+					ID:       id,
+					Resource: resource,
+					TTL:      time.Duration(ttl) * time.Hour,
+					MaxItems: maxItems,
+				}
+				return serverRequest(cmd, http.MethodPost, "/v1/retention", nil, p, formatJSON, nil, nil)
 			}
-
-			req := httptest.NewRequest(http.MethodGet, "/v1/retention", nil)
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			fmt.Println(rec.Body.String())
-			return nil
+			if id != "" {
+				return serverRequest(cmd, http.MethodGet, "/v1/retention", idQuery(id), nil, formatJSON, nil, nil)
+			}
+			return serverRequest(cmd, http.MethodGet, "/v1/retention", nil, nil, formatTable,
+				[]string{"id", "resource", "ttl", "max_items", "created_at"}, nil)
 		},
 	}
 	cmd.Flags().StringVarP(&id, "id", "i", "", "policy id")
-	cmd.Flags().StringVarP(&resource, "resource", "r", "", "resource name")
+	cmd.Flags().StringVarP(&resource, "resource", "r", "", "resource name (creates/updates the policy)")
 	cmd.Flags().IntVarP(&ttl, "ttl", "t", 24, "time-to-live in hours")
 	cmd.Flags().IntVarP(&maxItems, "max-items", "m", 1000, "maximum items to retain")
 

@@ -3,10 +3,18 @@ package webhooks
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	mrand "math/rand/v2"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/pkg/telemetry"
@@ -17,9 +25,10 @@ import (
 type EventType string
 
 const (
-	EventBudgetExceeded       EventType = "budget_exceeded"
+	EventBudgetExceeded        EventType = "budget_exceeded"
+	EventBudgetThreshold       EventType = "budget_threshold_reached"
 	EventAgentRequiresApproval EventType = "agent_requires_approval"
-	EventShadowTestCompleted  EventType = "shadow_test_completed"
+	EventShadowTestCompleted   EventType = "shadow_test_completed"
 )
 
 // Event represents a webhook event.
@@ -31,12 +40,31 @@ type Event struct {
 }
 
 // WebhookConfig holds webhook endpoint configuration.
+//
+// Retries is the maximum number of delivery attempts (values <= 0 mean a
+// single attempt). RetryDelay is the base delay of the exponential backoff
+// between attempts. When Secret is set every delivery is signed (see Sign).
 type WebhookConfig struct {
 	URL        string
 	Secret     string
 	Timeout    time.Duration
 	Retries    int
 	RetryDelay time.Duration
+}
+
+// Validate checks that the endpoint URL is an absolute http(s) URL.
+func (c WebhookConfig) Validate() error {
+	u, err := url.Parse(c.URL)
+	if err != nil {
+		return fmt.Errorf("webhooks: invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("webhooks: unsupported url scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("webhooks: url has no host")
+	}
+	return nil
 }
 
 // BudgetWebhookConfig holds budget webhook target configuration.
@@ -48,15 +76,108 @@ type BudgetWebhookConfig struct {
 	RetryDelay time.Duration
 }
 
-// WebhookDispatcher dispatches webhook events asynchronously.
+// WebhookConfig converts the budget target into a generic WebhookConfig.
+func (c BudgetWebhookConfig) WebhookConfig() WebhookConfig {
+	return WebhookConfig{URL: c.URL, Secret: c.Secret, Timeout: c.Timeout, Retries: c.Retries, RetryDelay: c.RetryDelay}
+}
+
+// DispatcherOptions tunes the asynchronous delivery pool.
+type DispatcherOptions struct {
+	// Workers is the number of concurrent delivery goroutines (default 8).
+	Workers int
+	// QueueSize bounds the number of pending deliveries; further events are
+	// dropped and counted (default 1024).
+	QueueSize int
+	// MaxRetryDelay caps the exponential backoff (default 30s).
+	MaxRetryDelay time.Duration
+	// HTTPClient overrides the HTTP client. Redirects are never followed by
+	// the default client.
+	HTTPClient *http.Client
+}
+
+// DispatcherStats is a snapshot of delivery counters.
+type DispatcherStats struct {
+	Delivered int64 `json:"delivered"`
+	Failed    int64 `json:"failed"`
+	Dropped   int64 `json:"dropped"`
+	Pending   int64 `json:"pending"`
+}
+
+var (
+	// ErrDispatcherClosed is returned when dispatching after Shutdown.
+	ErrDispatcherClosed = errors.New("webhooks: dispatcher closed")
+	// ErrQueueEmpty is returned by WebhookQueue.Dequeue when no event arrived
+	// within the blocking timeout.
+	ErrQueueEmpty = errors.New("webhooks: queue empty")
+	// ErrMalformedEvent is returned by Dequeue when a queued payload could
+	// not be decoded; the message has been consumed and is dropped.
+	ErrMalformedEvent = errors.New("webhooks: malformed queued event")
+	// ErrNoRedisClient is returned by RedisWebhookQueue without a client.
+	ErrNoRedisClient = errors.New("webhooks: redis client not configured")
+)
+
+type deliveryJob struct {
+	ctx   context.Context
+	cfg   WebhookConfig
+	event Event
+}
+
+// WebhookDispatcher dispatches webhook events asynchronously through a
+// bounded worker pool with signed payloads and exponential backoff.
 type WebhookDispatcher struct {
 	mu      sync.RWMutex
 	configs map[EventType][]WebhookConfig
+
+	opts   DispatcherOptions
+	client *http.Client
+
+	startOnce sync.Once
+	jobs      chan deliveryJob
+	quit      chan struct{}
+	quitOnce  sync.Once
+	closed    atomic.Bool
+	workers   sync.WaitGroup
+	lifeCtx   context.Context
+	lifeStop  context.CancelFunc
+
+	delivered atomic.Int64
+	failed    atomic.Int64
+	dropped   atomic.Int64
+	pending   atomic.Int64
 }
 
-// NewWebhookDispatcher creates a new webhook dispatcher.
+// NewWebhookDispatcher creates a new webhook dispatcher with default options.
 func NewWebhookDispatcher() *WebhookDispatcher {
-	return &WebhookDispatcher{configs: make(map[EventType][]WebhookConfig)}
+	return NewWebhookDispatcherWithOptions(DispatcherOptions{})
+}
+
+// NewWebhookDispatcherWithOptions creates a dispatcher with explicit pool options.
+func NewWebhookDispatcherWithOptions(opts DispatcherOptions) *WebhookDispatcher {
+	if opts.Workers <= 0 {
+		opts.Workers = 8
+	}
+	if opts.QueueSize <= 0 {
+		opts.QueueSize = 1024
+	}
+	if opts.MaxRetryDelay <= 0 {
+		opts.MaxRetryDelay = 30 * time.Second
+	}
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+	}
+	lifeCtx, stop := context.WithCancel(context.Background())
+	return &WebhookDispatcher{
+		configs:  make(map[EventType][]WebhookConfig),
+		opts:     opts,
+		client:   client,
+		jobs:     make(chan deliveryJob, opts.QueueSize),
+		quit:     make(chan struct{}),
+		lifeCtx:  lifeCtx,
+		lifeStop: stop,
+	}
 }
 
 // Register registers a webhook URL for an event type.
@@ -66,107 +187,419 @@ func (d *WebhookDispatcher) Register(eventType EventType, cfg WebhookConfig) {
 	d.configs[eventType] = append(d.configs[eventType], cfg)
 }
 
-// DispatchAsync sends an event asynchronously to all registered webhooks.
-func (d *WebhookDispatcher) DispatchAsync(ctx context.Context, event Event) {
-	d.mu.RLock()
-	configs := d.configs[event.Type]
-	d.mu.RUnlock()
-
-	for _, cfg := range configs {
-		go func(cfg WebhookConfig) {
-			_ = d.sendWithRetry(ctx, cfg, event)
-		}(cfg)
-	}
-}
-
-// sendWithRetry delivers the event payload with retry logic.
-func (d *WebhookDispatcher) sendWithRetry(ctx context.Context, cfg WebhookConfig, event Event) error {
-	var lastErr error
-	retries := cfg.Retries
-	if retries <= 0 {
-		retries = 1
-	}
-	delay := cfg.RetryDelay
-	if delay <= 0 {
-		delay = 200 * time.Millisecond
-	}
-
-	for attempt := 0; attempt < retries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
-			}
-			delay = delay * 2
-		}
-		if err := d.send(ctx, cfg, event); err != nil {
-			lastErr = err
-			telemetry.RecordError()
-			continue
-		}
-		return nil
-	}
-	return fmt.Errorf("webhook delivery failed after %d attempts: %w", retries, lastErr)
-}
-
-// send delivers the event payload to the webhook URL.
-func (d *WebhookDispatcher) send(ctx context.Context, cfg WebhookConfig, event Event) error {
-	data, _ := json.Marshal(event)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Webhook-Secret", cfg.Secret)
-
-	client := &http.Client{Timeout: cfg.Timeout}
-	resp, err := client.Do(req)
-	if err != nil {
+// RegisterChecked validates cfg before registering it.
+func (d *WebhookDispatcher) RegisterChecked(eventType EventType, cfg WebhookConfig) error {
+	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	d.Register(eventType, cfg)
+	return nil
+}
 
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("webhook returned status %d", resp.StatusCode)
+func (d *WebhookDispatcher) targets(eventType EventType) []WebhookConfig {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	src := d.configs[eventType]
+	out := make([]WebhookConfig, len(src))
+	copy(out, src)
+	return out
+}
+
+// DispatchAsync queues the event for every webhook registered for its type.
+// It never blocks: when the delivery queue is full the delivery is dropped
+// and counted in Stats().Dropped. Delivery is detached from ctx cancellation
+// (the caller's request usually finishes first) but stops on Shutdown.
+func (d *WebhookDispatcher) DispatchAsync(ctx context.Context, event Event) {
+	event = normalizeEvent(event)
+	for _, cfg := range d.targets(event.Type) {
+		_ = d.enqueue(ctx, deliveryJob{ctx: ctx, cfg: cfg, event: event}, false)
+	}
+}
+
+// DispatchToAsync queues the event for a single explicit endpoint, regardless
+// of the registrations for its type.
+func (d *WebhookDispatcher) DispatchToAsync(ctx context.Context, cfg WebhookConfig, event Event) {
+	_ = d.enqueue(ctx, deliveryJob{ctx: ctx, cfg: cfg, event: normalizeEvent(event)}, false)
+}
+
+// Dispatch delivers the event synchronously to every registered webhook,
+// honoring ctx for cancellation, and returns the joined delivery errors.
+func (d *WebhookDispatcher) Dispatch(ctx context.Context, event Event) error {
+	event = normalizeEvent(event)
+	var errs []error
+	for _, cfg := range d.targets(event.Type) {
+		if err := d.sendWithRetry(ctx, cfg, event); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (d *WebhookDispatcher) enqueue(ctx context.Context, job deliveryJob, block bool) error {
+	if d.closed.Load() {
+		d.dropped.Add(1)
+		return ErrDispatcherClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+		job.ctx = ctx
+	}
+	d.startOnce.Do(d.startWorkers)
+	d.pending.Add(1)
+	if block {
+		select {
+		case d.jobs <- job:
+			return nil
+		case <-ctx.Done():
+		case <-d.quit:
+		}
+	} else {
+		select {
+		case d.jobs <- job:
+			return nil
+		default:
+		}
+	}
+	d.pending.Add(-1)
+	d.dropped.Add(1)
+	telemetry.RecordError()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errors.New("webhooks: delivery queue full")
+}
+
+func (d *WebhookDispatcher) startWorkers() {
+	for i := 0; i < d.opts.Workers; i++ {
+		d.workers.Add(1)
+		go d.worker()
+	}
+}
+
+func (d *WebhookDispatcher) worker() {
+	defer d.workers.Done()
+	for {
+		select {
+		case job := <-d.jobs:
+			d.process(job)
+		case <-d.quit:
+			// Drain whatever is already queued, then exit.
+			for {
+				select {
+				case job := <-d.jobs:
+					d.process(job)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (d *WebhookDispatcher) process(job deliveryJob) {
+	defer d.pending.Add(-1)
+	parent := context.WithoutCancel(job.ctx)
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(d.lifeCtx, cancel)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	_ = d.sendWithRetry(ctx, job.cfg, job.event)
+}
+
+// Flush waits until every queued delivery has finished or ctx is done.
+func (d *WebhookDispatcher) Flush(ctx context.Context) error {
+	t := time.NewTicker(5 * time.Millisecond)
+	defer t.Stop()
+	for d.pending.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
 	}
 	return nil
 }
 
+// Shutdown stops accepting events, delivers what is already queued and
+// waits for the workers. When ctx expires in-flight retries are aborted.
+func (d *WebhookDispatcher) Shutdown(ctx context.Context) error {
+	d.closed.Store(true)
+	d.quitOnce.Do(func() { close(d.quit) })
+	done := make(chan struct{})
+	go func() {
+		d.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		d.lifeStop()
+		return nil
+	case <-ctx.Done():
+		d.lifeStop()
+		<-done
+		return ctx.Err()
+	}
+}
+
+// Close shuts the dispatcher down, allowing up to 10s for queued deliveries.
+func (d *WebhookDispatcher) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return d.Shutdown(ctx)
+}
+
+// Stats returns delivery counters.
+func (d *WebhookDispatcher) Stats() DispatcherStats {
+	return DispatcherStats{
+		Delivered: d.delivered.Load(),
+		Failed:    d.failed.Load(),
+		Dropped:   d.dropped.Load(),
+		Pending:   d.pending.Load(),
+	}
+}
+
+func normalizeEvent(event Event) Event {
+	if event.ID == "" {
+		event.ID = "evt_" + randomHex(12)
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	return event
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b)
+}
+
+// permanentError marks a delivery failure that must not be retried.
+type permanentError struct{ err error }
+
+func (p permanentError) Error() string { return p.err.Error() }
+func (p permanentError) Unwrap() error { return p.err }
+
+// sendWithRetry delivers the event payload with exponential backoff + jitter.
+func (d *WebhookDispatcher) sendWithRetry(ctx context.Context, cfg WebhookConfig, event Event) error {
+	if err := cfg.Validate(); err != nil {
+		d.failed.Add(1)
+		telemetry.RecordError()
+		return err
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		d.failed.Add(1)
+		telemetry.RecordError()
+		return fmt.Errorf("webhooks: marshal event: %w", err)
+	}
+	attempts := cfg.Retries
+	if attempts <= 0 {
+		attempts = 1
+	}
+	base := cfg.RetryDelay
+	if base <= 0 {
+		base = 200 * time.Millisecond
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			wait := backoffDelay(base, attempt, d.opts.MaxRetryDelay)
+			var ra retryAfterError
+			if errors.As(lastErr, &ra) && ra.after > wait {
+				wait = min(ra.after, d.opts.MaxRetryDelay)
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				d.failed.Add(1)
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		err := d.send(ctx, cfg, event, body)
+		if err == nil {
+			d.delivered.Add(1)
+			return nil
+		}
+		lastErr = err
+		telemetry.RecordError()
+		var perm permanentError
+		if errors.As(err, &perm) || ctx.Err() != nil {
+			break
+		}
+	}
+	d.failed.Add(1)
+	return fmt.Errorf("webhook delivery failed after retries: %w", lastErr)
+}
+
+// backoffDelay returns base*2^(attempt-1) capped at max, with "equal jitter"
+// (a uniformly random value in [d/2, d]).
+func backoffDelay(base time.Duration, attempt int, max time.Duration) time.Duration {
+	d := base
+	for i := 1; i < attempt && d < max; i++ {
+		d *= 2
+	}
+	if d > max || d <= 0 {
+		d = max
+	}
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + time.Duration(mrand.Int64N(int64(half)+1))
+}
+
+type retryAfterError struct {
+	status int
+	after  time.Duration
+}
+
+func (r retryAfterError) Error() string {
+	return fmt.Sprintf("webhook returned status %d", r.status)
+}
+
+// send performs a single signed delivery attempt.
+func (d *WebhookDispatcher) send(ctx context.Context, cfg WebhookConfig, event Event, body []byte) error {
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(body))
+	if err != nil {
+		return permanentError{fmt.Errorf("webhooks: build request: %w", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "AeroLLM-Webhooks/1.0")
+	req.Header.Set(EventHeader, string(event.Type))
+	req.Header.Set(DeliveryHeader, event.ID)
+	SetSignatureHeaders(req.Header, cfg.Secret, body, time.Now())
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500:
+		ra := retryAfterError{status: resp.StatusCode}
+		if s := resp.Header.Get("Retry-After"); s != "" {
+			if secs, err := strconv.Atoi(s); err == nil && secs > 0 {
+				ra.after = time.Duration(secs) * time.Second
+			}
+		}
+		return ra
+	default:
+		return permanentError{fmt.Errorf("webhook returned status %d", resp.StatusCode)}
+	}
+}
+
 // WebhookQueue is the interface for persistent webhook queues.
+//
+// Dequeue should block for a bounded time and return ErrQueueEmpty when no
+// event arrived, so that workers can observe context cancellation.
 type WebhookQueue interface {
 	Enqueue(ctx context.Context, event Event) error
 	Dequeue(ctx context.Context) (Event, error)
 }
 
-// RedisWebhookQueue implements WebhookQueue using a Redis list.
-type RedisWebhookQueue struct {
-	client *redis.Client
-	key    string
+// RedisListClient is the subset of the go-redis client used by RedisWebhookQueue.
+type RedisListClient interface {
+	LPush(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
+	BRPop(ctx context.Context, timeout time.Duration, keys ...string) *redis.StringSliceCmd
 }
 
-// NewRedisWebhookQueue creates a new Redis-backed webhook queue.
+// RedisWebhookQueue implements WebhookQueue using a Redis list.
+type RedisWebhookQueue struct {
+	client       RedisListClient
+	key          string
+	blockTimeout time.Duration
+}
+
+// NewRedisWebhookQueue creates a new Redis-backed webhook queue. A nil client
+// yields a queue whose operations return ErrNoRedisClient.
 func NewRedisWebhookQueue(client *redis.Client, key string) *RedisWebhookQueue {
-	return &RedisWebhookQueue{client: client, key: key}
+	if client == nil {
+		return NewRedisWebhookQueueWithClient(nil, key)
+	}
+	return NewRedisWebhookQueueWithClient(client, key)
+}
+
+// NewRedisWebhookQueueWithClient creates a queue over any RedisListClient.
+func NewRedisWebhookQueueWithClient(client RedisListClient, key string) *RedisWebhookQueue {
+	if key == "" {
+		key = "webhook:queue"
+	}
+	return &RedisWebhookQueue{client: client, key: key, blockTimeout: 2 * time.Second}
 }
 
 // Enqueue pushes an event onto the queue.
 func (q *RedisWebhookQueue) Enqueue(ctx context.Context, event Event) error {
-	data, err := json.Marshal(event)
+	if q == nil || q.client == nil {
+		return ErrNoRedisClient
+	}
+	data, err := json.Marshal(normalizeEvent(event))
 	if err != nil {
 		return err
 	}
 	return q.client.LPush(ctx, q.key, data).Err()
 }
 
-// Dequeue pops an event from the queue with blocking semantics.
+// Dequeue pops an event, blocking for at most the queue's block timeout.
+// It returns ErrQueueEmpty when nothing arrived in time.
 func (q *RedisWebhookQueue) Dequeue(ctx context.Context) (Event, error) {
-	result, err := q.client.BRPop(ctx, 0, q.key).Result()
+	if q == nil || q.client == nil {
+		return Event{}, ErrNoRedisClient
+	}
+	result, err := q.client.BRPop(ctx, q.blockTimeout, q.key).Result()
+	if errors.Is(err, redis.Nil) {
+		return Event{}, ErrQueueEmpty
+	}
 	if err != nil {
 		return Event{}, err
 	}
+	if len(result) < 2 {
+		return Event{}, ErrMalformedEvent
+	}
 	var event Event
 	if err := json.Unmarshal([]byte(result[1]), &event); err != nil {
-		return Event{}, err
+		return Event{}, fmt.Errorf("%w: %v", ErrMalformedEvent, err)
 	}
 	return event, nil
+}
+
+// QueueDispatcher publishes events to a persistent WebhookQueue (drained by
+// WebhookDispatcher.StartWorker), falling back to direct asynchronous
+// delivery when the queue is unavailable.
+type QueueDispatcher struct {
+	Queue    WebhookQueue
+	Fallback *WebhookDispatcher
+}
+
+// DispatchAsync implements the dispatcher contract used by finops and others.
+func (q *QueueDispatcher) DispatchAsync(ctx context.Context, event Event) {
+	if q.Queue != nil {
+		if err := q.Queue.Enqueue(context.WithoutCancel(ctx), event); err == nil {
+			return
+		}
+		telemetry.RecordError()
+	}
+	if q.Fallback != nil {
+		q.Fallback.DispatchAsync(ctx, event)
+	}
 }
 
 // StartWorker begins a background worker that processes webhook events from the queue.
@@ -175,21 +608,62 @@ func (d *WebhookDispatcher) StartWorker(ctx context.Context, queue WebhookQueue)
 	d.StartWorkerWithWaitGroup(ctx, queue, &wg)
 }
 
-// StartWorkerWithWaitGroup begins a background worker and tracks it in the provided WaitGroup.
+// StartWorkerWithWaitGroup begins a background worker and tracks it in the
+// provided WaitGroup. The worker exits promptly when ctx is cancelled, backs
+// off exponentially (100ms..5s) on queue errors and never busy-loops.
 func (d *WebhookDispatcher) StartWorkerWithWaitGroup(ctx context.Context, queue WebhookQueue, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		const (
+			emptyWait  = 50 * time.Millisecond
+			minBackoff = 100 * time.Millisecond
+			maxBackoff = 5 * time.Second
+		)
+		backoff := minBackoff
+		wait := func(dur time.Duration) bool {
+			t := time.NewTimer(dur)
+			defer t.Stop()
+			select {
+			case <-ctx.Done():
+				return false
+			case <-t.C:
+				return true
+			}
+		}
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			event, err := queue.Dequeue(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				time.Sleep(500 * time.Millisecond)
+				switch {
+				case errors.Is(err, ErrMalformedEvent):
+					telemetry.RecordError()
+					continue
+				case errors.Is(err, ErrQueueEmpty):
+					backoff = minBackoff
+					if !wait(emptyWait) {
+						return
+					}
+				default:
+					if !wait(backoff) {
+						return
+					}
+					backoff = min(backoff*2, maxBackoff)
+				}
 				continue
 			}
-			d.DispatchAsync(ctx, event)
+			backoff = minBackoff
+			event = normalizeEvent(event)
+			for _, cfg := range d.targets(event.Type) {
+				// Block (bounded by ctx) rather than drop: the event came
+				// from a durable queue and has already been consumed.
+				_ = d.enqueue(ctx, deliveryJob{ctx: ctx, cfg: cfg, event: event}, true)
+			}
 		}
 	}()
 }

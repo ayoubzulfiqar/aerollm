@@ -14,8 +14,8 @@ func TestLookupExactMatch(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find gpt-4o")
 	}
-	if cost.InputCostPer1M != 5.0 {
-		t.Fatalf("expected input cost 5.0, got %f", cost.InputCostPer1M)
+	if cost.InputCostPer1M != 2.5 {
+		t.Fatalf("expected input cost 2.5, got %f", cost.InputCostPer1M)
 	}
 	if cost.MaxContextWindow != 128000 {
 		t.Fatalf("expected context window 128000, got %d", cost.MaxContextWindow)
@@ -58,10 +58,10 @@ func TestCalculateCost(t *testing.T) {
 		PromptTokens:     1000,
 		CompletionTokens: 500,
 	}
-	// gpt-4o: input 5.0/1M, output 15.0/1M
-	// Cost = (1000/1M * 5.0) + (500/1M * 15.0) = 0.005 + 0.0075 = 0.0125
+	// gpt-4o: input 2.50/1M, output 10.00/1M
+	// Cost = (1000/1M * 2.5) + (500/1M * 10.0) = 0.0025 + 0.005 = 0.0075
 	cost := m.CalculateCost("gpt-4o", usage)
-	expected := 0.0125
+	expected := 0.0075
 	if !approxEqual(cost, expected, 0.0001) {
 		t.Fatalf("expected cost ~%.4f, got %.4f", expected, cost)
 	}
@@ -86,7 +86,7 @@ func TestCalculateCostUnknownModel(t *testing.T) {
 	}
 	// Should use default pricing (0.01/1M input, 0.02/1M output).
 	cost := m.CalculateCost("unknown-model", usage)
-	expected := (1000.0/1_000_000.0 * 0.01) + (500.0/1_000_000.0 * 0.02)
+	expected := (1000.0 / 1_000_000.0 * 0.01) + (500.0 / 1_000_000.0 * 0.02)
 	if !approxEqual(cost, expected, 0.0001) {
 		t.Fatalf("expected cost ~%.6f, got %.6f", expected, cost)
 	}

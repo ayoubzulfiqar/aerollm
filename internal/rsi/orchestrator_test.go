@@ -31,6 +31,26 @@ func newTestOrchestratorNoData(config RSIConfig) *RSIOrchestrator {
 	return NewRSIOrchestrator(store, metrics, costCalc, providers, config)
 }
 
+// improvableBase returns a deliberately poor (non-caching) base policy whose
+// mutation (mockPolicy.Mutate turns caching on) is strictly better on every
+// scenario, so a cycle has a genuine, significant improvement to deploy.
+func improvableBase(HeadroomDimension) Policy {
+	return &mockPolicy{provider: "openai", cached: false, latency: 100}
+}
+
+// deployableConfig is a config under which improvableBase's mutation passes
+// every deploy gate with 20 test records (10 held-out samples).
+func deployableConfig() RSIConfig {
+	return RSIConfig{
+		ImprovementThresholdPct: 0.0,
+		BroadIterations:         3,
+		DeepIterations:          1,
+		KFold:                   2,
+		HeadroomThreshold:       0.0,
+		MinSamples:              5,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NewRSIOrchestrator Tests
 // ---------------------------------------------------------------------------
@@ -103,13 +123,8 @@ func TestRunCycle_EmptyLedger(t *testing.T) {
 func TestRunCycle_DeployTriggered(t *testing.T) {
 	now := time.Now()
 	records := makeLedgerRecords(20, "openai", "gpt-4o", now)
-	orch := newTestOrchestrator(records, RSIConfig{
-		ImprovementThresholdPct: 0.0, // always below threshold → deploy
-		BroadIterations:         3,
-		DeepIterations:          1,
-		KFold:                   2,
-		HeadroomThreshold:       0.0,
-	})
+	orch := newTestOrchestrator(records, deployableConfig())
+	orch.SetBasePolicyFunc(improvableBase)
 
 	var deployed bool
 	orch.OnDeploy = func(_ context.Context, policy Policy, cycle RSICycle) error {
@@ -121,6 +136,10 @@ func TestRunCycle_DeployTriggered(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, deployed, "OnDeploy should be called when improvement exceeds threshold")
 	assert.True(t, cycle.Deployed, "cycle.Deployed should be true")
+	assert.Equal(t, DecisionDeployed, cycle.DeployDecision)
+	assert.Greater(t, cycle.ImprovementPct, 0.0)
+	assert.True(t, cycle.Significant)
+	assert.Equal(t, 10, cycle.HoldoutSamples)
 }
 
 func TestRunCycle_DeployNotTriggered_BelowThreshold(t *testing.T) {
@@ -149,13 +168,8 @@ func TestRunCycle_DeployNotTriggered_BelowThreshold(t *testing.T) {
 func TestRunCycle_DeployError(t *testing.T) {
 	now := time.Now()
 	records := makeLedgerRecords(20, "openai", "gpt-4o", now)
-	orch := newTestOrchestrator(records, RSIConfig{
-		ImprovementThresholdPct: 0.0,
-		BroadIterations:         3,
-		DeepIterations:          1,
-		KFold:                   2,
-		HeadroomThreshold:       0.0,
-	})
+	orch := newTestOrchestrator(records, deployableConfig())
+	orch.SetBasePolicyFunc(improvableBase)
 
 	orch.OnDeploy = func(_ context.Context, policy Policy, cycle RSICycle) error {
 		return assert.AnError
@@ -323,13 +337,8 @@ func TestDeployedPolicy_NilInitially(t *testing.T) {
 func TestDeployedPolicy_SetAfterDeploy(t *testing.T) {
 	now := time.Now()
 	records := makeLedgerRecords(20, "openai", "gpt-4o", now)
-	orch := newTestOrchestrator(records, RSIConfig{
-		ImprovementThresholdPct: 0.0,
-		BroadIterations:         3,
-		DeepIterations:          1,
-		KFold:                   2,
-		HeadroomThreshold:       0.0,
-	})
+	orch := newTestOrchestrator(records, deployableConfig())
+	orch.SetBasePolicyFunc(improvableBase)
 
 	orch.OnDeploy = func(_ context.Context, policy Policy, _ RSICycle) error { return nil }
 	orch.RunCycle(context.Background())
@@ -396,14 +405,21 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go orch.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		orch.Run(ctx)
+		close(done)
+	}()
 
 	// Let it run for a short time.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
-	// Give it a moment to stop.
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after context cancellation")
+	}
 
 	// Verify cycles were recorded.
 	assert.Greater(t, len(orch.Cycles()), 0)
@@ -515,7 +531,7 @@ func TestConfig_SetAndRetrieve(t *testing.T) {
 		KFold:                   5,
 		HeadroomThreshold:       0.2,
 	}
-	orch.SetConfig(newCfg)
+	require.NoError(t, orch.SetConfig(newCfg))
 
 	cfg := orch.Config()
 	assert.Equal(t, 10.0, cfg.ImprovementThresholdPct)
@@ -532,13 +548,13 @@ func TestConfig_SetConfigAffectsRunCycle(t *testing.T) {
 	orch := newTestOrchestrator(records, DefaultRSIConfig())
 
 	// Lower the headroom threshold to force exploration.
-	orch.SetConfig(RSIConfig{
-		ImprovementThresholdPct: 1_000_000.0,
+	require.NoError(t, orch.SetConfig(RSIConfig{
+		ImprovementThresholdPct: 1000.0,
 		BroadIterations:         3,
 		DeepIterations:          1,
 		KFold:                   2,
-		HeadroomThreshold:       -1.0,
-	})
+		HeadroomThreshold:       0.0,
+	}))
 
 	cycle, err := orch.RunCycle(context.Background())
 	require.NoError(t, err)

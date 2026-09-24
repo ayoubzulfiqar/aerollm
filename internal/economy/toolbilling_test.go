@@ -46,6 +46,7 @@ func TestBillToolCallSkipsFreeTool(t *testing.T) {
 
 func TestToolCallInterceptorMarksBilled(t *testing.T) {
 	store := NewInMemoryWalletStore()
+	_ = store.SetBalance(context.Background(), "caller", 5)
 	pricing := NewInMemoryPricingStore()
 	pricing.Set(PluginPricing{PluginID: "weather", PricePerCall: 1, CreatorID: "creator"})
 	interceptor := ToolCallInterceptor(NewToolCallBilling(store, pricing))
@@ -60,6 +61,14 @@ func TestToolCallInterceptorMarksBilled(t *testing.T) {
 	}
 	if billed, _ := out["economy_billed"].(bool); !billed {
 		t.Fatalf("expected economy_billed flag")
+	}
+	if _, mutated := payload["economy_billed"]; mutated {
+		t.Fatalf("interceptor must not mutate the caller's payload")
+	}
+	callerBal, _ := store.Balance(context.Background(), "caller")
+	creatorBal, _ := store.Balance(context.Background(), "creator")
+	if callerBal != 4 || creatorBal != 1 {
+		t.Fatalf("interceptor did not bill: caller=%v creator=%v", callerBal, creatorBal)
 	}
 }
 

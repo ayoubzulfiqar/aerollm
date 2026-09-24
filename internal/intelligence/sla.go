@@ -2,10 +2,15 @@ package intelligence
 
 import (
 	"context"
-	"sort"
+	"errors"
 )
 
-// SLA defines service-level requirements for a request.
+// ErrNoCandidateMeetsSLA is returned when no available option satisfies the
+// SLA's hard requirements.
+var ErrNoCandidateMeetsSLA = errors.New("intelligence: no candidate meets the SLA")
+
+// SLA defines service-level requirements for a request. Zero or negative
+// limits are unset.
 type SLA struct {
 	MaxLatencyMs   float64
 	MaxBudgetUSD   float64
@@ -27,11 +32,18 @@ func NewSLASelector() *SLASelector {
 	return &SLASelector{}
 }
 
-// Select picks the cheapest available option that meets the SLA requirements.
+// Select picks the best available option that meets the SLA requirements:
+// the cheapest when sla.PreferCheapest, otherwise the highest quality. SLA
+// limits are hard requirements: it returns ErrNoCandidates for an empty list
+// and ErrNoCandidateMeetsSLA when no available option satisfies them.
 func (s *SLASelector) Select(ctx context.Context, opts []ModelOptionWithSLA, sla SLA) (ModelOption, error) {
-	_ = ctx
 	if len(opts) == 0 {
-		return ModelOption{}, context.DeadlineExceeded
+		return ModelOption{}, ErrNoCandidates
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return ModelOption{}, err
+		}
 	}
 
 	var candidates []ModelOption
@@ -39,27 +51,13 @@ func (s *SLASelector) Select(ctx context.Context, opts []ModelOptionWithSLA, sla
 		if !opt.Available {
 			continue
 		}
-		if sla.MinQuality > 0 && opt.Quality < sla.MinQuality {
-			continue
+		if meetsLimits(opt.ModelOption, sla.MaxBudgetUSD, sla.MaxLatencyMs, sla.MinQuality) {
+			candidates = append(candidates, opt.ModelOption)
 		}
-		if sla.MaxLatencyMs > 0 && opt.Latency > sla.MaxLatencyMs {
-			continue
-		}
-		if sla.MaxBudgetUSD > 0 && opt.Cost > sla.MaxBudgetUSD {
-			continue
-		}
-		candidates = append(candidates, opt.ModelOption)
 	}
-
 	if len(candidates) == 0 {
-		return opts[0].ModelOption, nil
+		return ModelOption{}, ErrNoCandidateMeetsSLA
 	}
-
-	if sla.PreferCheapest {
-		sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Cost < candidates[j].Cost })
-		return candidates[0], nil
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Quality > candidates[j].Quality })
+	rankOptions(candidates, sla.PreferCheapest)
 	return candidates[0], nil
 }

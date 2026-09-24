@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"encoding/json"
+	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"strings"
 )
 

@@ -113,7 +113,7 @@ func TestRSIHandler_Cycles_WithHistory(t *testing.T) {
 		BroadIterations:         2,
 		DeepIterations:          1,
 		KFold:                   2,
-		HeadroomThreshold:       -1.0,
+		HeadroomThreshold:       0.0,
 	})
 	_, _ = orch.RunCycle(context.Background())
 
@@ -152,7 +152,7 @@ func TestRSIHandler_CurrentCycle_WithCycle(t *testing.T) {
 		BroadIterations:         2,
 		DeepIterations:          1,
 		KFold:                   2,
-		HeadroomThreshold:       -1.0,
+		HeadroomThreshold:       0.0,
 	})
 	_, _ = orch.RunCycle(context.Background())
 
@@ -252,10 +252,10 @@ func makeSimpleLedgerRecords(n int, ts time.Time) []ledger.LedgerRecord {
 	records := make([]ledger.LedgerRecord, n)
 	for i := range records {
 		records[i] = ledger.LedgerRecord{
-			Timestamp:         ts,
-			RequestPayload:    `{"model":"gpt-4o","messages":[{"role":"user","content":"test"}]}`,
-			ResponsePayload:   `{"id":"resp-1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"ok"}}]}`,
-			ChainHash:         "hash",
+			Timestamp:       ts,
+			RequestPayload:  `{"model":"gpt-4o","messages":[{"role":"user","content":"test"}]}`,
+			ResponsePayload: `{"id":"resp-1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"ok"}}]}`,
+			ChainHash:       "hash",
 		}
 	}
 	return records

@@ -1,22 +1,28 @@
 package providers
 
 import (
-	"github.com/ayoubzulfiqar/aerollm/internal/models"
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/models"
 )
 
-// AnthropicProvider implements the Provider interface for Anthropic.
+// DefaultAnthropicBaseURL is used when no base URL is configured.
+const DefaultAnthropicBaseURL = "https://api.anthropic.com"
+
+// AnthropicProvider implements the Provider interface for Anthropic's native
+// Messages API, translating OpenAI-style requests and responses.
 type AnthropicProvider struct {
 	BaseURL string
 	APIKey  string
-	Model   string
-	Client  *http.Client
+	// Model is the default model, used when a request names none.
+	Model  string
+	Client *http.Client
+
+	models ModelList
+	health HealthTracker
 }
 
 // NewAnthropicProvider creates a new Anthropic provider.
@@ -25,10 +31,22 @@ func NewAnthropicProvider(baseURL, apiKey, model string) *AnthropicProvider {
 		BaseURL: baseURL,
 		APIKey:  apiKey,
 		Model:   model,
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		Client:  &http.Client{Timeout: 120 * time.Second},
 	}
+}
+
+// AnthropicMessagesURL returns the /v1/messages URL for a base URL given
+// with or without a trailing "/v1".
+func AnthropicMessagesURL(baseURL string) (string, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = DefaultAnthropicBaseURL
+	}
+	u, err := NormalizeBaseURL(baseURL, "")
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/v1")
+	return JoinURL(u, "/v1/messages"), nil
 }
 
 // Name returns the provider name.
@@ -37,54 +55,81 @@ func (p *AnthropicProvider) Name() string { return "anthropic" }
 // Type returns the provider type.
 func (p *AnthropicProvider) Type() ProviderType { return ProviderAnthropic }
 
-// ChatCompletions sends a chat completion request to Anthropic.
-func (p *AnthropicProvider) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+// DefaultModel implements DefaultModeler.
+func (p *AnthropicProvider) DefaultModel() string { return p.Model }
+
+// SetModels overrides which models this provider serves (patterns as in
+// MatchModel). By default it serves "claude*" models and its default model.
+func (p *AnthropicProvider) SetModels(patterns ...string) { p.models.Set(patterns...) }
+
+// SupportsModel implements ModelSupporter.
+func (p *AnthropicProvider) SupportsModel(model string) bool {
+	if model == "" {
+		return p.Model != ""
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	if matched, ok := p.models.Match(model); ok {
+		return matched
 	}
-
-	httpReq.Header.Set("x-api-key", p.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := p.Client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("provider returned error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var llmResp models.LLMResponse
-	if err := json.Unmarshal(respBody, &llmResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &llmResp, nil
+	return MatchModel("claude*", model) || (p.Model != "" && strings.EqualFold(model, p.Model))
 }
 
-// Health returns the current health status of the Anthropic provider.
-func (p *AnthropicProvider) Health() ProviderHealth {
-	return ProviderHealth{
-		Name:        p.Name(),
-		Type:        p.Type(),
-		Healthy:     true,
-		CircuitOpen: false,
+func (p *AnthropicProvider) client() *http.Client {
+	if p.Client != nil {
+		return p.Client
 	}
+	return http.DefaultClient
+}
+
+func (p *AnthropicProvider) prepare(req *models.LLMRequest, stream bool) (string, *AnthropicRequest, error) {
+	endpoint, err := AnthropicMessagesURL(p.BaseURL)
+	if err != nil {
+		return "", nil, &UpstreamError{Provider: p.Name(), StatusCode: http.StatusInternalServerError, Type: "configuration_error", Message: "provider base URL misconfigured: " + err.Error()}
+	}
+	model := ""
+	if req != nil && req.Model == "" {
+		model = p.Model
+	}
+	body, err := BuildAnthropicRequest(p.Name(), req, model, stream)
+	if err != nil {
+		return "", nil, err
+	}
+	return endpoint, body, nil
+}
+
+// ChatCompletions sends a chat completion request to Anthropic.
+func (p *AnthropicProvider) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
+	endpoint, body, err := p.prepare(req, false)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	resp, err := AnthropicMessages(ctx, p.client(), p.Name(), endpoint, AnthropicHeaders(p.APIKey), body)
+	p.health.Observe(time.Since(start), err)
+	return resp, err
+}
+
+// StreamChatCompletions implements StreamingProvider.
+func (p *AnthropicProvider) StreamChatCompletions(ctx context.Context, req *models.LLMRequest) (<-chan models.StreamChunk, error) {
+	endpoint, body, err := p.prepare(req, true)
+	if err != nil {
+		return nil, err
+	}
+	return AnthropicMessagesStream(ctx, p.client(), p.Name(), endpoint, AnthropicHeaders(p.APIKey), body, p.health.Observe)
+}
+
+// Health returns health derived from recent calls.
+func (p *AnthropicProvider) Health() ProviderHealth {
+	h := p.health.Snapshot(p.Name(), p.Type())
+	if _, err := AnthropicMessagesURL(p.BaseURL); err != nil {
+		h.Healthy = false
+	}
+	return h
 }
 
 // Close releases any resources held by the Anthropic provider.
-func (p *AnthropicProvider) Close() error { return nil }
+func (p *AnthropicProvider) Close() error {
+	if p.Client != nil {
+		p.Client.CloseIdleConnections()
+	}
+	return nil
+}

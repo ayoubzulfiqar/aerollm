@@ -1,34 +1,165 @@
 package middleware
 
 import (
+	"context"
+	"math"
+	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
 )
 
-// RateLimitHeaders middleware injects standard OpenAI-compatible rate limit headers
-// into every HTTP response (including 429s). These headers enable official SDKs
-// (OpenAI Python/TS, etc.) to automatically handle backpressure.
-//
-// Headers injected:
-//
-//	X-RateLimit-Limit-Requests   – max requests allowed in the current window.
-//	X-RateLimit-Limit-Tokens     – max tokens allowed in the current window.
-//	X-RateLimit-Remaining-Requests – remaining requests for this window.
-//	X-RateLimit-Remaining-Tokens   – remaining tokens for this window.
-//	X-RateLimit-Reset-Requests    – seconds until the request window resets.
-//	X-RateLimit-Reset-Tokens      – seconds until the token window resets.
-//
-// Rate limit values come from either:
-//   - The validated VirtualKey's per-key RPS/token limits (if available in context).
-//   - The global RateLimitConfig defaults (fallback).
-//
+// RateLimitOptions configures RateLimit.
+type RateLimitOptions struct {
+	Limiter ratelimit.RateLimiter
+	// DefaultTPM is advertised in X-RateLimit-*-Tokens headers.
+	DefaultTPM int
+}
+
+// limitSetter is implemented by limiters that support per-key overrides.
+type limitSetter interface {
+	SetLimit(apiKey string, l ratelimit.Limit)
+}
+
+// perKeyRPS reads a virtual key's rate override from its metadata.
+func perKeyRPS(p *Principal) float64 {
+	if p == nil || p.Virtual == nil || p.Virtual.Metadata == nil {
+		return 0
+	}
+	return metadataFloat(p.Virtual.Metadata["rate_limit_rps"])
+}
+
+func perKeyTPM(p *Principal) int {
+	if p == nil || p.Virtual == nil || p.Virtual.Metadata == nil {
+		return 0
+	}
+	return int(metadataFloat(p.Virtual.Metadata["rate_limit_tpm"]))
+}
+
+func metadataFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case string:
+		f, _ := strconv.ParseFloat(n, 64)
+		return f
+	}
+	return 0
+}
+
+// RateLimit enforces the limiter per authenticated key (by KeyID, never the
+// raw key) and sets OpenAI-compatible X-RateLimit-* headers. Rejected
+// requests get 429 with Retry-After. Requests without a principal are keyed
+// by client IP.
+func RateLimit(opts RateLimitOptions) Middleware {
+	tpm := opts.DefaultTPM
+	if tpm <= 0 {
+		tpm = 60000
+	}
+	// appliedLimits remembers which per-key overrides were pushed into the
+	// limiter so they are applied once instead of resetting the bucket on
+	// every request.
+	var appliedLimits sync.Map // map[string]float64
+	return func(next http.Handler) http.Handler {
+		if opts.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			p, _ := PrincipalFromContext(ctx)
+			bucket := clientBucket(r, p)
+
+			if rps := perKeyRPS(p); rps > 0 {
+				if s, ok := opts.Limiter.(limitSetter); ok {
+					if prev, loaded := appliedLimits.Load(bucket); !loaded || prev.(float64) != rps {
+						s.SetLimit(bucket, ratelimit.Limit{RPS: rps})
+						appliedLimits.Store(bucket, rps)
+					}
+				}
+			}
+			keyTPM := tpm
+			if t := perKeyTPM(p); t > 0 {
+				keyTPM = t
+			}
+
+			allowed, err := opts.Limiter.Allow(ctx, bucket, "")
+			if err != nil && ctx.Err() != nil {
+				return // client went away
+			}
+			rec, _ := opts.Limiter.GetLimits(ctx, bucket, "")
+			setRateLimitHeaders(w, rec, keyTPM)
+			if err != nil || !allowed {
+				retry := time.Second
+				if rec != nil && rec.RetryAfter > 0 {
+					retry = rec.RetryAfter
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+				WriteJSONError(w, http.StatusTooManyRequests, "rate limit exceeded", "")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, rateLimitAppliedKey{}, true)))
+		})
+	}
+}
+
+type rateLimitAppliedKey struct{}
+
+// RateLimitApplied reports whether the RateLimit middleware already charged
+// this request, so handlers don't consume a second token.
+func RateLimitApplied(ctx context.Context) bool {
+	v, _ := ctx.Value(rateLimitAppliedKey{}).(bool)
+	return v
+}
+
+func clientBucket(r *http.Request, p *Principal) string {
+	if p != nil && p.KeyID != "" {
+		return p.KeyID
+	}
+	if key := APIKeyFromRequest(r); key != "" {
+		return KeyID(key)
+	}
+	return "ip:" + clientIP(r)
+}
+
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func setRateLimitHeaders(w http.ResponseWriter, rec *ratelimit.RateLimitRecord, tpm int) {
+	if rec == nil {
+		return
+	}
+	reset := time.Until(time.Unix(rec.ResetAt, 0))
+	if reset < 0 {
+		reset = 0
+	}
+	h := w.Header()
+	h.Set("X-RateLimit-Limit-Requests", strconv.Itoa(rec.Limit))
+	h.Set("X-RateLimit-Remaining-Requests", strconv.Itoa(max(rec.Remaining, 0)))
+	h.Set("X-RateLimit-Reset-Requests", strconv.Itoa(int(math.Ceil(reset.Seconds())))+"s")
+	h.Set("X-RateLimit-Limit-Tokens", strconv.Itoa(tpm))
+}
+
+// RateLimitHeadersMiddleware injects standard OpenAI-compatible rate limit
+// headers (X-RateLimit-{Limit,Remaining,Reset}-{Requests,Tokens}) into every
+// response, using the limiter's live bucket state for the caller's key.
+// It does not reject requests; use RateLimit to enforce.
 type RateLimitHeadersMiddleware struct {
-	Next       http.HandlerFunc
+	Next        http.HandlerFunc
 	RateLimiter ratelimit.RateLimiter
-	DefaultRPS float64
+	DefaultRPS  float64
 	// DefaultTPM is the default token-per-minute limit applied when no per-key
 	// or per-tenant limit is configured.
 	DefaultTPM int
@@ -41,120 +172,64 @@ func NewRateLimitHeadersMiddleware(next http.HandlerFunc, rl ratelimit.RateLimit
 		defaultRPS = 10.0
 	}
 	if defaultTPM <= 0 {
-		defaultTPM = 60000 // 60k tokens/min is a reasonable default
+		defaultTPM = 60000
 	}
 	return &RateLimitHeadersMiddleware{
-		Next:       next,
+		Next:        next,
 		RateLimiter: rl,
 		DefaultRPS:  defaultRPS,
 		DefaultTPM:  defaultTPM,
 	}
 }
 
-// ServeHTTP intercepts the response and appends rate limit headers before writing.
+// ServeHTTP sets the headers and calls the next handler.
 func (m *RateLimitHeadersMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Wrap the ResponseWriter to capture status code (for 429 detection).
-	rw := &responseWriterWrapper{ResponseWriter: w, statusCode: http.StatusOK}
-
-	// Determine the per-key rate limit limits.
-	limits := m.getLimits(r)
-
-	// Always set headers on the response — before the handler writes, and again
-	// after (in case the handler changes the status to 429).
-	m.setHeaders(w, limits)
-
-	m.Next(rw, r)
-
-	// On 429, recompute remaining (which drops to 0) and reset time.
-	if rw.statusCode == http.StatusTooManyRequests {
-		limits.RemainingRequests = 0
-		limits.RemainingTokens = 0
-		limits.ResetRequests = time.Until(time.Now().Add(time.Minute)).Round(time.Second).Seconds()
-		limits.ResetTokens = limits.ResetRequests
-		m.setHeaders(w, limits)
-	}
-
-	// Ensure headers are flushed on the actual ResponseWriter (the wrapper
-	// forwards SetHeader calls, so they propagate).
+	info := m.getLimits(r)
+	h := w.Header()
+	h.Set("X-RateLimit-Limit-Requests", strconv.Itoa(info.LimitRequests))
+	h.Set("X-RateLimit-Limit-Tokens", strconv.Itoa(info.LimitTokens))
+	h.Set("X-RateLimit-Remaining-Requests", strconv.Itoa(info.RemainingRequests))
+	h.Set("X-RateLimit-Remaining-Tokens", strconv.Itoa(info.RemainingTokens))
+	h.Set("X-RateLimit-Reset-Requests", strconv.Itoa(int(info.ResetRequests)))
+	h.Set("X-RateLimit-Reset-Tokens", strconv.Itoa(int(info.ResetTokens)))
+	m.Next(w, r)
 }
 
-// getLimits retrieves the rate limit limits for the requesting API key.
-// Priority:
-//  1. VirtualKey from context (per-key limits).
-//  2. RateLimiter.GetLimits() if a real limiter is wired.
-//  3. Global defaults.
 func (m *RateLimitHeadersMiddleware) getLimits(r *http.Request) RateLimitInfo {
-	apiKey := VirtualKeyOrAuth(r)
-
-	// Check for virtual key in context (set by VirtualKeyAuthMiddleware).
-	if vk, ok := VirtualKeyFromContext(r.Context()); ok {
-		rps := m.DefaultRPS
-		tpm := m.DefaultTPM
-
-		// If the virtual key carries per-key limits in metadata, use them.
-		if vk.Metadata != nil {
-			if val, ok := vk.Metadata["rate_limit_rps"]; ok {
-				if f, ok := val.(float64); ok && f > 0 {
-					rps = f
-				}
-			}
-			if val, ok := vk.Metadata["rate_limit_tpm"]; ok {
-				if t, ok := val.(int); ok && t > 0 {
-					tpm = t
-				} else if f, ok := val.(float64); ok && f > 0 {
-					tpm = int(f)
-				}
-			}
-		}
-
-		return RateLimitInfo{
-			LimitRequests:  int(rps),
-			LimitTokens:    tpm,
-			RemainingRequests: int(rps), // Full window at request start.
-			RemainingTokens:   tpm,
-			ResetRequests:     time.Until(time.Now().Add(time.Minute)).Round(time.Second).Seconds(),
-			ResetTokens:       time.Until(time.Now().Add(time.Minute)).Round(time.Second).Seconds(),
-			APIKey:            apiKey,
+	p, _ := PrincipalFromContext(r.Context())
+	if p == nil {
+		if vk, ok := VirtualKeyFromContext(r.Context()); ok {
+			p = &Principal{Virtual: vk}
 		}
 	}
-
-	// Fall back to the rate limiter if one is wired.
-	if m.RateLimiter != nil {
-		record, err := m.RateLimiter.GetLimits(r.Context(), apiKey, "")
-		if err == nil && record != nil {
-			now := time.Now()
-			return RateLimitInfo{
-				LimitRequests:  int(m.DefaultRPS),
-				LimitTokens:    m.DefaultTPM,
-				RemainingRequests: record.Remaining,
-				RemainingTokens:   m.DefaultTPM, // Token-level tracking requires per-request estimation.
-				ResetRequests:     time.Until(time.Unix(record.ResetAt, 0)).Round(time.Second).Seconds(),
-				ResetTokens:       time.Until(now.Add(time.Minute)).Round(time.Second).Seconds(),
-				APIKey:            apiKey,
-			}
-		}
+	bucket := clientBucket(r, p)
+	tpm := m.DefaultTPM
+	if t := perKeyTPM(p); t > 0 {
+		tpm = t
 	}
-
-	// Global defaults.
-	return RateLimitInfo{
-		LimitRequests:  int(m.DefaultRPS),
-		LimitTokens:    m.DefaultTPM,
+	info := RateLimitInfo{
+		APIKey:            bucket,
+		LimitRequests:     int(m.DefaultRPS),
+		LimitTokens:       tpm,
 		RemainingRequests: int(m.DefaultRPS),
-		RemainingTokens:   m.DefaultTPM,
-		ResetRequests:     60,
+		RemainingTokens:   tpm,
+		ResetRequests:     0,
 		ResetTokens:       60,
-		APIKey:            apiKey,
 	}
-}
-
-// setHeaders writes the X-RateLimit-* headers onto the ResponseWriter.
-func (m *RateLimitHeadersMiddleware) setHeaders(w http.ResponseWriter, info RateLimitInfo) {
-	w.Header().Set("X-RateLimit-Limit-Requests", strconv.Itoa(info.LimitRequests))
-	w.Header().Set("X-RateLimit-Limit-Tokens", strconv.Itoa(info.LimitTokens))
-	w.Header().Set("X-RateLimit-Remaining-Requests", strconv.Itoa(info.RemainingRequests))
-	w.Header().Set("X-RateLimit-Remaining-Tokens", strconv.Itoa(info.RemainingTokens))
-	w.Header().Set("X-RateLimit-Reset-Requests", strconv.Itoa(int(info.ResetRequests)))
-	w.Header().Set("X-RateLimit-Reset-Tokens", strconv.Itoa(int(info.ResetTokens)))
+	if rps := perKeyRPS(p); rps > 0 {
+		info.LimitRequests = int(rps)
+		info.RemainingRequests = int(rps)
+	}
+	if m.RateLimiter != nil {
+		if rec, err := m.RateLimiter.GetLimits(r.Context(), bucket, ""); err == nil && rec != nil && rec.Limit > 0 {
+			info.LimitRequests = rec.Limit
+			info.RemainingRequests = max(rec.Remaining, 0)
+			if reset := time.Until(time.Unix(rec.ResetAt, 0)).Seconds(); reset > 0 {
+				info.ResetRequests = math.Ceil(reset)
+			}
+		}
+	}
+	return info
 }
 
 // RateLimitInfo holds the computed rate limit headers for the current request.
@@ -173,28 +248,3 @@ type RateLimitInfo struct {
 func VirtualKeyOrAuth(r *http.Request) string {
 	return APIKeyFromRequest(r)
 }
-
-// responseWriterWrapper captures the status code so the middleware can react
-// to 429 responses.
-type responseWriterWrapper struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-// WriteHeader intercepts the status code so the middleware can detect 429s.
-func (rw *responseWriterWrapper) WriteHeader(code int) {
-	rw.statusCode = code
-	rw.ResponseWriter.WriteHeader(code)
-}
-
-// Write captures the status code (defaults to 200 if WriteHeader wasn't called).
-func (rw *responseWriterWrapper) Write(b []byte) (int, error) {
-	if rw.statusCode == 0 {
-		rw.statusCode = http.StatusOK
-	}
-	return rw.ResponseWriter.Write(b)
-}
-
-// Ensure the wrapper does not interfere with the real ResponseWriter's
-// header map — Set/Add/Del on the wrapper are forwarded to the underlying writer.
-var _ http.ResponseWriter = (*responseWriterWrapper)(nil)

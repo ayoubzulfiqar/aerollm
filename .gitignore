@@ -1,0 +1,28 @@
+# Build outputs
+/aerollm
+/server
+/cli
+/edge-node
+/operator
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Runtime state
+/aerollm-state/
+/fine-tune-jobs/
+*.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

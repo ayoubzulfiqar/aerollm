@@ -2,10 +2,14 @@ package synthesis
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/plugins"
 )
@@ -15,7 +19,12 @@ type CodeGenerator interface {
 	Generate(ctx context.Context, description string) (string, error)
 }
 
-// LLMCodeGenerator uses a local SLM to generate Go tool code.
+// LLMCodeGenerator generates Go tool scaffolding from a description.
+//
+// Despite its name it does NOT call a model: it renders a fixed, safe
+// template (the model/baseURL fields are reserved for a future SLM backend).
+// The generated source is returned as text only; nothing in this package
+// compiles, executes or writes it to disk.
 type LLMCodeGenerator struct {
 	model   string
 	baseURL string
@@ -27,18 +36,41 @@ func NewLLMCodeGenerator(model, baseURL string) *LLMCodeGenerator {
 	return &LLMCodeGenerator{model: model, baseURL: baseURL}
 }
 
-// Generate emits a Go tool implementation from a description.
+// MaxDescriptionLen caps tool descriptions accepted by Generate.
+const MaxDescriptionLen = 2048
+
+// maxIdentifierLen caps the generated Go identifier / tool name length.
+const maxIdentifierLen = 48
+
+// Generate emits a Go tool implementation from a description. The description
+// is embedded only as a quoted Go string literal (%q) and the identifier is
+// restricted to [A-Za-z0-9_] starting with a letter, so the description
+// cannot inject code into the template.
 func (g *LLMCodeGenerator) Generate(ctx context.Context, description string) (string, error) {
-	_ = ctx
-	if description == "" {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(description) == "" {
 		return "", fmt.Errorf("description is empty")
+	}
+	if len(description) > MaxDescriptionLen {
+		return "", fmt.Errorf("description exceeds %d bytes", MaxDescriptionLen)
+	}
+	if !utf8.ValidString(description) {
+		return "", fmt.Errorf("description is not valid UTF-8")
 	}
 	sanitized := sanitizeIdentifier(description)
 	code := "package main\n\nimport \"context\"\n\ntype Params struct {\n\tInput string\n}\n\ntype " + sanitized + "Tool struct{}\n\nfunc (t *" + sanitized + "Tool) Name() string { return \"" + sanitized + "\" }\nfunc (t *" + sanitized + "Tool) Description() string { return " + fmt.Sprintf("%q", description) + " }\nfunc (t *" + sanitized + "Tool) Parameters() map[string]interface{} {\n\treturn map[string]interface{}{\n\t\t\"type\": \"object\",\n\t\t\"properties\": map[string]interface{}{\n\t\t\t\"input\": map[string]interface{}{\n\t\t\t\t\"type\": \"string\",\n\t\t\t\t\"description\": \"input for " + sanitized + "\",\n\t\t\t},\n\t\t},\n\t}\n}\n\nfunc (t *" + sanitized + "Tool) Execute(ctx context.Context, args map[string]interface{}) (interface{}, error) {\n\t_ = ctx\n\tinput, _ := args[\"input\"].(string)\n\treturn map[string]interface{}{\"ok\": true, \"input\": input}, nil\n}\n"
 	return code, nil
 }
 
-// WasmCompiler compiles generated Go code to WASM binary in memory.
+// ErrCompilerUnavailable is returned by WasmCompiler.Compile: this build has
+// no sandboxed Go->WASM toolchain, so generated code is never compiled.
+var ErrCompilerUnavailable = errors.New("synthesis: wasm compilation is not available in this build")
+
+// WasmCompiler would compile generated Go code to a WASM module. No compiler
+// backend is wired in, so Compile always fails explicitly rather than
+// returning fake bytes that could be mistaken for a real module.
 type WasmCompiler struct{}
 
 // NewWasmCompiler creates a new compiler.
@@ -46,13 +78,22 @@ func NewWasmCompiler() *WasmCompiler {
 	return &WasmCompiler{}
 }
 
-// Compile converts Go source text into a WASM byte slice.
+// Compile always returns ErrCompilerUnavailable.
 func (c *WasmCompiler) Compile(ctx context.Context, source, moduleName string) ([]byte, error) {
-	_ = ctx
 	_ = source
 	_ = moduleName
-	return []byte("placeholder:" + moduleName), nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, ErrCompilerUnavailable
 }
+
+// ErrNoRegistry is returned by ToolPromoter.Promote when no plugin registry
+// is configured.
+var ErrNoRegistry = errors.New("synthesis: no plugin registry configured")
+
+var manifestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+var manifestNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,127}$`)
 
 // ToolPromoter persists generated tools into the plugin registry.
 type ToolPromoter struct {
@@ -64,15 +105,45 @@ func NewToolPromoter(registry plugins.Registry) *ToolPromoter {
 	return &ToolPromoter{registry: registry}
 }
 
-// Promote validates the generated tool and registers its manifest.
-func (p *ToolPromoter) Promote(ctx context.Context, manifest plugins.Metadata) error {
-	_ = ctx
+// ValidateManifest checks a generated tool manifest: ID and Name must use a
+// restricted charset, and Filename (if set) must be a bare file name with no
+// path components, so a manifest can never point outside the plugin dir.
+func ValidateManifest(manifest plugins.Metadata) error {
 	if manifest.ID == "" || manifest.Name == "" {
 		return fmt.Errorf("manifest id and name are required")
 	}
-	if p.registry == nil {
-		return nil
+	if !manifestIDPattern.MatchString(manifest.ID) {
+		return fmt.Errorf("manifest id must match %s", manifestIDPattern.String())
 	}
+	if !manifestNamePattern.MatchString(manifest.Name) {
+		return fmt.Errorf("manifest name must match %s", manifestNamePattern.String())
+	}
+	if f := manifest.Filename; f != "" {
+		if f == "." || f == ".." || strings.ContainsAny(f, `/\`) || strings.Contains(f, "..") ||
+			filepath.IsAbs(f) || filepath.Base(f) != f || strings.ContainsRune(f, 0) || len(f) > 255 {
+			return fmt.Errorf("manifest filename must be a bare file name")
+		}
+	}
+	if manifest.SizeBytes < 0 {
+		return fmt.Errorf("manifest size must not be negative")
+	}
+	return nil
+}
+
+// Promote validates the generated tool and registers its manifest. Generated
+// tools are always registered disabled (Enabled=false): enabling one requires
+// an explicit, separate operator action.
+func (p *ToolPromoter) Promote(ctx context.Context, manifest plugins.Metadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := ValidateManifest(manifest); err != nil {
+		return err
+	}
+	if p == nil || p.registry == nil {
+		return ErrNoRegistry
+	}
+	manifest.Enabled = false
 	return p.registry.Register(manifest)
 }
 
@@ -85,12 +156,12 @@ type ManifestStore interface {
 
 // ToolManifest is the metadata persisted for generated tools.
 type ToolManifest struct {
-	ID          string
-	Name        string
-	Description string
-	Parameters  map[string]interface{}
-	WasmPath    string
-	CreatedAt   int64
+	ID           string
+	Name         string
+	Description  string
+	Parameters   map[string]interface{}
+	WasmPath     string
+	CreatedAt    int64
 	SuccessCount int64
 	FailureCount int64
 }
@@ -144,8 +215,16 @@ func (s *InMemoryManifestStore) ListManifests(ctx context.Context) ([]ToolManife
 	return out, nil
 }
 
+var nonIdentChars = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
+
+// sanitizeIdentifier converts free text into a Go identifier: only
+// [A-Za-z0-9_], starting with a letter, at most maxIdentifierLen bytes.
 func sanitizeIdentifier(s string) string {
-	s = regexp.MustCompile(`[^a-zA-Z0-9_]+`).ReplaceAllString(s, "")
+	s = nonIdentChars.ReplaceAllString(s, "")
+	s = strings.TrimLeft(s, "0123456789_")
+	if len(s) > maxIdentifierLen {
+		s = s[:maxIdentifierLen]
+	}
 	if s == "" {
 		return "tool"
 	}

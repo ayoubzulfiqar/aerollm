@@ -1,12 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 
-	"github.com/ayoubzulfiqar/aerollm/internal/slo"
 	"github.com/spf13/cobra"
 )
 
@@ -24,30 +20,30 @@ func newSloBudgetCmd() *cobra.Command {
 	var target string
 	cmd := &cobra.Command{
 		Use:   "budget",
-		Short: "Show current SLO budget snapshot",
-		Run: func(_ *cobra.Command, _ []string) {
-			if target == "" {
-				target = "latency"
-			}
-			budget := slo.NewErrorBudget(100)
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v1/slo/budget", slo.Handler(budget, target))
-
-			server := httptest.NewServer(mux)
-			defer server.Close()
-
-			client := server.Client()
-			req, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/slo/budget", nil)
-			req.Header.Set("x-slo-target", target)
-			resp, err := client.Do(req)
+		Short: "Show the gateway's SLO error budget (/v1/slo/budget)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newServerClient(cmd)
 			if err != nil {
-				fmt.Println("error: " + err.Error())
-				return
+				return err
+			}
+			req, err := client.newRequest(cmd.Context(), http.MethodGet, "/v1/slo/budget", nil, nil)
+			if err != nil {
+				return err
+			}
+			if target != "" {
+				req.Header.Set("x-slo-target", target)
+			}
+			resp, err := client.do(req)
+			if err != nil {
+				return err
 			}
 			defer resp.Body.Close()
-			buf := make([]byte, 4096)
-			n, _ := resp.Body.Read(buf)
-			fmt.Println(strings.TrimSpace(string(buf[:n])))
+			data, err := readAllLimited(resp.Body, "response")
+			if err != nil {
+				return err
+			}
+			return renderResult(cmd, []byte(data), formatTable, nil, nil)
 		},
 	}
 	cmd.Flags().StringVarP(&target, "target", "t", "latency", "SLO target name")

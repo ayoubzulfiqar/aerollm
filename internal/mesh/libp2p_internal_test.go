@@ -13,8 +13,34 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 )
 
+// newListeningPair attaches "local" and a listening "remote" transport to one
+// in-process network. (The original tests dialled an unknown peer on a
+// standalone transport and expected success, which only worked because the old
+// transport silently buffered envelopes nobody could ever receive.)
+func newListeningPair(t *testing.T, local, remote mesh.PeerID) (mesh.SecureTransport, mesh.SecureTransport, mesh.PeerListener) {
+	t.Helper()
+	network := mesh.NewInMemoryNetwork()
+	lt, err := network.Transport(local)
+	if err != nil {
+		t.Fatalf("attach %s: %v", local, err)
+	}
+	rt, err := network.Transport(remote)
+	if err != nil {
+		t.Fatalf("attach %s: %v", remote, err)
+	}
+	l, err := rt.Listen(context.Background(), "")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = lt.Close()
+		_ = rt.Close()
+	})
+	return lt, rt, l
+}
+
 func TestInMemoryTransportDialAndClose(t *testing.T) {
-	transport := mesh.NewInMemoryTransport(mesh.PeerID("local"))
+	transport, _, _ := newListeningPair(t, "local", "remote")
 
 	conn, err := transport.Dial(context.Background(), mesh.PeerDescriptor{ID: "remote"})
 	if err != nil {
@@ -34,7 +60,7 @@ func TestInMemoryTransportDialAndClose(t *testing.T) {
 }
 
 func TestInMemoryTransportSendDoesNotPanic(t *testing.T) {
-	transport := mesh.NewInMemoryTransport(mesh.PeerID("local"))
+	transport, _, _ := newListeningPair(t, "local", "remote")
 	conn, err := transport.Dial(context.Background(), mesh.PeerDescriptor{ID: "remote"})
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
@@ -100,7 +126,7 @@ func TestInMemoryTransportDialCancelledContext(t *testing.T) {
 }
 
 func TestInMemoryConnSendAfterClose(t *testing.T) {
-	transport := mesh.NewInMemoryTransport(mesh.PeerID("a"))
+	transport, _, _ := newListeningPair(t, "a", "b")
 	conn, err := transport.Dial(context.Background(), mesh.PeerDescriptor{ID: "b"})
 	if err != nil {
 		t.Fatalf("dial error: %v", err)

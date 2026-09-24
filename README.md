@@ -68,8 +68,8 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 ## Quick Start
 
 ### Prerequisites
-- Go 1.22+
-- Redis 7+ (optional, for caching/state)
+- Go 1.26+
+- Redis 7+ (optional: exact cache, distributed rate limits, HITL approvals, webhook queue; the gateway runs in degraded mode without it unless `redis.required: true`)
 - Docker and Docker Compose (optional)
 
 ### Installation
@@ -83,19 +83,71 @@ go build -o aerollm ./cmd/server
 
 ### Configuration
 
-AeroLLM uses Viper for configuration via `config.yaml` or environment variables with `AEROLLM_` prefix.
+AeroLLM reads `config.yaml` (from `$AEROLLM_CONFIG`, `./` or `/etc/aerollm/`) and
+`AEROLLM_*` environment variables, which override nested keys
+(`AEROLLM_REDIS_ADDR` → `redis.addr`, `AEROLLM_AUTH_MASTER_KEY` → `auth.master_key`).
+String values may reference the environment as `${VAR}` or `${VAR:-default}`.
+Invalid configuration (unknown provider type or routing strategy, out-of-range
+values, malformed YAML) fails fast at startup and is rejected on hot reload.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `auth.master_key` | generated | Admin key. If unset, a random key is generated and printed once at startup. |
+| `auth.api_keys` | `[]` | Static client keys for the inference APIs (also `AEROLLM_CLIENT_KEYS`). |
+| `server.write_timeout` | `120s` | Non-streaming responses; SSE streams lift the deadline per request. |
+| `server.max_body_bytes` | `10MiB` | Request body cap. |
+| `redis.required` | `false` | Fail startup when Redis is unreachable. |
+| `router.strategy` | `round_robin` | `round_robin`, `least_busy`, `usage_based`, `latency`, `cost`, `fallback`. |
+| `router.max_attempts` | `3` | Providers tried per request on retryable errors (429/5xx/network). |
+| `cache.shared_across_keys` | `false` | Allow different API keys to share cache entries. |
+| `cache.semantic_enabled` | `false` | Similarity-based caching (namespaced per key). |
+| `security.cors_allowed_origins` | `[]` | Browser origins allowed to call the API. |
+| `security.public_metrics` | `true` | Serve `/metrics` without auth. |
+| `security.enable_pprof` | `false` | Expose pprof on `localhost:6060`. |
+
+Providers can be configured in `config.yaml` (`providers:`) or via
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `AEROLLM_LOCAL_URL`.
+
+### Authentication
+
+Every endpoint except `/health`, `/ready(z)`, `/metrics` and `/swagger/` needs a key,
+sent as `Authorization: Bearer <key>` (or `X-API-Key` for Anthropic SDKs).
+
+| Tier | Accepted keys | Endpoints |
+| --- | --- | --- |
+| Client | admin, `auth.api_keys`, virtual keys | `/v1/chat/completions`, `/v1/messages`, `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/responses`, `/v1/feedback`, `/mcp`, `/ws` |
+| Admin | admin keys only | key/team management, `/config/*`, `/global/spend/*`, `/v1/cache*`, `/v1/batches*`, `/v1/rsi/*`, and the whole control plane (`/v1/secrets`, `/v1/policy`, `/v1/flags`, `/v1/incidents`, `/v1/chaos/fault`, …) |
+
+Virtual keys are created with `POST /key/generate` and may restrict models, budget,
+expiry and per-key rate limits (`metadata.rate_limit_rps`). Only a hash of each key
+is stored.
 
 ### Running
 
 ```bash
-./aerollm
+AEROLLM_AUTH_MASTER_KEY=$(openssl rand -hex 32) OPENAI_API_KEY=sk-... ./aerollm
 ```
 
 ### Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
+
+## API Compatibility
+
+- **OpenAI**: `/v1/chat/completions` (incl. `stream: true` Server-Sent Events with
+  `stream_options.include_usage`, tools, multimodal content parts, `response_format`),
+  `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`,
+  `/v1/responses`, `/v1/batches`.
+- **Anthropic**: `/v1/messages` accepts the Messages API (system prompts, content
+  blocks, tool use/results, streaming events) and serves it through any provider.
+- **Errors** use the OpenAI envelope `{"error":{"message","type","code"}}`; upstream
+  429/`Retry-After` are forwarded, upstream credential failures surface as 502.
+- **Response headers**: `X-Request-ID`, `X-AeroLLM-Provider`, `X-AeroLLM-Cache: HIT|MISS`,
+  `X-RateLimit-*`. Send `Cache-Control: no-cache` to bypass the cache.
+- **Fallback**: retryable upstream failures are retried on the next provider
+  (bounded by `router.max_attempts`) behind per-provider circuit breakers.
 
 ## Usage Guides
 
@@ -103,10 +155,18 @@ docker-compose up -d
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer ***" \
+  -H "Authorization: Bearer $AEROLLM_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+
+# Streaming
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $AEROLLM_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+> The control-plane examples below need the admin key:
+> add `-H "Authorization: Bearer $AEROLLM_ADMIN_KEY"`.
 
 ### Health Checks
 
@@ -123,10 +183,13 @@ curl http://localhost:8080/resilience/status
 
 ### Shadow Traffic
 
+Requires `AEROLLM_SHADOW_URL` (the only target the tester may call; optional
+`AEROLLM_SHADOW_API_KEY`). The body is a chat request, mirrored asynchronously.
+
 ```bash
 curl -X POST http://localhost:8080/v1/shadow \
-  -H "Content-Type: application/json" \
-  -d '{"provider":"openai","model":"gpt-4"}'
+  -H "Authorization: Bearer $AEROLLM_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ### SLO Budgets
@@ -137,9 +200,11 @@ curl http://localhost:8080/v1/slo/budget
 
 ### Chaos Fault Injection
 
+Disabled unless the server runs with `AEROLLM_CHAOS_ENABLED=true` (otherwise 403).
+
 ```bash
 curl -X POST http://localhost:8080/v1/chaos/fault \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AEROLLM_ADMIN_KEY" -H "Content-Type: application/json" \
   -d '{"type":"latency","percent":50}'
 ```
 
@@ -173,10 +238,12 @@ curl -X POST http://localhost:8080/v1/admission/validate \
 
 ### Usage Metering
 
+Every completion is metered automatically (per key id, model, provider, tokens, latency).
+
 ```bash
-curl -X POST http://localhost:8080/v1/meter/usage \
-  -H "Content-Type: application/json" \
-  -d '{"api_key":"k1","provider":"p1","model":"m1","tokens_in":10,"tokens_out":20,"latency_ms":100}'
+curl http://localhost:8080/v1/meter/usage -H "Authorization: Bearer $AEROLLM_ADMIN_KEY"
+# Invoice line items computed from metered usage (no billing provider is contacted)
+curl "http://localhost:8080/v1/billing/preview?key_id=key_..." -H "Authorization: Bearer $AEROLLM_ADMIN_KEY"
 ```
 
 ### Feature Flags
@@ -195,6 +262,9 @@ curl http://localhost:8080/v1/flags
 ```
 
 ### Evaluation Engine
+
+Scores are produced by a real judge model routed through the gateway; set
+`AEROLLM_EVAL_JUDGE_MODEL` (otherwise the endpoints return 503).
 
 ```bash
 # Judge scoring

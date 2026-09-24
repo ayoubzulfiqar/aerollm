@@ -9,18 +9,25 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 )
 
-// AeroStreamChunk is the unified streaming chunk format.
+// AeroStreamChunk is the legacy simplified streaming chunk format used by
+// ProviderAdapter.Stream. New code should use StreamChatCompletions, which
+// yields OpenAI-compatible models.StreamChunk values.
 type AeroStreamChunk struct {
 	Delta       string
 	Finish      bool
 	Provider    string
 	ContentType string
-	Data        []byte
+	// Data is the JSON encoding of the underlying models.StreamChunk.
+	Data []byte
+	// Err reports a stream failure; it is set on the last chunk only.
+	Err error
 }
 
-// StreamProvider extends Provider with streaming support.
+// StreamProvider is implemented by adapters that can stream OpenAI-style
+// chunks. It has the same method set as providers.StreamingProvider and
+// follows the same contract.
 type StreamProvider interface {
-	StreamChatCompletions(ctx context.Context, req *models.LLMRequest) (<-chan AeroStreamChunk, error)
+	StreamChatCompletions(ctx context.Context, req *models.LLMRequest) (<-chan models.StreamChunk, error)
 }
 
 // ProviderAdapter is the unified provider contract for the universal registry.
@@ -32,6 +39,10 @@ type ProviderAdapter interface {
 	Health() map[string]interface{}
 	Close() error
 }
+
+// DefaultTimeout is the default HTTP timeout for non-streaming upstream calls
+// (for streams it only bounds the wait for response headers).
+const DefaultTimeout = 120 * time.Second
 
 // AdapterConfig carries common adapter settings.
 type AdapterConfig struct {
@@ -45,26 +56,31 @@ func NewDefaultAdapterConfig(apiKey, baseURL string) AdapterConfig {
 	return AdapterConfig{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		HTTP:    &http.Client{Timeout: DefaultTimeout},
 	}
 }
 
-// ChatPayload is the common JSON body for OpenAI-compatible chat routes.
+// ChatPayload is a simplified OpenAI-style chat body.
+//
+// Deprecated: adapters send providers.OpenAIChatRequest, which carries all
+// supported fields and strips gateway-only ones.
 type ChatPayload struct {
-	Model          string                   `json:"model"`
-	Messages       []models.Message         `json:"messages"`
-	Stream         bool                     `json:"stream"`
-	MaxTokens      *int                     `json:"max_tokens,omitempty"`
-	Temperature    *float64                 `json:"temperature,omitempty"`
-	TopP           *float64                 `json:"top_p,omitempty"`
-	Stop           []string                 `json:"stop,omitempty"`
-	PresencePenalty *float64                `json:"presence_penalty,omitempty"`
-	FrequencyPenalty *float64               `json:"frequency_penalty,omitempty"`
-	Tools          []models.ToolDefinition  `json:"tools,omitempty"`
-	ResponseFormat *models.ResponseFormat   `json:"response_format,omitempty"`
+	Model            string                  `json:"model"`
+	Messages         []models.Message        `json:"messages"`
+	Stream           bool                    `json:"stream"`
+	MaxTokens        *int                    `json:"max_tokens,omitempty"`
+	Temperature      *float64                `json:"temperature,omitempty"`
+	TopP             *float64                `json:"top_p,omitempty"`
+	Stop             []string                `json:"stop,omitempty"`
+	PresencePenalty  *float64                `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64                `json:"frequency_penalty,omitempty"`
+	Tools            []models.ToolDefinition `json:"tools,omitempty"`
+	ResponseFormat   *models.ResponseFormat  `json:"response_format,omitempty"`
 }
 
-// ToChatPayload converts a universal request into an OpenAI-style payload.
+// ToChatPayload converts a universal request into a ChatPayload.
+//
+// Deprecated: use providers.NewOpenAIChatRequest.
 func ToChatPayload(req *models.LLMRequest) ChatPayload {
 	return ChatPayload{
 		Model:            req.Model,
@@ -84,10 +100,4 @@ func ToChatPayload(req *models.LLMRequest) ChatPayload {
 // MarshalChatPayload JSON-encodes a ChatPayload.
 func MarshalChatPayload(p ChatPayload) ([]byte, error) {
 	return json.Marshal(p)
-}
-
-// buildChatPayload converts a universal LLMRequest into an OpenAI-compatible
-// chat payload, including response_format for Structured Outputs.
-func buildChatPayload(req *models.LLMRequest) ChatPayload {
-	return ToChatPayload(req)
 }

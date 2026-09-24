@@ -1,11 +1,10 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    ports:
-      - "6379:6379"
+    # Not published on the host: only the gateway needs to reach Redis.
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
     networks:
@@ -26,15 +25,24 @@ services:
       redis:
         condition: service_healthy
     environment:
-      - APP_ENV=development
+      - AEROLLM_APP_ENV=development
       - AEROLLM_REDIS_ADDR=redis:6379
-      - APP_PORT=8080
+      # Set a strong admin key (otherwise a random one is generated and logged
+      # once at startup).
+      - AEROLLM_AUTH_MASTER_KEY=${AEROLLM_AUTH_MASTER_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      - aerollm_data:/data
     networks:
       - aerollm-net
     restart: unless-stopped
 
 volumes:
   redis_data:
+  aerollm_data:
 
 networks:
   aerollm-net:
