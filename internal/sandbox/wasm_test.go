@@ -41,7 +41,7 @@ func TestWasmExecutorFixtures(t *testing.T) {
 	must("grow", wasmrttest.Grow(8))
 
 	res, err := ExecuteAgentTool(ctx, e, models.ToolDefinition{Name: "answer"}, map[string]interface{}{"q": "?"})
-	if err != nil || res.Content.(map[string]interface{})["answer"] != float64(42) || res.Duration <= 0 {
+	if err != nil || res.Content.(map[string]interface{})["answer"] != float64(42) || res.Duration < 0 {
 		t.Fatalf("answer: %v %+v", err, res)
 	}
 	if out, err := e.Execute(ctx, "nop", nil); err != nil || out != nil {
@@ -158,7 +158,9 @@ func TestWasmExecutorSharedRuntimeAndConcurrency(t *testing.T) {
 
 func TestWasmExecutorGoGuest(t *testing.T) {
 	guest := wasmrttest.Guest(t)
-	e := newWasmExec(t, Limits{Timeout: 20 * time.Second, MaxOutputBytes: 128 << 10, MaxMemoryBytes: 32 << 20})
+	// Go wasip1 guests need ~35 MiB of initial memory; "alloc" still hits
+	// the cap because it allocates without bound.
+	e := newWasmExec(t, Limits{Timeout: 20 * time.Second, MaxOutputBytes: 128 << 10, MaxMemoryBytes: 128 << 20})
 	if err := e.Register("guest", guest); err != nil {
 		t.Fatal(err)
 	}

@@ -132,7 +132,10 @@ func TestWasmHostSharedRuntimeIsNotClosed(t *testing.T) {
 
 func TestWasmHostGoGuestHooks(t *testing.T) {
 	guest := wasmrttest.Guest(t)
-	h := newTestHost(t, WasmHostOptions{Timeout: 20 * time.Second, RuntimeConfig: wasmrt.Config{MaxMemoryPages: 512}})
+	// Go wasip1 binaries start with ~35 MiB of linear memory (more with some
+	// toolchains), so the cap must leave headroom; "alloc" grows forever and
+	// still hits it.
+	h := newTestHost(t, WasmHostOptions{Timeout: 20 * time.Second, RuntimeConfig: wasmrt.Config{MaxMemoryPages: 2048}})
 	ctx := context.Background()
 	if err := h.LoadPlugin(ctx, "upper", guest); err != nil {
 		t.Fatal(err)

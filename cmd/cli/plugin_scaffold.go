@@ -56,6 +56,9 @@ func pluginScaffold(kind, name, subdir string) ([]scaffoldFile, string, error) {
 	if k == "tool" {
 		src = toolPluginTemplate
 	}
+	// Git may check the embedded templates out with CRLF endings (Windows);
+	// generated Go code always uses LF.
+	src = strings.ReplaceAll(src, "\r\n", "\n")
 	src = strings.ReplaceAll(src, "__PLUGIN_NAME__", name)
 	gomod := "module " + name + "\n\ngo 1.21\n"
 	return []scaffoldFile{

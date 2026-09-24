@@ -947,17 +947,21 @@ func (l *tlsListener) Close() error {
 	l.once.Do(func() {
 		l.mu.Lock()
 		l.closed = true
-		close(l.done)
 		l.mu.Unlock()
-		_ = l.ln.Close()
+		_ = l.ln.Close() // the accept loop exits on net.ErrClosed
 		if l.stopCtx != nil {
 			l.stopCtx()
 		}
+		// Free the transport's listener slot before signalling closure, so
+		// anyone who observes ErrListenerClosed can Listen again at once.
 		l.t.mu.Lock()
 		if l.t.listener == l {
 			l.t.listener = nil
 		}
 		l.t.mu.Unlock()
+		l.mu.Lock()
+		close(l.done)
+		l.mu.Unlock()
 		for {
 			select {
 			case c := <-l.ready:

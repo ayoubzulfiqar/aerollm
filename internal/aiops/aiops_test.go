@@ -72,6 +72,16 @@ func (c *counterAction) action(name string) TunerAction {
 func newTestTuner(src MetricsSource) *MetaAgentTuner {
 	tn := NewMetaAgentTuner(src, time.Hour, time.Hour)
 	tn.cooldown = time.Nanosecond // effectively no cooldown for unit tests
+	// A clock that advances on every read keeps the cooldown deterministic:
+	// on Windows consecutive time.Now() calls can return the same instant.
+	var mu sync.Mutex
+	clock := time.Unix(1_700_000_000, 0)
+	tn.SetClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(time.Second)
+		return clock
+	})
 	return tn
 }
 

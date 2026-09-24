@@ -451,6 +451,13 @@ func TestSecureAggregatorRunningMeanMatchesFedAvg(t *testing.T) {
 	require.NoError(t, err)
 	for j := range want.Data {
 		require.False(t, math.IsInf(res.Aggregate.Data[j], 0))
+		if j == 0 {
+			// Averaging +MaxFloat64 and -MaxFloat64 with ordinary values is
+			// ill-conditioned: any evaluation order (or fused multiply-add
+			// on arm64) is only accurate relative to the input magnitude.
+			require.InDelta(t, want.Data[j], res.Aggregate.Data[j], 1e-9*math.MaxFloat64, "index %d", j)
+			continue
+		}
 		require.InEpsilon(t, want.Data[j], res.Aggregate.Data[j], 1e-9, "index %d", j)
 	}
 }

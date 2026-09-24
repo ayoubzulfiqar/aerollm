@@ -1,0 +1,13 @@
+# Keep source and templates LF on every platform (gofmt, embedded templates
+# and generated code expect LF).
+* text=auto
+*.go text eol=lf
+*.tmpl text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+*.png binary
+*.wasm binary
+*.db binary

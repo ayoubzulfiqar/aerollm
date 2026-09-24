@@ -66,9 +66,11 @@ func TestShortTermMemorySearch(t *testing.T) {
 
 func TestOpenStateStoreCreatesDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "new", "path")
-	if _, err := OpenBboltStateStore(dir); err != nil {
+	store, err := OpenBboltStateStore(dir)
+	if err != nil {
 		t.Fatalf("open with new dir failed: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() }) // Windows cannot delete open files
 	if _, err := os.Stat(filepath.Join(dir, "aerollm-state.db")); err != nil {
 		t.Fatalf("expected db file, got err: %v", err)
 	}
