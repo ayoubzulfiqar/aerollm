@@ -28,6 +28,12 @@ type User struct {
 }
 
 // Team represents a team within an agency.
+//
+// Budget is the team's maximum budget in USD (0 = unlimited). It is enforced
+// across all keys of the team: spend recorded for any key whose TeamID is
+// the team's ID also accrues to Spend (see Manager.RecordSpendByHash), and
+// Validate/CheckBudget reject every key of the team once Spend reaches
+// Budget (ErrTeamBudgetExceeded, which matches ErrBudgetExceeded).
 type Team struct {
 	ID        string                 `json:"id"`
 	Name      string                 `json:"name"`
@@ -35,20 +41,39 @@ type Team struct {
 	Budget    float64                `json:"budget"`
 	Metadata  map[string]interface{} `json:"metadata"`
 	CreatedAt time.Time              `json:"created_at"`
+
+	// Spend is the accumulated spend in USD of all keys of the team in the
+	// current budget period.
+	Spend float64 `json:"spend"`
+	// BudgetDuration, if set (e.g. "30d"), resets Spend periodically.
+	BudgetDuration string `json:"budget_duration,omitempty"`
+	// BudgetResetAt is when Spend is next reset (zero if no BudgetDuration).
+	BudgetResetAt time.Time `json:"budget_reset_at,omitempty"`
 }
 
-// UserStore persists users.
+// UserStore persists users. Get returns an error matching ErrUserNotFound
+// for unknown users.
 type UserStore interface {
 	Create(ctx context.Context, u *User) error
 	Get(ctx context.Context, id string) (*User, error)
 	Update(ctx context.Context, u *User) error
 }
 
-// TeamStore persists teams.
+// TeamStore persists teams. Get returns an error matching ErrTeamNotFound
+// for unknown teams. Update replaces the stored team (keeping CreatedAt);
+// stores should also implement AtomicTeamUpdater so read-modify-write
+// updates (spend accrual, partial updates) never lose concurrent changes.
 type TeamStore interface {
 	Create(ctx context.Context, t *Team) error
 	Get(ctx context.Context, id string) (*Team, error)
 	Update(ctx context.Context, t *Team) error
+}
+
+// AtomicTeamUpdater is optionally implemented by team stores that can apply
+// a read-modify-write atomically. fn receives a private copy; the team's ID
+// and CreatedAt are immutable. The updated team is returned.
+type AtomicTeamUpdater interface {
+	UpdateFunc(ctx context.Context, id string, fn func(*Team) error) (*Team, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +145,11 @@ func NewKeyHandler(mgr *Manager, users UserStore, teams TeamStore, logger func(m
 	}
 	if teams == nil {
 		teams = NewInMemoryTeamStore()
+	}
+	// Enforce team budgets for the teams managed by this handler unless the
+	// manager was already given a team store.
+	if mgr.Teams() == nil {
+		mgr.SetTeamStore(teams)
 	}
 	return &KeyHandler{Manager: mgr, Users: users, Teams: teams, Logger: logger, MaxBodyBytes: defaultBodyLimit}
 }
@@ -723,8 +753,22 @@ func (h *KeyHandler) TeamCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	now := h.Manager.now().UTC()
+	// Spend state is server-controlled.
+	t.Spend, t.BudgetResetAt = 0, time.Time{}
+	t.BudgetDuration = strings.TrimSpace(t.BudgetDuration)
+	period, err := ParseDuration(t.BudgetDuration)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, invalid("budget_duration", err.Error()).Error())
+		return
+	}
+	if period > 0 {
+		t.BudgetResetAt = now.Add(period)
+	} else {
+		t.BudgetDuration = ""
+	}
 	t.ID = generateID("team")
-	t.CreatedAt = time.Now().UTC()
+	t.CreatedAt = now
 	if err := h.Teams.Create(r.Context(), &t); err != nil {
 		h.Logger("team creation failed", "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "failed to create team")
@@ -735,16 +779,20 @@ func (h *KeyHandler) TeamCreate(w http.ResponseWriter, r *http.Request) {
 
 // teamUpdateRequest is a partial update: absent fields are left unchanged.
 type teamUpdateRequest struct {
-	ID       string                 `json:"id"`
-	Name     *string                `json:"name"`
-	Members  *[]string              `json:"members"`
-	Budget   *float64               `json:"budget"`
-	Metadata map[string]interface{} `json:"metadata"`
+	ID             string                 `json:"id"`
+	Name           *string                `json:"name"`
+	Members        *[]string              `json:"members"`
+	Budget         *float64               `json:"budget"`
+	Metadata       map[string]interface{} `json:"metadata"`
+	BudgetDuration *string                `json:"budget_duration"`
+	ResetSpend     bool                   `json:"reset_spend"`
 }
 
 // TeamUpdate handles POST /team/update. Only fields present in the body are
 // changed. Admins may update any team; team-admin keys may update the name,
-// members and metadata of their own team (not its budget).
+// members and metadata of their own team (not its budget, budget period or
+// spend). The update is applied atomically, so concurrent spend accrual is
+// never lost.
 // @Summary Update team
 // @Description Update an existing team's details.
 // @Tags teams
@@ -775,7 +823,7 @@ func (h *KeyHandler) TeamUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "team not found")
 			return
 		}
-		if req.Budget != nil {
+		if req.Budget != nil || req.BudgetDuration != nil || req.ResetSpend {
 			writeError(w, http.StatusForbidden, "only admins can change team budgets")
 			return
 		}
@@ -792,29 +840,131 @@ func (h *KeyHandler) TeamUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	t, err := h.Teams.Get(r.Context(), req.ID)
-	if err != nil || t == nil {
-		writeError(w, http.StatusNotFound, "team not found")
-		return
+	var period time.Duration
+	if req.BudgetDuration != nil {
+		var err error
+		if period, err = ParseDuration(*req.BudgetDuration); err != nil {
+			writeError(w, http.StatusBadRequest, invalid("budget_duration", err.Error()).Error())
+			return
+		}
 	}
-	updated := *t
-	if req.Name != nil {
-		updated.Name = *req.Name
-	}
-	if req.Members != nil {
-		updated.Members = append([]string(nil), (*req.Members)...)
-	}
-	if req.Budget != nil {
-		updated.Budget = *req.Budget
-	}
-	if req.Metadata != nil {
-		updated.Metadata = maps.Clone(req.Metadata)
-	}
-	if err := h.Teams.Update(r.Context(), &updated); err != nil {
-		writeError(w, http.StatusNotFound, "team not found")
+	now := h.Manager.now().UTC()
+	updated, err := h.Manager.updateTeamIn(r.Context(), h.Teams, req.ID, func(t *Team) error {
+		if req.Name != nil {
+			t.Name = *req.Name
+		}
+		if req.Members != nil {
+			t.Members = append([]string(nil), (*req.Members)...)
+		}
+		if req.Budget != nil {
+			t.Budget = *req.Budget
+		}
+		if req.Metadata != nil {
+			t.Metadata = maps.Clone(req.Metadata)
+		}
+		if req.BudgetDuration != nil {
+			t.BudgetDuration, t.BudgetResetAt = "", time.Time{}
+			if period > 0 {
+				t.BudgetDuration = strings.TrimSpace(*req.BudgetDuration)
+				t.BudgetResetAt = now.Add(period)
+			}
+		}
+		if req.ResetSpend {
+			t.Spend = 0
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrTeamNotFound) {
+			writeError(w, http.StatusNotFound, "team not found")
+			return
+		}
+		h.Logger("team update failed", "team_id", req.ID, "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to update team")
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// TeamInfoResponse is the response for /team/info: the team (with Spend
+// reporting the spend of the current budget period) plus derived budget
+// information.
+type TeamInfoResponse struct {
+	*Team
+	// RemainingBudget is Budget - Spend (never negative); absent when the
+	// team has no budget.
+	RemainingBudget *float64 `json:"remaining_budget,omitempty"`
+	// BudgetExceeded reports whether keys of the team are currently
+	// rejected because of the team budget.
+	BudgetExceeded bool `json:"budget_exceeded"`
+	// Keys is the number of non-revoked keys assigned to the team.
+	Keys int `json:"keys"`
+}
+
+// TeamInfo handles GET /team/info?team_id= and POST /team/info
+// ({"team_id": ...}). Admins may read any team; other keys only their own
+// team (defaulting to it when team_id is omitted).
+// @Summary Get team info
+// @Description Get a team's budget, spend and key count.
+// @Tags teams
+// @Produce json
+// @Success 200 {object} TeamInfoResponse
+// @Router /team/info [get]
+func (h *KeyHandler) TeamInfo(w http.ResponseWriter, r *http.Request) {
+	if !allowMethods(w, r, http.MethodGet, http.MethodPost) {
+		return
+	}
+	p, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TeamID string `json:"team_id"`
+		ID     string `json:"id"`
+	}
+	if r.Method == http.MethodGet {
+		q := r.URL.Query()
+		req.TeamID, req.ID = q.Get("team_id"), q.Get("id")
+	} else if !h.decodeBody(w, r, &req) {
+		return
+	}
+	id := strings.TrimSpace(req.TeamID)
+	if id == "" {
+		id = strings.TrimSpace(req.ID)
+	}
+	if id == "" && p.Key != nil {
+		id = p.Key.TeamID
+	}
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing team_id")
+		return
+	}
+	if !p.Admin && (p.Key == nil || p.Key.TeamID == "" || p.Key.TeamID != id) {
+		writeError(w, http.StatusNotFound, "team not found")
+		return
+	}
+	t, err := h.Teams.Get(r.Context(), id)
+	if err != nil || t == nil {
+		if err == nil || errors.Is(err, ErrTeamNotFound) {
+			writeError(w, http.StatusNotFound, "team not found")
+			return
+		}
+		h.Logger("team lookup failed", "team_id", id, "error", err.Error())
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	now := h.Manager.now()
+	t.normalizeSpend(now)
+	resp := &TeamInfoResponse{Team: t, BudgetExceeded: t.overBudget(now)}
+	if rem, ok := t.remaining(now); ok {
+		resp.RemainingBudget = &rem
+	}
+	if infos, err := h.Manager.List(r.Context(), KeyFilter{TeamID: id}); err == nil {
+		resp.Keys = len(infos)
+	} else {
+		h.Logger("team key listing failed", "team_id", id, "error", err.Error())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func validateTeamFields(name *string, members *[]string, budget *float64, md map[string]interface{}) error {
@@ -981,7 +1131,7 @@ func (s *InMemoryUserStore) Create(ctx context.Context, u *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.users[u.ID]; ok {
-		return errors.New("keymanager: user already exists")
+		return ErrUserExists
 	}
 	c := *u
 	c.Metadata = maps.Clone(u.Metadata)
@@ -995,7 +1145,7 @@ func (s *InMemoryUserStore) Get(ctx context.Context, id string) (*User, error) {
 	defer s.mu.RUnlock()
 	u, ok := s.users[id]
 	if !ok {
-		return nil, errors.New("keymanager: user not found")
+		return nil, ErrUserNotFound
 	}
 	u.Metadata = maps.Clone(u.Metadata)
 	return &u, nil
@@ -1009,7 +1159,7 @@ func (s *InMemoryUserStore) Update(ctx context.Context, u *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.users[u.ID]; !ok {
-		return errors.New("keymanager: user not found")
+		return ErrUserNotFound
 	}
 	c := *u
 	c.Metadata = maps.Clone(u.Metadata)
@@ -1042,7 +1192,7 @@ func (s *InMemoryTeamStore) Create(ctx context.Context, t *Team) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.teams[t.ID]; ok {
-		return errors.New("keymanager: team already exists")
+		return ErrTeamExists
 	}
 	s.teams[t.ID] = cloneTeam(*t)
 	return nil
@@ -1054,7 +1204,7 @@ func (s *InMemoryTeamStore) Get(ctx context.Context, id string) (*Team, error) {
 	defer s.mu.RUnlock()
 	t, ok := s.teams[id]
 	if !ok {
-		return nil, errors.New("keymanager: team not found")
+		return nil, ErrTeamNotFound
 	}
 	c := cloneTeam(t)
 	return &c, nil
@@ -1069,12 +1219,31 @@ func (s *InMemoryTeamStore) Update(ctx context.Context, t *Team) error {
 	defer s.mu.Unlock()
 	cur, ok := s.teams[t.ID]
 	if !ok {
-		return errors.New("keymanager: team not found")
+		return ErrTeamNotFound
 	}
 	c := cloneTeam(*t)
 	c.CreatedAt = cur.CreatedAt
 	s.teams[t.ID] = c
 	return nil
+}
+
+// UpdateFunc atomically applies fn to a copy of the stored team and stores
+// the result if fn returns nil. ID and CreatedAt are immutable.
+func (s *InMemoryTeamStore) UpdateFunc(ctx context.Context, id string, fn func(*Team) error) (*Team, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.teams[id]
+	if !ok {
+		return nil, ErrTeamNotFound
+	}
+	next := cloneTeam(cur)
+	if err := fn(&next); err != nil {
+		return nil, err
+	}
+	next.ID, next.CreatedAt = cur.ID, cur.CreatedAt
+	s.teams[id] = next
+	out := cloneTeam(next)
+	return &out, nil
 }
 
 // ErrKeyExists is returned when a key already exists.

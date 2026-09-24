@@ -197,7 +197,7 @@ func TestSearchReturnsDeepCopies(t *testing.T) {
 
 func TestFIFOEviction(t *testing.T) {
 	idx := newFlatIndex(2)
-	idx.upsertAll("s", []Vector{{ID: "1", Data: []float64{1}}, {ID: "2", Data: []float64{1}}, {ID: "3", Data: []float64{1}}})
+	idx.load("s", idx.merged("s", []Vector{{ID: "1", Data: []float64{1}}, {ID: "2", Data: []float64{1}}, {ID: "3", Data: []float64{1}}}))
 	res := idx.search("s", []float64{1}, 0)
 	if len(res) != 2 {
 		t.Fatalf("expected cap of 2, got %d", len(res))
@@ -264,5 +264,77 @@ func TestConcurrentAccess(t *testing.T) {
 func TestOpenRejectsEmptyPath(t *testing.T) {
 	if _, err := OpenBboltStateStore(""); err == nil {
 		t.Fatal("expected error for empty base path")
+	}
+}
+
+func TestOpenFailsFastWhenLocked(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenBboltStateStore(dir)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer first.Close()
+
+	start := time.Now()
+	second, err := OpenBboltStateStoreWithTimeout(dir, 100*time.Millisecond)
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("expected the second open of a locked database to fail")
+	}
+	if !errors.Is(err, ErrStoreLocked) {
+		t.Fatalf("expected ErrStoreLocked, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("open did not honour its timeout: %s", elapsed)
+	}
+
+	// Once the first handle is released the store opens normally.
+	if err := first.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	third, err := OpenBboltStateStoreWithTimeout(dir, 0)
+	if err != nil {
+		t.Fatalf("reopen after release: %v", err)
+	}
+	_ = third.Close()
+}
+
+func TestConcurrentMemoryWritesAllPersisted(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenBboltStateStore(dir)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	ctx := context.Background()
+	const writers, perWriter = 8, 10
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < perWriter; j++ {
+				v := Vector{ID: fmt.Sprintf("v-%d-%d", n, j), Data: []float64{1, float64(n)}}
+				if err := store.StoreShortTermMemory(ctx, "shared", []Vector{v}); err != nil {
+					t.Errorf("store: %v", err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenBboltStateStore(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	res, err := reopened.SearchShortTermMemory(ctx, "shared", []float64{1, 1}, 0)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res) != writers*perWriter {
+		t.Fatalf("expected %d persisted vectors after concurrent writes, got %d", writers*perWriter, len(res))
 	}
 }

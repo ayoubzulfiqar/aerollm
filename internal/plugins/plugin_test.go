@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/wasmrt/wasmrttest"
 )
 
 func TestInMemoryRegistryLifecycle(t *testing.T) {
@@ -88,22 +92,28 @@ func TestInMemoryRegistryConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-var validWASM = append([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, 0x01, 0x02)
+var validWASM = wasmrttest.Nop()
 
-func TestWasmHostIsHonestAboutMissingRuntime(t *testing.T) {
+func TestWasmHostLifecycle(t *testing.T) {
 	host := NewWasmHost(nil)
+	defer host.Close(context.Background())
+	if !host.RuntimeAvailable() {
+		t.Fatal("runtime must be available")
+	}
 	if err := host.LoadPlugin(context.Background(), "p1", []byte{1, 2, 3}); err == nil {
 		t.Fatal("expected non-WASM bytes to be rejected")
 	}
 	if err := host.LoadPlugin(context.Background(), "p1", validWASM); err != nil {
 		t.Fatalf("load plugin failed: %v", err)
 	}
-	if host.RuntimeAvailable() {
-		t.Fatal("runtime must not claim to be available")
+	in := map[string]interface{}{"hello": "world"}
+	out, err := host.RunHook(context.Background(), "p1", HookOnRequest, in)
+	if err != nil || out["hello"] != "world" {
+		t.Fatalf("expected unchanged payload, got %v %v", out, err)
 	}
-	out, err := host.RunHook(context.Background(), "p1", HookOnRequest, map[string]interface{}{"hello": "world"})
-	if !errors.Is(err, ErrWASMRuntimeUnavailable) || out != nil {
-		t.Fatalf("expected ErrWASMRuntimeUnavailable and no output, got %v %v", out, err)
+	out["hello"] = "mutated"
+	if in["hello"] != "world" {
+		t.Fatal("RunHook must return a copy of the caller's payload")
 	}
 	if _, err := host.RunHook(context.Background(), "missing", HookOnRequest, nil); !errors.Is(err, ErrPluginNotFound) {
 		t.Fatalf("expected not found, got %v", err)
@@ -120,6 +130,9 @@ func TestWasmHostIsHonestAboutMissingRuntime(t *testing.T) {
 	if err := host.Close(context.Background()); err != nil {
 		t.Fatalf("close failed: %v", err)
 	}
+	if host.RuntimeAvailable() {
+		t.Fatal("closed host must not report an available runtime")
+	}
 	if err := host.LoadPlugin(context.Background(), "p2", validWASM); !errors.Is(err, ErrHostClosed) {
 		t.Fatalf("expected ErrHostClosed after close, got %v", err)
 	}
@@ -130,15 +143,21 @@ func TestWasmHostIsHonestAboutMissingRuntime(t *testing.T) {
 
 func TestWasmHostCopiesModuleBytes(t *testing.T) {
 	host := NewWasmHost(nil)
-	buf := append([]byte(nil), validWASM...)
+	defer host.Close(context.Background())
+	buf := wasmrttest.Hello(`{"payload":{"v":"original"}}`)
+	sum := sha256.Sum256(buf)
 	if err := host.LoadPlugin(context.Background(), "p1", buf); err != nil {
 		t.Fatal(err)
 	}
-	buf[0] = 0xFF
-	host.mu.RLock()
-	defer host.mu.RUnlock()
-	if host.modules["p1"][0] != 0x00 {
-		t.Fatal("host must keep its own copy of the module")
+	for i := range buf {
+		buf[i] = 0xFF
+	}
+	if h, ok := host.ModuleHash("p1"); !ok || h != hex.EncodeToString(sum[:]) {
+		t.Fatalf("host must keep its own copy of the module: %q", h)
+	}
+	out, err := host.RunHook(context.Background(), "p1", HookOnRequest, nil)
+	if err != nil || out["v"] != "original" {
+		t.Fatalf("module must still run from the host's copy: %v %v", out, err)
 	}
 }
 
@@ -165,6 +184,7 @@ func TestWasmHostLoadPluginFileConfinedToDir(t *testing.T) {
 	}
 
 	host := NewWasmHost(nil)
+	defer host.Close(context.Background())
 	if err := host.LoadPluginFile(context.Background(), "ok", pluginDir, "ok.wasm"); err != nil {
 		t.Fatalf("load ok: %v", err)
 	}
@@ -179,6 +199,9 @@ func TestWasmHostLoadPluginFileConfinedToDir(t *testing.T) {
 	}
 	if got := host.Loaded(); len(got) != 1 || got[0] != "ok" {
 		t.Fatalf("unexpected loaded set %v", got)
+	}
+	if _, err := host.RunHook(context.Background(), "ok", HookOnResponse, map[string]interface{}{"a": 1}); err != nil {
+		t.Fatalf("file-loaded plugin must run: %v", err)
 	}
 }
 

@@ -3,10 +3,12 @@ package gitops
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -260,6 +262,16 @@ func TestRedactsCredentials(t *testing.T) {
 
 // --- integration with a real git binary ---
 
+// fileURL returns a file:// URL for a local directory that is valid on
+// every platform ("file:///C:/..." on Windows, "file:///tmp/..." elsewhere).
+func fileURL(dir string) string {
+	p := filepath.ToSlash(dir)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return (&url.URL{Scheme: "file", Path: p}).String()
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	full := append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"}, args...)
@@ -285,7 +297,7 @@ func TestGitIntegrationCloneAndUpdate(t *testing.T) {
 	first := runGit(t, src, "rev-parse", "HEAD")
 
 	mirror := filepath.Join(t.TempDir(), "mirror")
-	store, err := NewGitPromptStoreFromConfig(GitConfig{RepoURL: "file://" + src, LocalPath: mirror, Branch: "main", Timeout: 30 * time.Second})
+	store, err := NewGitPromptStoreFromConfig(GitConfig{RepoURL: fileURL(src), LocalPath: mirror, Branch: "main", Timeout: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +348,7 @@ func TestGitIntegrationBadBranchKeepsSnapshot(t *testing.T) {
 	runGit(t, src, "add", ".")
 	runGit(t, src, "commit", "-q", "-m", "v1")
 
-	store := NewGitPromptStore("file://"+src, filepath.Join(t.TempDir(), "m"), "does-not-exist", time.Minute)
+	store := NewGitPromptStore(fileURL(src), filepath.Join(t.TempDir(), "m"), "does-not-exist", time.Minute)
 	err := store.Sync(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "git clone failed") {
 		t.Fatalf("expected clone failure, got %v", err)
@@ -360,6 +372,9 @@ func TestStartSyncsImmediatelyAndStops(t *testing.T) {
 }
 
 func TestGitTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake git binary is a shell script")
+	}
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep not available")
 	}

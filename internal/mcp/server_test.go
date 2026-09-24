@@ -8,18 +8,45 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
 )
 
+// testSessions caches one session per server for post.
+var testSessions sync.Map // *Server -> session ID
+
+// sessionFor returns a live session of s, creating it directly.
+func sessionFor(t *testing.T, s *Server) string {
+	t.Helper()
+	if id, ok := testSessions.Load(s); ok {
+		return id.(string)
+	}
+	info, err := s.sessions.create("", LatestProtocolVersion, "test", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testSessions.Store(s, info.ID)
+	return info.ID
+}
+
+// post sends a JSON-RPC body. Unless the body is an initialize request or
+// hdr sets Mcp-Session-Id itself (an empty value sends no header), a session
+// of s is attached automatically when sessions are enabled.
 func post(t *testing.T, s *Server, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	_, explicit := hdr[HeaderSessionID]
 	for k, v := range hdr {
-		req.Header.Set(k, v)
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	if s.sessions != nil && !explicit && peekMethod([]byte(body)) != "initialize" {
+		req.Header.Set(HeaderSessionID, sessionFor(t, s))
 	}
 	w := httptest.NewRecorder()
 	s.HandleHTTP(w, req)
@@ -205,7 +232,8 @@ func TestMCPJSONRPCErrors(t *testing.T) {
 		{"null id", `{"jsonrpc":"2.0","id":null,"method":"ping"}`, http.StatusOK, CodeInvalidRequest},
 		{"object id", `{"jsonrpc":"2.0","id":{},"method":"ping"}`, http.StatusOK, CodeInvalidRequest},
 		{"not an object", `42`, http.StatusOK, CodeInvalidRequest},
-		{"unknown method", `{"jsonrpc":"2.0","id":1,"method":"resources/list"}`, http.StatusOK, CodeMethodNotFound},
+		{"unknown method", `{"jsonrpc":"2.0","id":1,"method":"bogus/method"}`, http.StatusOK, CodeMethodNotFound},
+		{"resources not configured", `{"jsonrpc":"2.0","id":1,"method":"resources/list"}`, http.StatusOK, CodeMethodNotFound},
 		{"call without params", `{"jsonrpc":"2.0","id":1,"method":"tools/call"}`, http.StatusOK, CodeInvalidParams},
 		{"array params", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":["echo"]}`, http.StatusOK, CodeInvalidParams},
 		{"missing name", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}`, http.StatusOK, CodeInvalidParams},
@@ -291,13 +319,31 @@ func TestMCPBatch(t *testing.T) {
 func TestMCPHTTPGuards(t *testing.T) {
 	s := echoServer()
 
-	for _, m := range []string{http.MethodGet, http.MethodDelete, http.MethodPut} {
+	// No server-initiated SSE stream: GET (and other verbs) yield 405.
+	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodPatch} {
 		req := httptest.NewRequest(m, "/mcp", nil)
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, req)
-		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodPost {
-			t.Fatalf("%s: expected 405 with Allow: POST, got %d %v", m, w.Code, w.Header())
+		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "POST, DELETE" {
+			t.Fatalf("%s: expected 405 with Allow: POST, DELETE, got %d %v", m, w.Code, w.Header())
 		}
+	}
+	stateless := NewServer(WithoutSessions())
+	for _, m := range []string{http.MethodGet, http.MethodDelete, http.MethodPut} {
+		req := httptest.NewRequest(m, "/mcp", nil)
+		w := httptest.NewRecorder()
+		stateless.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodPost {
+			t.Fatalf("stateless %s: expected 405 with Allow: POST, got %d %v", m, w.Code, w.Header())
+		}
+	}
+
+	// Accept must admit application/json when present.
+	if w := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"ping"}`, map[string]string{"Accept": "text/event-stream"}); w.Code != http.StatusNotAcceptable {
+		t.Fatalf("expected 406 for an Accept header without JSON, got %d", w.Code)
+	}
+	if w := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"ping"}`, map[string]string{"Accept": "application/json, text/event-stream"}); w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for the spec Accept header, got %d", w.Code)
 	}
 
 	// text/plain (cross-site form / no-cors fetch) is rejected.

@@ -1,10 +1,19 @@
 // Package mcp implements a Model Context Protocol server over the Streamable
 // HTTP transport (JSON-RPC 2.0 messages POSTed to a single endpoint).
+//
+// The server speaks protocol revisions 2024-11-05 through 2025-11-25
+// (negotiated at initialize) and offers tools (backed by static definitions
+// and/or an agent.ToolRegistry, optionally billed through an
+// agent.ToolCallBiller), resources (backed by a ResourceProvider) and prompt
+// templates. Sessions (Mcp-Session-Id) are issued at initialize, required on
+// later requests, expire when idle and are terminated with DELETE; they can
+// be disabled for stateless multi-replica deployments.
 package mcp
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,14 +46,22 @@ var SupportedProtocolVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26
 // are always accepted.
 const EnvAllowedOrigins = "AEROLLM_MCP_ALLOWED_ORIGINS"
 
+// EnvStateless names the environment variable that, when set to a true
+// value, disables MCP sessions (see WithoutSessions). Use it when several
+// gateway replicas serve /mcp without sticky routing: sessions live in the
+// memory of the replica that issued them.
+const EnvStateless = "AEROLLM_MCP_STATELESS"
+
 // Defaults for Server limits.
 const (
 	DefaultMaxBodyBytes       int64 = 4 << 20
 	DefaultToolTimeout              = 60 * time.Second
 	DefaultMaxToolOutputBytes       = 1 << 20
 	DefaultMaxBatchSize             = 64
-	serverName                      = "aerollm-mcp"
-	serverVersion                   = "1.0.0"
+	// DefaultPageSize is the page size of resources/list and prompts/list.
+	DefaultPageSize = 100
+	serverName      = "aerollm-mcp"
+	serverVersion   = "1.0.0"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -67,8 +85,9 @@ type ToolDefinition struct {
 }
 
 // Server implements a Model Context Protocol server using the Streamable
-// HTTP transport. It is stateless: every POST carries one JSON-RPC message or
-// a batch, and responses are returned as application/json.
+// HTTP transport. Every POST carries one JSON-RPC message or a batch, and
+// responses are returned as application/json; the server does not offer a
+// server-initiated SSE stream (GET yields 405).
 //
 // Exported configuration fields must be set before the server starts
 // serving requests.
@@ -76,6 +95,13 @@ type Server struct {
 	mu       sync.RWMutex
 	tools    map[string]ToolDefinition
 	registry *agent.ToolRegistry
+	prompts  map[string]PromptDefinition
+
+	sessions     *sessionManager // nil in stateless mode
+	sessionOwner func(*http.Request) string
+	resources    ResourceProvider
+	biller       agent.ToolCallBiller
+	instructions string
 
 	// AllowedOrigins lists cross-origin browser origins permitted to call the
 	// endpoint (DNS-rebinding protection). Defaults to AEROLLM_MCP_ALLOWED_ORIGINS.
@@ -88,12 +114,88 @@ type Server struct {
 	MaxToolOutputBytes int
 	// MaxBatchSize caps the number of messages in a JSON-RPC batch (default 64).
 	MaxBatchSize int
+	// MaxResourceBytes caps one resources/read result (default 8 MiB).
+	MaxResourceBytes int
+	// PageSize is the page size of resources/list and prompts/list
+	// (default DefaultPageSize).
+	PageSize int
+}
+
+// Option configures a Server.
+type Option func(*Server)
+
+// WithToolBilling routes every tools/call through b before the tool runs.
+// The request context (carrying the gateway principal and the MCP session
+// ID) is passed to BillToolCall; when it returns an error the tool is not
+// executed and the call returns an isError result ("tool call rejected:
+// billing failed"). Charges are not refunded when the tool itself fails.
+func WithToolBilling(b agent.ToolCallBiller) Option {
+	return func(s *Server) { s.biller = b }
+}
+
+// WithResourceProvider enables the resources capability backed by p.
+func WithResourceProvider(p ResourceProvider) Option {
+	return func(s *Server) { s.resources = p }
+}
+
+// WithoutSessions disables sessions: no Mcp-Session-Id is issued or
+// required and DELETE yields 405. Use it for multi-replica deployments
+// without sticky routing.
+func WithoutSessions() Option {
+	return func(s *Server) { s.sessions = nil }
+}
+
+// WithSessions (re-)enables sessions, overriding AEROLLM_MCP_STATELESS.
+func WithSessions() Option {
+	return func(s *Server) {
+		if s.sessions == nil {
+			s.sessions = newSessionManager()
+		}
+	}
+}
+
+// WithSessionIdleTimeout sets how long an unused session stays valid
+// (default 30 minutes). Non-positive values are ignored.
+func WithSessionIdleTimeout(d time.Duration) Option {
+	return func(s *Server) {
+		if s.sessions != nil && d > 0 {
+			s.sessions.idle = d
+		}
+	}
+}
+
+// WithMaxSessions bounds the number of live sessions (default 10000). When
+// full, the least recently used session is evicted; its client receives 404
+// and re-initializes. Non-positive values are ignored.
+func WithMaxSessions(n int) Option {
+	return func(s *Server) {
+		if s.sessions != nil && n > 0 {
+			s.sessions.max = n
+		}
+	}
+}
+
+// WithSessionOwner sets the function deriving the owner a session is bound
+// to; requests from a different owner get 404 for it. The default uses the
+// key ID of the gateway principal set by the auth middleware.
+func WithSessionOwner(fn func(*http.Request) string) Option {
+	return func(s *Server) {
+		if fn != nil {
+			s.sessionOwner = fn
+		}
+	}
+}
+
+// WithInstructions sets the instructions returned by initialize.
+func WithInstructions(text string) Option {
+	return func(s *Server) { s.instructions = text }
 }
 
 // Session represents an MCP client session.
 //
-// Deprecated: the server is stateless and no longer opens SSE sessions; the
-// type is kept for API compatibility.
+// Deprecated: sessions are tracked internally (see SessionInfo and
+// SessionIDFromContext) and no SSE stream is opened; the type is kept for
+// API compatibility.
 type Session struct {
 	ID      string
 	Server  *Server
@@ -153,16 +255,30 @@ func (h *EventHub) Broadcast(event map[string]interface{}) {
 	}
 }
 
-// NewServer creates a new MCP server with no tools.
-func NewServer() *Server {
-	return &Server{
+// NewServer creates a new MCP server with no tools. Sessions are enabled
+// unless AEROLLM_MCP_STATELESS is true; opts are applied last.
+func NewServer(opts ...Option) *Server {
+	s := &Server{
 		tools:              make(map[string]ToolDefinition),
+		prompts:            make(map[string]PromptDefinition),
+		sessionOwner:       defaultSessionOwner,
 		AllowedOrigins:     parseOrigins(os.Getenv(EnvAllowedOrigins)),
 		MaxBodyBytes:       DefaultMaxBodyBytes,
 		ToolTimeout:        DefaultToolTimeout,
 		MaxToolOutputBytes: DefaultMaxToolOutputBytes,
 		MaxBatchSize:       DefaultMaxBatchSize,
+		MaxResourceBytes:   DefaultMaxResourceBytes,
+		PageSize:           DefaultPageSize,
 	}
+	if stateless, _ := strconv.ParseBool(os.Getenv(EnvStateless)); !stateless {
+		s.sessions = newSessionManager()
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // NewServerWithRegistry creates an MCP server that exposes the tools of an
@@ -170,10 +286,18 @@ func NewServer() *Server {
 // later are picked up automatically. Tools that require human approval
 // (agent.RequiresApproval) are never exposed, since MCP calls would bypass
 // the HITL gate.
-func NewServerWithRegistry(reg *agent.ToolRegistry) *Server {
-	s := NewServer()
+func NewServerWithRegistry(reg *agent.ToolRegistry, opts ...Option) *Server {
+	s := NewServer(opts...)
 	s.AttachRegistry(reg)
 	return s
+}
+
+// SessionCount returns the number of live sessions (0 in stateless mode).
+func (s *Server) SessionCount() int {
+	if s.sessions == nil {
+		return 0
+	}
+	return s.sessions.count()
 }
 
 // AttachRegistry exposes reg's tools through this server (see
@@ -274,17 +398,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.HandleHTTP(w, r)
 }
 
-// HandleHTTP implements the MCP Streamable HTTP endpoint. Only POST is
-// supported: this server does not offer a server-initiated SSE stream, so GET
-// (and every other method) yields 405.
+// HandleHTTP implements the MCP Streamable HTTP endpoint:
+//
+//   - POST carries one JSON-RPC message or a batch. A successful initialize
+//     returns an Mcp-Session-Id header; every later request must carry it
+//     (400 without it, 404 once the session is unknown, expired, terminated
+//     or bound to another principal). Pings are accepted without a session.
+//   - DELETE with Mcp-Session-Id terminates the session (204).
+//   - GET and other methods yield 405: no server-initiated SSE stream is
+//     offered.
+//
+// In stateless mode (WithoutSessions) no session is issued or checked and
+// only POST is allowed.
 func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+	if r.Method != http.MethodPost && (r.Method != http.MethodDelete || s.sessions == nil) {
+		w.Header().Set("Allow", s.allowedMethods())
 		writeHTTPError(w, http.StatusMethodNotAllowed, CodeInvalidRequest, "method not allowed")
 		return
 	}
 	if !originAllowed(r, s.AllowedOrigins) {
 		writeHTTPError(w, http.StatusForbidden, CodeInvalidRequest, "origin not allowed")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		s.handleDelete(w, r)
 		return
 	}
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -293,6 +430,10 @@ func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 			writeHTTPError(w, http.StatusUnsupportedMediaType, CodeInvalidRequest, "content type must be application/json")
 			return
 		}
+	}
+	if !acceptsJSON(r) {
+		writeHTTPError(w, http.StatusNotAcceptable, CodeInvalidRequest, "client must accept application/json")
+		return
 	}
 	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !protocolSupported(v) {
 		writeHTTPError(w, http.StatusBadRequest, CodeInvalidRequest, "unsupported MCP protocol version")
@@ -319,9 +460,9 @@ func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-	if body[0] == '[' {
-		var items []json.RawMessage
+	items := []json.RawMessage{body}
+	batch := body[0] == '['
+	if batch {
 		if err := json.Unmarshal(body, &items); err != nil {
 			writeHTTPError(w, http.StatusBadRequest, CodeParseError, "parse error")
 			return
@@ -338,27 +479,141 @@ func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 			writeHTTPError(w, http.StatusBadRequest, CodeInvalidRequest, "batch too large")
 			return
 		}
-		responses := make([]*rpcResponse, 0, len(items))
-		for _, item := range items {
-			if resp := s.handleMessage(ctx, item); resp != nil {
-				responses = append(responses, resp)
+	}
+
+	st := &callState{batch: batch}
+	ctx := r.Context()
+	if s.sessions != nil {
+		initialize := !batch && peekMethod(body) == "initialize"
+		if !initialize {
+			sid := r.Header.Get(HeaderSessionID)
+			switch {
+			case sid != "":
+				info, ok := s.sessions.touch(sid, s.sessionOwner(r))
+				if !ok {
+					writeHTTPError(w, http.StatusNotFound, CodeSessionNotFound, "session not found")
+					return
+				}
+				st.session = &info
+				ctx = withSessionID(ctx, info.ID)
+			case !onlyPings(items):
+				writeHTTPError(w, http.StatusBadRequest, CodeSessionRequired, "bad request: "+HeaderSessionID+" header is required")
+				return
 			}
 		}
-		if len(responses) == 0 {
+	}
+
+	if !batch {
+		resp := s.handleMessage(ctx, st, body)
+		if resp == nil {
+			// Notifications and client responses: accepted, no body.
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		writeJSON(w, http.StatusOK, responses)
+		if st.initOK && s.sessions != nil {
+			info, err := s.sessions.create(s.sessionOwner(r), st.initVersion, st.clientName, st.clientVersion)
+			if err != nil {
+				writeHTTPError(w, http.StatusInternalServerError, CodeInternalError, "failed to create session")
+				return
+			}
+			w.Header().Set(HeaderSessionID, info.ID)
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	resp := s.handleMessage(ctx, body)
-	if resp == nil {
-		// Notifications and client responses: accepted, no body.
+	responses := make([]*rpcResponse, 0, len(items))
+	for _, item := range items {
+		if resp := s.handleMessage(ctx, st, item); resp != nil {
+			responses = append(responses, resp)
+		}
+	}
+	if len(responses) == 0 {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, responses)
+}
+
+// handleDelete terminates a session (sessions enabled only).
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	sid := r.Header.Get(HeaderSessionID)
+	if sid == "" {
+		writeHTTPError(w, http.StatusBadRequest, CodeSessionRequired, "bad request: "+HeaderSessionID+" header is required")
+		return
+	}
+	if !s.sessions.remove(sid, s.sessionOwner(r)) {
+		writeHTTPError(w, http.StatusNotFound, CodeSessionNotFound, "session not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) allowedMethods() string {
+	if s.sessions != nil {
+		return "POST, DELETE"
+	}
+	return http.MethodPost
+}
+
+// callState carries per-HTTP-request state through message handling.
+type callState struct {
+	batch   bool
+	session *SessionInfo
+
+	// Set by a successful initialize.
+	initOK        bool
+	initVersion   string
+	clientName    string
+	clientVersion string
+}
+
+// peekMethod returns the "method" of a JSON-RPC message ("" if absent).
+func peekMethod(raw json.RawMessage) string {
+	var m struct {
+		Method json.RawMessage `json:"method"`
+	}
+	if json.Unmarshal(raw, &m) != nil || len(m.Method) == 0 {
+		return ""
+	}
+	var name string
+	if json.Unmarshal(m.Method, &name) != nil {
+		return ""
+	}
+	return name
+}
+
+// onlyPings reports whether every message is a ping request, which the spec
+// allows before (and therefore without) a session.
+func onlyPings(items []json.RawMessage) bool {
+	for _, it := range items {
+		if peekMethod(it) != "ping" {
+			return false
+		}
+	}
+	return len(items) > 0
+}
+
+// acceptsJSON reports whether the Accept header (if any) admits
+// application/json responses.
+func acceptsJSON(r *http.Request) bool {
+	values := r.Header.Values("Accept")
+	if len(values) == 0 {
+		return true
+	}
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			mt, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+			if err != nil {
+				continue
+			}
+			switch mt {
+			case "application/json", "application/*", "*/*":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // JSONRPCRequest is a minimal JSON-RPC 2.0 request.
@@ -393,7 +648,7 @@ func errorResponse(id json.RawMessage, code int, msg string) *rpcResponse {
 
 // handleMessage processes one JSON-RPC message and returns the response, or
 // nil when no response must be sent (notifications, client responses).
-func (s *Server) handleMessage(ctx context.Context, raw json.RawMessage) *rpcResponse {
+func (s *Server) handleMessage(ctx context.Context, st *callState, raw json.RawMessage) *rpcResponse {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return errorResponse(nil, CodeInvalidRequest, "invalid request")
@@ -434,7 +689,7 @@ func (s *Server) handleMessage(ctx context.Context, raw json.RawMessage) *rpcRes
 		return nil
 	}
 
-	result, rpcErr := s.dispatch(ctx, method, fields["params"])
+	result, rpcErr := s.dispatch(ctx, st, method, fields["params"])
 	if rpcErr != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: respID, Error: rpcErr}
 	}
@@ -477,35 +732,10 @@ func decodeParams(raw json.RawMessage, dst interface{}, required bool) *rpcError
 	return nil
 }
 
-func (s *Server) dispatch(ctx context.Context, method string, params json.RawMessage) (interface{}, *rpcError) {
+func (s *Server) dispatch(ctx context.Context, st *callState, method string, params json.RawMessage) (interface{}, *rpcError) {
 	switch method {
 	case "initialize":
-		var p struct {
-			ProtocolVersion json.RawMessage `json:"protocolVersion"`
-		}
-		if e := decodeParams(params, &p, false); e != nil {
-			return nil, e
-		}
-		version := LatestProtocolVersion
-		if len(p.ProtocolVersion) > 0 && !bytes.Equal(p.ProtocolVersion, []byte("null")) {
-			var requested string
-			if err := json.Unmarshal(p.ProtocolVersion, &requested); err != nil {
-				return nil, &rpcError{Code: CodeInvalidParams, Message: "invalid params: protocolVersion must be a string"}
-			}
-			if protocolSupported(requested) {
-				version = requested
-			}
-		}
-		return map[string]interface{}{
-			"protocolVersion": version,
-			"capabilities": map[string]interface{}{
-				"tools": map[string]interface{}{"listChanged": false},
-			},
-			"serverInfo": map[string]interface{}{
-				"name":    serverName,
-				"version": serverVersion,
-			},
-		}, nil
+		return s.initialize(st, params)
 
 	case "ping":
 		return struct{}{}, nil
@@ -553,11 +783,152 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 		if !ok {
 			return nil, &rpcError{Code: CodeInvalidParams, Message: "unknown tool: " + TruncateString(*p.Name, 128)}
 		}
+		if err := s.bill(ctx, def.Name); err != nil {
+			return toolResult("tool call rejected: billing failed", true), nil
+		}
 		return s.callTool(ctx, def, args), nil
 
-	default:
-		return nil, &rpcError{Code: CodeMethodNotFound, Message: "method not found: " + TruncateString(method, 128)}
+	case "resources/list":
+		if s.resources == nil {
+			break
+		}
+		return s.listResources(ctx, params)
+
+	case "resources/read":
+		if s.resources == nil {
+			break
+		}
+		return s.readResource(ctx, params)
+
+	case "resources/templates/list":
+		if s.resources == nil {
+			break
+		}
+		var p struct {
+			Cursor *string `json:"cursor"`
+		}
+		if e := decodeParams(params, &p, false); e != nil {
+			return nil, e
+		}
+		return map[string]interface{}{"resourceTemplates": []interface{}{}}, nil
+
+	case "prompts/list":
+		return s.listPrompts(params)
+
+	case "prompts/get":
+		return s.getPrompt(ctx, params)
 	}
+	return nil, &rpcError{Code: CodeMethodNotFound, Message: "method not found: " + TruncateString(method, 128)}
+}
+
+// initialize negotiates the protocol version and advertises capabilities.
+// Capabilities are only advertised for configured features: resources with
+// a ResourceProvider, prompts once at least one prompt is registered.
+func (s *Server) initialize(st *callState, params json.RawMessage) (interface{}, *rpcError) {
+	if st.batch {
+		return nil, &rpcError{Code: CodeInvalidRequest, Message: "invalid request: initialize must not be part of a batch"}
+	}
+	var p struct {
+		ProtocolVersion json.RawMessage `json:"protocolVersion"`
+		ClientInfo      struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"clientInfo"`
+	}
+	if e := decodeParams(params, &p, false); e != nil {
+		return nil, e
+	}
+	version := LatestProtocolVersion
+	if len(p.ProtocolVersion) > 0 && !bytes.Equal(p.ProtocolVersion, []byte("null")) {
+		var requested string
+		if err := json.Unmarshal(p.ProtocolVersion, &requested); err != nil {
+			return nil, &rpcError{Code: CodeInvalidParams, Message: "invalid params: protocolVersion must be a string"}
+		}
+		if protocolSupported(requested) {
+			version = requested
+		}
+	}
+	caps := map[string]interface{}{
+		"tools": map[string]interface{}{"listChanged": false},
+	}
+	if s.resources != nil {
+		caps["resources"] = map[string]interface{}{"subscribe": false, "listChanged": false}
+	}
+	if s.hasPrompts() {
+		caps["prompts"] = map[string]interface{}{"listChanged": false}
+	}
+	result := map[string]interface{}{
+		"protocolVersion": version,
+		"capabilities":    caps,
+		"serverInfo": map[string]interface{}{
+			"name":    serverName,
+			"version": serverVersion,
+		},
+	}
+	if s.instructions != "" {
+		result["instructions"] = s.instructions
+	}
+	st.initOK = true
+	st.initVersion = version
+	st.clientName = TruncateString(p.ClientInfo.Name, 256)
+	st.clientVersion = TruncateString(p.ClientInfo.Version, 64)
+	return result, nil
+}
+
+// bill charges a tool call through the configured biller (if any). Panics
+// and timeouts are treated as billing failures.
+func (s *Server) bill(ctx context.Context, tool string) error {
+	if s.biller == nil {
+		return nil
+	}
+	return s.callProvider(ctx, func(ctx context.Context) error {
+		return s.biller.BillToolCall(ctx, tool)
+	})
+}
+
+// callProvider runs fn (a resource/prompt provider or the biller) with the
+// tool timeout, converting panics into errors.
+func (s *Server) callProvider(ctx context.Context, fn func(context.Context) error) (err error) {
+	timeout := s.ToolTimeout
+	if timeout <= 0 {
+		timeout = DefaultToolTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = errProviderPanicked
+		}
+	}()
+	return fn(ctx)
+}
+
+func (s *Server) pageSize() int {
+	if s.PageSize > 0 {
+		return s.PageSize
+	}
+	return DefaultPageSize
+}
+
+// paginate resolves an opaque cursor into the [start, end) window of a list
+// of total items and returns the cursor of the next page ("" on the last).
+func paginate(total int, cursor *string, pageSize int) (start, end int, next string, rerr *rpcError) {
+	if cursor != nil && *cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(*cursor)
+		n, perr := strconv.Atoi(strings.TrimPrefix(string(raw), "o:"))
+		if err != nil || perr != nil || !strings.HasPrefix(string(raw), "o:") || n < 0 {
+			return 0, 0, "", &rpcError{Code: CodeInvalidParams, Message: "invalid params: invalid cursor"}
+		}
+		start = n
+	}
+	if start > total {
+		start = total
+	}
+	end = start + pageSize
+	if end >= total {
+		return start, total, "", nil
+	}
+	return start, end, base64.RawURLEncoding.EncodeToString([]byte("o:" + strconv.Itoa(end))), nil
 }
 
 // callTool executes a tool with a timeout and panic recovery and converts the

@@ -81,7 +81,9 @@ type DispatcherOptions struct {
 	// AllowInsecureHTTP permits http:// targets.
 	AllowInsecureHTTP bool
 	// EmailSender / SMSSender back the email and sms channel types. When nil,
-	// sends to such channels fail with ErrChannelNotImplemented.
+	// sends to such channels fail with ErrChannelNotImplemented. SMTPSender
+	// and TwilioSender implement them; SendersFromEnv builds both from the
+	// environment.
 	EmailSender EmailSender
 	SMSSender   SMSSender
 	// UserAgent sent with HTTP deliveries.
@@ -167,8 +169,52 @@ func (d *Dispatcher) Send(ctx context.Context, channelID string, msg Message) er
 // exists and is enabled. Deliveries run concurrently (bounded); failures are
 // combined with errors.Join. No subscriptions means nothing to do (nil).
 func (d *Dispatcher) Notify(ctx context.Context, alertID string, msg Message) error {
+	_, err := d.NotifyWithResults(ctx, alertID, msg)
+	return err
+}
+
+// DeliveryResult reports the outcome of delivering a message to one channel.
+// Error is a short, secret-free classification (see ErrorClass).
+type DeliveryResult struct {
+	ChannelID string      `json:"channel_id"`
+	Type      ChannelType `json:"type"`
+	Delivered bool        `json:"delivered"`
+	Error     string      `json:"error,omitempty"`
+}
+
+// ErrorClass maps a delivery error to a stable, secret-free label:
+// "not_implemented", "disabled", "not_found", "blocked_destination",
+// "invalid_channel", "timeout", "canceled" or "delivery_failed" ("" for nil).
+func ErrorClass(err error) string {
+	var verr *ValidationError
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrChannelNotImplemented):
+		return "not_implemented"
+	case errors.Is(err, ErrChannelDisabled):
+		return "disabled"
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrBlockedDestination):
+		return "blocked_destination"
+	case errors.As(err, &verr):
+		return "invalid_channel"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "delivery_failed"
+	}
+}
+
+// NotifyWithResults is Notify that also reports the per-channel outcome, in
+// channel order of the matching subscriptions. An empty result means no
+// enabled subscription with an existing, enabled channel matched alertID.
+func (d *Dispatcher) NotifyWithResults(ctx context.Context, alertID string, msg Message) ([]DeliveryResult, error) {
 	if d == nil || d.store == nil {
-		return errors.New("notification: dispatcher has no store")
+		return nil, errors.New("notification: dispatcher has no store")
 	}
 	if msg.AlertID == "" {
 		msg.AlertID = alertID
@@ -188,7 +234,11 @@ func (d *Dispatcher) Notify(ctx context.Context, alertID string, msg Message) er
 		targets = append(targets, ch)
 	}
 	if len(targets) == 0 {
-		return nil
+		return nil, nil
+	}
+	results := make([]DeliveryResult, len(targets))
+	for i, ch := range targets {
+		results[i] = DeliveryResult{ChannelID: ch.ID, Type: ch.Type}
 	}
 	var (
 		mu   sync.Mutex
@@ -196,7 +246,7 @@ func (d *Dispatcher) Notify(ctx context.Context, alertID string, msg Message) er
 		wg   sync.WaitGroup
 		sem  = make(chan struct{}, d.opts.Parallelism)
 	)
-	for _, ch := range targets {
+	for i, ch := range targets {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -204,21 +254,27 @@ func (d *Dispatcher) Notify(ctx context.Context, alertID string, msg Message) er
 			errs = append(errs, ctx.Err())
 			mu.Unlock()
 			wg.Wait()
-			return errors.Join(errs...)
+			for j := i; j < len(targets); j++ {
+				results[j].Error = ErrorClass(ctx.Err())
+			}
+			return results, errors.Join(errs...)
 		}
 		wg.Add(1)
-		go func(ch Channel) {
+		go func(i int, ch Channel) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := d.Deliver(ctx, ch, msg); err != nil {
+			err := d.Deliver(ctx, ch, msg)
+			results[i].Delivered = err == nil
+			results[i].Error = ErrorClass(err)
+			if err != nil {
 				mu.Lock()
 				errs = append(errs, err)
 				mu.Unlock()
 			}
-		}(ch)
+		}(i, ch)
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return results, errors.Join(errs...)
 }
 
 // Deliver sends msg to the given channel definition.
@@ -256,12 +312,18 @@ func (d *Dispatcher) Deliver(ctx context.Context, ch Channel, msg Message) error
 		if d.opts.EmailSender == nil {
 			return fmt.Errorf("channel %q (email): %w: no EmailSender configured", ch.ID, ErrChannelNotImplemented)
 		}
-		return d.opts.EmailSender.SendEmail(ctx, ch.Target, msg)
+		if err := d.opts.EmailSender.SendEmail(ctx, ch.Target, msg); err != nil {
+			return fmt.Errorf("channel %q (email): %w", ch.ID, err)
+		}
+		return nil
 	case ChannelSMS:
 		if d.opts.SMSSender == nil {
 			return fmt.Errorf("channel %q (sms): %w: no SMSSender configured", ch.ID, ErrChannelNotImplemented)
 		}
-		return d.opts.SMSSender.SendSMS(ctx, ch.Target, msg)
+		if err := d.opts.SMSSender.SendSMS(ctx, ch.Target, msg); err != nil {
+			return fmt.Errorf("channel %q (sms): %w", ch.ID, err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("channel %q (%s): %w", ch.ID, ch.Type, ErrChannelNotImplemented)
 	}

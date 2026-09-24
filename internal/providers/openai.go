@@ -110,6 +110,17 @@ func (p *OpenAIProvider) StreamChatCompletions(ctx context.Context, req *models.
 	return OpenAIChatStream(ctx, p.http, p.name, endpoint, p.headers(), NewOpenAIChatRequest(req, "", true, true), p.health.Observe)
 }
 
+// Probe implements Prober with GET {base}/models; the result is reflected in
+// Health.
+func (p *OpenAIProvider) Probe(ctx context.Context) error {
+	return RunProbe(&p.health, func() error {
+		if p.baseErr != nil {
+			return &UpstreamError{Provider: p.name, StatusCode: http.StatusInternalServerError, Type: "configuration_error", Message: "provider base URL misconfigured: " + p.baseErr.Error()}
+		}
+		return ProbeEndpoint(ctx, p.http, p.name, JoinURL(p.base, "/models"), p.headers())
+	})
+}
+
 // Name returns provider name.
 func (p *OpenAIProvider) Name() string { return p.name }
 

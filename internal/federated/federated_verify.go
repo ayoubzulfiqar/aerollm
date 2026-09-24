@@ -32,6 +32,10 @@ type PublicKeyResolver interface {
 //
 // Note: the embedded Aggregate method does NOT verify anything; use
 // AggregateVerified to aggregate only authenticated updates.
+//
+// The signatures checked here bind neither a round nor a sequence number or
+// timestamp, so a captured update can be replayed. For updates received from
+// the network use SecureAggregator.
 type FedAvgAggregatorWithVerify struct {
 	FedAvgAggregator
 	signingKey ed25519.PrivateKey

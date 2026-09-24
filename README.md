@@ -104,6 +104,10 @@ values, malformed YAML) fails fast at startup and is rejected on hot reload.
 | `security.cors_allowed_origins` | `[]` | Browser origins allowed to call the API. |
 | `security.public_metrics` | `true` | Serve `/metrics` without auth. |
 | `security.enable_pprof` | `false` | Expose pprof on `localhost:6060`. |
+| `persistence.enabled` | `true` | Keep keys, budgets, secrets, batches and control-plane state in `$AEROLLM_STATE_DIR/gateway.db`. |
+| `finops.budget_period` | `lifetime` | Reset per-key spend `daily`/`monthly`. |
+| `finops.default_max_usd` | `0` | Default budget for keys without an explicit one. |
+| `router.max_retry_wait` | `0` | Wait out an upstream `Retry-After` up to this long when no fallback is left. |
 
 Providers can be configured in `config.yaml` (`providers:`) or via
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `AEROLLM_LOCAL_URL`.
@@ -122,6 +126,10 @@ Virtual keys are created with `POST /key/generate` and may restrict models, budg
 expiry and per-key rate limits (`metadata.rate_limit_rps`). Only a hash of each key
 is stored.
 
+Spend limits for any key (static or virtual) are managed with `/v1/budgets`
+(admin): `PUT {"key": "...", "max_usd": 25}`, `GET ?key_id=key_...`, `DELETE`.
+Requests over budget get `402 insufficient_quota`.
+
 ### Running
 
 ```bash
@@ -133,6 +141,54 @@ AEROLLM_AUTH_MASTER_KEY=$(openssl rand -hex 32) OPENAI_API_KEY=sk-... ./aerollm
 ```bash
 docker compose up -d
 ```
+
+### Durability & multi-instance
+
+With `persistence.enabled` (default) the gateway keeps virtual keys, users/teams,
+budgets and spend, secrets (encrypted; requires `AEROLLM_SECRETS_KEY`), batches
+(resumed after a restart), spend analytics, the audit ledger, RAG/graph documents,
+HITL approvals and all control-plane stores in `$AEROLLM_STATE_DIR/gateway.db`.
+When Redis is configured, keys, budgets, rate limits, approvals and the webhook
+queue live in Redis instead, so several replicas can share them.
+
+### Plugins (WebAssembly)
+
+WASI modules run in a sandbox (no filesystem, network or host environment;
+memory, time and output caps) as server-side tools or request/response hooks:
+
+```yaml
+plugins:
+  dir: /etc/aerollm/plugins
+  tools:
+    - name: word_count
+      description: Count words in a text
+      file: word_count.wasm
+      parameters: {type: object, properties: {text: {type: string}}}
+  hooks:
+    - id: redact-names
+      file: redact.wasm
+```
+
+Scaffold one with `aerollm plugin init --kind tool|hook` and build it with
+`GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm`.
+
+### Optional integrations (environment)
+
+| Variable(s) | Enables |
+| --- | --- |
+| `AEROLLM_SMTP_ADDR`, `AEROLLM_SMTP_FROM`, `AEROLLM_SMTP_USER/PASSWORD` | Email notification channels (TLS required) |
+| `AEROLLM_TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM` | SMS notification channels |
+| `AEROLLM_FINETUNE_API_KEY` (`_BASE_URL`, `_MODEL`) | `/v1/fine-tuning/jobs` on an OpenAI-compatible fine-tuning API |
+| `AEROLLM_FEDERATION_TOKEN` / `AEROLLM_FEDERATION_OPERATOR_KEYS` | Authenticated federated-learning node registration |
+| `AEROLLM_MESH_ENABLED`, `AEROLLM_MESH_TLS_CERT/KEY/CA` | mTLS mesh between gateway nodes |
+| `AEROLLM_AIOPS_ACTIONS_LIVE=true` | AIOps actions (otherwise dry-run, see `/v1/aiops/actions`) |
+| `AEROLLM_REDTEAM_LIVE_PROBE=true`, `AEROLLM_REDTEAM_MODEL` | Live adversarial probing (otherwise dry-run) |
+| `AEROLLM_RSI_DEPLOY=true` | Let the self-improvement engine deploy policies (otherwise dry-run) |
+| `AEROLLM_MCP_STATELESS=true` | Stateless MCP (required behind a non-sticky load balancer) |
+
+A Kubernetes operator (`docker build --target operator`, manifests in
+`cmd/operator/deploy/`) syncs `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
+resources into the gateway.
 
 ## API Compatibility
 

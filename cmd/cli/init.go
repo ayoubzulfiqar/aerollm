@@ -74,95 +74,44 @@ volumes:
   redis_data:
 `
 
-const initPluginTemplate = `package main
-
-import (
-	"context"
-	"fmt"
-
-	"github.com/ayoubzulfiqar/aerollm/internal/plugins"
-)
-
-// WeatherPlugin is a sample AeroLLM plugin.
-type WeatherPlugin struct{}
-
-func (p *WeatherPlugin) ID() string      { return "weather" }
-func (p *WeatherPlugin) Name() string    { return "Weather" }
-func (p *WeatherPlugin) Enabled() bool   { return true }
-
-func (p *WeatherPlugin) Invoke(ctx context.Context, hook plugins.Hook, payload map[string]interface{}) (map[string]interface{}, error) {
-	switch hook {
-	case plugins.HookOnToolCall:
-		return map[string]interface{}{
-			"tool":    "weather",
-			"status":  "ok",
-			"payload": payload,
-		}, nil
-	default:
-		return payload, nil
-	}
-}
-
-// Metadata returns plugin metadata for the registry.
-func Metadata() plugins.Metadata {
-	return plugins.Metadata{
-		ID:       "weather",
-		Name:     "Weather",
-		Version:  "0.1.0",
-		Enabled:  true,
-		Filename: "plugin.wasm",
-	}
-}
-
-func main() {
-	fmt.Println("weather plugin loaded")
-}
-`
-
 func newInitCmd() *cobra.Command {
-	var target string
+	var target, pluginKind string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Generate starter config.yaml, docker-compose.yml and plugin template",
-		Long: `Scaffold a new AeroLLM project in --dir. Existing files are never
-overwritten unless --force is given. config.yaml is created with mode 0600.`,
-		Args: cobra.NoArgs,
+		Short: "Generate starter config.yaml, docker-compose.yml and a WASM plugin module",
+		Long: `Scaffold a new AeroLLM project in --dir: config.yaml (mode 0600),
+docker-compose.yml and plugin/, a standalone WASM plugin module (see
+"aerollm plugin init"). Existing files are never overwritten unless --force
+is given.`,
+		Example: "  aerollm init --dir myproject\n  aerollm init --dir myproject --plugin-kind tool",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if target == "" {
 				target = "."
 			}
+			pluginFiles, kind, err := pluginScaffold(pluginKind, "", "plugin")
+			if err != nil {
+				return fmt.Errorf("--plugin-kind: %w", err)
+			}
+			files := append([]scaffoldFile{
+				{"config.yaml", initConfigTemplate, 0o600},
+				{"docker-compose.yml", initComposeTemplate, 0o644},
+			}, pluginFiles...)
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("creating %s: %w", target, err)
 			}
-			files := []struct {
-				name    string
-				content string
-				perm    os.FileMode
-			}{
-				{"config.yaml", initConfigTemplate, 0o600},
-				{"docker-compose.yml", initComposeTemplate, 0o644},
-				{"plugin.go", initPluginTemplate, 0o644},
+			if err := writeScaffold(target, files, force); err != nil {
+				return err
 			}
-			// Check everything first so a refusal leaves no partial scaffold.
-			if !force {
-				for _, f := range files {
-					p := filepath.Join(target, f.name)
-					if _, err := os.Lstat(p); err == nil {
-						return fmt.Errorf("%s already exists (use --force to overwrite)", p)
-					}
-				}
-			}
-			for _, f := range files {
-				if err := writeFileSafely(filepath.Join(target, f.name), []byte(f.content), f.perm, force); err != nil {
-					return err
-				}
-			}
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), "created config.yaml, docker-compose.yml, and plugin.go")
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "created config.yaml, docker-compose.yml, and plugin/ (%s plugin: go.mod, main.go)\n", kind)
+			_, err = fmt.Fprintf(w, "build the plugin with: aerollm plugin build %s -o plugin.wasm\n", filepath.Join(target, "plugin"))
 			return err
 		},
 	}
 	cmd.Flags().StringVarP(&target, "dir", "d", ".", "target directory")
+	cmd.Flags().StringVar(&pluginKind, "plugin-kind", "hook", "plugin template: hook|tool")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing files")
 	return cmd
 }

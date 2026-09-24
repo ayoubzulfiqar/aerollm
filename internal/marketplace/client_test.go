@@ -232,3 +232,106 @@ func TestSignedRegistryVerifiesAndPins(t *testing.T) {
 		t.Fatal("expected error without client")
 	}
 }
+
+func TestClientRedirectPolicy(t *testing.T) {
+	_, priv := testKey(t)
+	manifest := manifestJSON(t, signedRequest(t, priv, "p1", "1.0.0", "alice"))
+
+	var otherHits int
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits++
+		_, _ = w.Write(manifest)
+	}))
+	defer other.Close()
+
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/moved/"):
+			_, _ = w.Write(manifest)
+		case r.URL.Query().Get("to") == "other":
+			http.Redirect(w, r, other.URL+r.URL.Path, http.StatusFound)
+		case r.URL.Query().Get("to") == "localhost":
+			// Same port, different host name: still another origin.
+			http.Redirect(w, r, strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)+"/moved"+r.URL.Path, http.StatusFound)
+		default:
+			http.Redirect(w, r, "/moved"+r.URL.Path, http.StatusMovedPermanently)
+		}
+	}))
+	defer srv.Close()
+	// The TLS test client trusts both servers' certificates, so only the
+	// redirect policy can stop the cross-host fetch.
+	hc := srv.Client()
+
+	c := NewClient(srv.URL, WithHTTPClient(hc))
+	if m, err := c.FetchManifest(context.Background(), "p1"); err != nil || m.ID != "p1" {
+		t.Fatalf("same-host redirect must be followed: %+v %v", m, err)
+	}
+
+	for _, to := range []string{"other", "localhost"} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/plugins/p1/manifest.json?to="+to, nil)
+		c := NewClient(srv.URL, WithHTTPClient(hc))
+		// "other" differs only by port (both listen on 127.0.0.1), so it is
+		// refused as another origin too.
+		if _, err := c.httpClient.Do(req); err == nil || !strings.Contains(err.Error(), "refusing redirect to another") {
+			t.Fatalf("redirect to %s: expected cross-origin refusal, got %v", to, err)
+		}
+	}
+	if otherHits != 0 {
+		t.Fatalf("cross-host redirect target was contacted %d times", otherHits)
+	}
+}
+
+func TestClientCheckRedirectRules(t *testing.T) {
+	mk := func(raw string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	secure := NewClient("https://registry.example.com/api")
+	insecure := NewClient("http://registry.example.com/api", WithInsecureHTTP())
+	cases := []struct {
+		name string
+		c    *Client
+		to   string
+		via  []string
+		ok   bool
+	}{
+		{"same host path", secure, "https://registry.example.com/other/x", nil, true},
+		{"same host explicit default port", secure, "https://REGISTRY.example.com:443/x", nil, true},
+		{"other host", secure, "https://evil.example.com/x", nil, false},
+		{"sub domain", secure, "https://cdn.registry.example.com/x", nil, false},
+		{"other port", secure, "https://registry.example.com:8443/x", nil, false},
+		{"downgrade", secure, "http://registry.example.com/x", nil, false},
+		{"internal ip", secure, "https://169.254.169.254/latest", nil, false},
+		{"credentials", secure, "https://user:pw@registry.example.com/x", nil, false},
+		{"odd scheme", secure, "ftp://registry.example.com/x", nil, false},
+		{"insecure same host http", insecure, "http://registry.example.com/x", nil, true},
+		{"insecure upgrade", insecure, "https://registry.example.com/x", nil, true},
+		{"insecure other host", insecure, "http://evil.example.com/x", nil, false},
+		{"insecure re-downgrade", insecure, "http://registry.example.com/y", []string{"http://registry.example.com/api", "https://registry.example.com/x"}, false},
+		{"insecure upgrade other port", insecure, "https://registry.example.com:8443/x", nil, false},
+	}
+	for _, tc := range cases {
+		var via []*http.Request
+		for _, v := range tc.via {
+			via = append(via, mk(v))
+		}
+		if len(via) == 0 {
+			via = []*http.Request{mk(tc.c.BaseURL() + "/plugins/p1/manifest.json")}
+		}
+		err := tc.c.checkRedirect(mk(tc.to), via)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: redirect to %s: ok=%v, err=%v", tc.name, tc.to, tc.ok, err)
+		}
+	}
+	many := make([]*http.Request, 5)
+	for i := range many {
+		many[i] = mk("https://registry.example.com/x")
+	}
+	if err := secure.checkRedirect(mk("https://registry.example.com/y"), many); err == nil {
+		t.Fatal("expected too many redirects")
+	}
+}

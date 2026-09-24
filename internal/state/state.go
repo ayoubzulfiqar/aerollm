@@ -47,6 +47,10 @@ var (
 	ErrEmptyVectorID = errors.New("vector id is required")
 	// ErrInvalidVector is returned when a vector contains NaN or Inf values.
 	ErrInvalidVector = errors.New("vector contains NaN or Inf values")
+	// ErrStoreLocked is returned by OpenBboltStateStore when the database
+	// file stays locked (by another process or another open handle) for
+	// longer than the open timeout. bbolt allows a single writer per file.
+	ErrStoreLocked = errors.New("state store is locked by another process")
 )
 
 const (
@@ -57,9 +61,10 @@ const (
 	// When exceeded, the oldest vectors are evicted first (FIFO).
 	DefaultMaxVectorsPerSession = 10000
 
-	// defaultOpenTimeout bounds how long Open waits for the bbolt file lock,
-	// so a DB held by another process fails instead of hanging forever.
-	defaultOpenTimeout = 5 * time.Second
+	// DefaultOpenTimeout bounds how long OpenBboltStateStore waits for the
+	// bbolt file lock, so a DB held by another process fails with
+	// ErrStoreLocked instead of hanging forever.
+	DefaultOpenTimeout = 5 * time.Second
 )
 
 // flatIndex is a lightweight flat index for short-term memory.
@@ -90,12 +95,17 @@ func cloneVector(v Vector) Vector {
 	return out
 }
 
-// upsertAll inserts/replaces vectors for a session, applies FIFO eviction and
-// returns a deep copy of the resulting session set (for persistence).
-func (f *flatIndex) upsertAll(sessionID string, vs []Vector) []Vector {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	cur := f.bySession[sessionID]
+// merged returns the session's vector set after upserting vs and applying
+// FIFO eviction, without modifying the index. The result shares no memory
+// with the index; commit it with load once it has been persisted.
+func (f *flatIndex) merged(sessionID string, vs []Vector) []Vector {
+	f.mu.RLock()
+	existing := f.bySession[sessionID]
+	cur := make([]Vector, len(existing), len(existing)+len(vs))
+	for i, v := range existing {
+		cur[i] = cloneVector(v)
+	}
+	f.mu.RUnlock()
 	for _, v := range vs {
 		v = cloneVector(v)
 		replaced := false
@@ -113,12 +123,7 @@ func (f *flatIndex) upsertAll(sessionID string, vs []Vector) []Vector {
 	if over := len(cur) - f.maxPerSess; over > 0 {
 		cur = append([]Vector(nil), cur[over:]...)
 	}
-	f.bySession[sessionID] = cur
-	snapshot := make([]Vector, len(cur))
-	for i, v := range cur {
-		snapshot[i] = cloneVector(v)
-	}
-	return snapshot
+	return cur
 }
 
 // load replaces a session's vectors (used when loading persisted state).
@@ -186,26 +191,44 @@ func validateVector(v Vector) error {
 
 // BboltStateStore uses bbolt for the KV layer and a flat index for vector search.
 type BboltStateStore struct {
-	mu       sync.RWMutex // guards closed; held (read) for the duration of DB ops
-	closed   bool
+	mu     sync.RWMutex // guards closed; held (read) for the duration of DB ops
+	closed bool
+	// writeMu serializes short-term memory writes so the index and the
+	// persisted session sets are updated in the same order.
+	writeMu  sync.Mutex
 	db       *bbolt.DB
 	idx      *flatIndex
 	basePath string
 }
 
 // OpenBboltStateStore opens or creates a bbolt-backed state store. Persisted
-// short-term memory is loaded back into the in-memory vector index.
+// short-term memory is loaded back into the in-memory vector index. If the
+// database file is locked by another process for longer than
+// DefaultOpenTimeout it fails with an error wrapping ErrStoreLocked.
 func OpenBboltStateStore(basePath string) (*BboltStateStore, error) {
+	return OpenBboltStateStoreWithTimeout(basePath, DefaultOpenTimeout)
+}
+
+// OpenBboltStateStoreWithTimeout is OpenBboltStateStore with a custom lock
+// wait. A non-positive timeout selects DefaultOpenTimeout: the store never
+// blocks indefinitely on a locked file.
+func OpenBboltStateStoreWithTimeout(basePath string, timeout time.Duration) (*BboltStateStore, error) {
 	if basePath == "" {
 		return nil, errors.New("state store base path is required")
+	}
+	if timeout <= 0 {
+		timeout = DefaultOpenTimeout
 	}
 	if err := os.MkdirAll(basePath, 0o700); err != nil {
 		return nil, fmt.Errorf("create state dir: %w", err)
 	}
 	dbPath := filepath.Join(basePath, "aerollm-state.db")
-	db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: defaultOpenTimeout, NoFreelistSync: true})
+	db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: timeout, NoFreelistSync: true})
 	if err != nil {
-		return nil, fmt.Errorf("open state db: %w", err)
+		if errors.Is(err, bbolt.ErrTimeout) {
+			return nil, fmt.Errorf("open state db %s: %w: %w (waited %s; is another AeroLLM instance using this directory?)", dbPath, ErrStoreLocked, err, timeout)
+		}
+		return nil, fmt.Errorf("open state db %s: %w", dbPath, err)
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		for _, name := range []string{bucketAgentState, bucketShortTermMemory} {
@@ -350,18 +373,27 @@ func (s *BboltStateStore) StoreShortTermMemory(ctx context.Context, sessionID st
 	if len(vectors) == 0 {
 		return nil
 	}
-	snapshot := s.idx.upsertAll(sessionID, vectors)
+	// Persist first and only then publish to the index, under writeMu, so
+	// concurrent writers cannot persist an older snapshot after a newer one
+	// and a failed write leaves the index unchanged.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	snapshot := s.idx.merged(sessionID, vectors)
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("encode short-term memory: %w", err)
 	}
-	return s.db.Update(func(tx *bbolt.Tx) error {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketShortTermMemory))
 		if b == nil {
 			return fmt.Errorf("bucket %s missing", bucketShortTermMemory)
 		}
 		return b.Put([]byte(sessionID), payload)
-	})
+	}); err != nil {
+		return err
+	}
+	s.idx.load(sessionID, snapshot)
+	return nil
 }
 
 // SearchShortTermMemory searches the flat index for top-k nearest vectors by

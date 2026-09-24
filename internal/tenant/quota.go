@@ -7,6 +7,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // QuotaScope defines whether quota applies per tenant, team, or user.
@@ -112,10 +114,16 @@ var ErrInvalidAmount = errors.New("quota: amount must not be negative")
 
 // InMemoryQuotaStore stores quotas in memory with concurrency safety. All
 // methods take and return copies; check-and-consume is atomic.
+//
+// With persistence enabled (NewPersistentQuotaStore / EnablePersistence)
+// every change of a quota's definition or usage is written to a
+// persist.Store before it becomes visible; window resets are recomputed
+// deterministically from the stored window start.
 type InMemoryQuotaStore struct {
 	mu     sync.Mutex
 	quotas map[string]*Quota
 	now    func() time.Time
+	disk   persist.Store // non-nil when persistence is enabled
 }
 
 // NewInMemoryQuotaStore creates a new in-memory quota store.
@@ -143,7 +151,21 @@ func (s *InMemoryQuotaStore) Upsert(ctx context.Context, q *Quota) error {
 			c.LastRefill = cur.LastRefill
 		}
 	}
+	if err := s.persistLocked(&c); err != nil {
+		return err
+	}
 	s.quotas[q.ID] = &c
+	return nil
+}
+
+// persistLocked writes q to the persist.Store (no-op without persistence).
+func (s *InMemoryQuotaStore) persistLocked(q *Quota) error {
+	if s.disk == nil {
+		return nil
+	}
+	if err := s.disk.Put(BucketQuotas, q.ID, q); err != nil {
+		return fmt.Errorf("%w: quota %s: %v", ErrPersistence, q.ID, err)
+	}
 	return nil
 }
 
@@ -189,29 +211,43 @@ func (s *InMemoryQuotaStore) Enforce(ctx context.Context, q *Quota, amount int64
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Work on a copy so a failed persistence write changes nothing.
 	current, ok := s.quotas[q.ID]
-	if !ok {
+	var next Quota
+	if ok {
+		next = *current
+	} else {
 		if err := q.validate(); err != nil {
 			return nil, err
 		}
-		c := *q
-		current = &c
-		s.quotas[q.ID] = current
+		next = *q
 	}
-	current.refresh(s.now())
+	next.refresh(s.now())
 
 	// Overflow-safe: amount > capacity - used.
-	if amount > current.Capacity()-current.Used {
-		out := *current
+	if amount > next.Capacity()-next.Used {
+		if !ok {
+			if err := s.persistLocked(&next); err != nil {
+				return nil, err
+			}
+		}
+		s.quotas[q.ID] = &next
+		out := next
 		return &out, &QuotaEnforcedError{
-			Scope:     current.Scope,
-			TargetID:  current.TargetID,
-			Remaining: current.Remaining(),
-			ResetAt:   current.ResetAt(),
+			Scope:     next.Scope,
+			TargetID:  next.TargetID,
+			Remaining: next.Remaining(),
+			ResetAt:   next.ResetAt(),
 		}
 	}
-	current.Used += amount
-	out := *current
+	next.Used += amount
+	if amount > 0 || !ok {
+		if err := s.persistLocked(&next); err != nil {
+			return nil, err
+		}
+	}
+	s.quotas[q.ID] = &next
+	out := next
 	return &out, nil
 }
 
@@ -223,16 +259,21 @@ func (s *InMemoryQuotaStore) Release(ctx context.Context, id string, amount int6
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	q, ok := s.quotas[id]
+	cur, ok := s.quotas[id]
 	if !ok {
 		return nil, fmt.Errorf("quota not found: %s", id)
 	}
+	q := *cur
 	q.refresh(s.now())
 	q.Used -= amount
 	if q.Used < 0 {
 		q.Used = 0
 	}
-	c := *q
+	if err := s.persistLocked(&q); err != nil {
+		return nil, err
+	}
+	s.quotas[id] = &q
+	c := q
 	return &c, nil
 }
 
@@ -240,14 +281,19 @@ func (s *InMemoryQuotaStore) Release(ctx context.Context, id string, amount int6
 func (s *InMemoryQuotaStore) Reset(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	q, ok := s.quotas[id]
+	cur, ok := s.quotas[id]
 	if !ok {
 		return fmt.Errorf("quota not found: %s", id)
 	}
+	q := *cur
 	q.Used = 0
 	if q.Window > 0 {
 		q.LastRefill = s.now()
 	}
+	if err := s.persistLocked(&q); err != nil {
+		return err
+	}
+	s.quotas[id] = &q
 	return nil
 }
 

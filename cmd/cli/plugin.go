@@ -20,9 +20,10 @@ import (
 func newPluginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plugin",
-		Short: "Build WASM plugins and publish signed plugin manifests",
+		Short: "Scaffold and build WASM plugins and publish signed plugin manifests",
 	}
 
+	cmd.AddCommand(newPluginInitCmd())
 	cmd.AddCommand(newPluginBuildCmd())
 	cmd.AddCommand(newPluginPublishCmd())
 	return cmd
@@ -30,9 +31,13 @@ func newPluginCmd() *cobra.Command {
 
 func newPluginBuildCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "build SOURCE",
-		Short:   "Build a Go source file or package into a WASM (wasip1) plugin",
-		Example: "  aerollm plugin build ./plugin.go -o weather.wasm",
+		Use:   "build SOURCE",
+		Short: "Build a Go plugin module, package directory or file into a WASM (wasip1) plugin",
+		Long: `Run "GOOS=wasip1 GOARCH=wasm go build" for SOURCE: a directory (e.g. a
+module created by "aerollm plugin init") or a single .go file. The build
+runs inside SOURCE's directory, so a standalone plugin module builds with
+its own go.mod.`,
+		Example: "  aerollm plugin build ./example-hook -o example-hook.wasm\n  aerollm plugin build ./plugin/main.go",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, _ := cmd.Flags().GetString("output")
@@ -45,17 +50,33 @@ func newPluginBuildCmd() *cobra.Command {
 			if strings.HasPrefix(src, "-") || strings.HasPrefix(out, "-") {
 				return errors.New("source and output paths must not start with '-'")
 			}
-			if _, err := os.Stat(src); err != nil {
+			fi, err := os.Stat(src)
+			if err != nil {
 				return fmt.Errorf("build failed: %w", err)
 			}
-			buildCmd := exec.CommandContext(cmd.Context(), "go", "build", "-o", out, src)
-			buildCmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+			absOut, err := filepath.Abs(out)
+			if err != nil {
+				return fmt.Errorf("build failed: %w", err)
+			}
+			dir, target := src, "."
+			if !fi.IsDir() {
+				// "./" keeps a file name such as "-x.go" from reading as a flag.
+				dir, target = filepath.Dir(src), "."+string(filepath.Separator)+filepath.Base(src)
+			}
+			buildCmd := exec.CommandContext(cmd.Context(), "go", "build", "-trimpath", "-o", absOut, target)
+			buildCmd.Dir = dir
+			buildCmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				// A standalone plugin module must not be pulled into an
+				// enclosing go.work workspace.
+				buildCmd.Env = append(buildCmd.Env, "GOWORK=off")
+			}
 			buildCmd.Stdout = cmd.ErrOrStderr()
 			buildCmd.Stderr = cmd.ErrOrStderr()
 			if err := buildCmd.Run(); err != nil {
 				return fmt.Errorf("build failed: %w", err)
 			}
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "built %s -> %s\n", src, out)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "built %s -> %s\n", src, out)
 			return err
 		},
 	}

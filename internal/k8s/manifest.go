@@ -107,6 +107,27 @@ func (m *ManifestReconciler) Reconcile(ctx context.Context, object interface{}) 
 	return nil
 }
 
+// ValidateObject checks a decoded AeroLLM resource the same way Reconcile
+// does (kind, metadata.name and the typed api/v1alpha1 spec, rejecting
+// unknown spec fields) and returns its parts. A missing spec is returned
+// as an empty map.
+func ValidateObject(obj map[string]interface{}) (kind ResourceKind, name string, spec map[string]interface{}, err error) {
+	if obj == nil {
+		return "", "", nil, errors.New("manifest: null object")
+	}
+	kind, name, spec, err = manifestParts(obj)
+	if err != nil {
+		return kind, name, spec, err
+	}
+	if err := validateSpec(kind, spec); err != nil {
+		return kind, name, spec, fmt.Errorf("%s/%s: invalid spec: %w", kind, name, err)
+	}
+	return kind, name, spec, nil
+}
+
+// SpecHash returns a stable hash of a spec (for change detection).
+func SpecHash(spec map[string]interface{}) (string, error) { return specHash(spec) }
+
 // Forget drops the idempotence record for kind/name so the next delivery of
 // its spec is applied again (e.g. after the resource was deleted).
 func (m *ManifestReconciler) Forget(kind ResourceKind, name string) {

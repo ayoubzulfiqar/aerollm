@@ -104,9 +104,8 @@ func TestRunStopsOnCancel(t *testing.T) {
 	var out syncBuffer
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, []string{"--config", writeConfig(t, manifests), "--interval", "20ms"}, &out, &out)
-	}()
+	args := []string{"--config", writeConfig(t, manifests), "--interval", "20ms"}
+	go func() { done <- run(ctx, args, &out, &out) }()
 	deadline := time.Now().Add(3 * time.Second)
 	for !strings.Contains(out.String(), `"msg":"reconciled"`) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

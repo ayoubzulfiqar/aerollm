@@ -64,6 +64,15 @@ func NewRedisLimiter(client redis.Scripter, defaultRPS float64, burstMultiplier 
 	}
 }
 
+// DefaultRPS returns the default per-key rate.
+func (l *RedisLimiter) DefaultRPS() float64 { return l.local.DefaultRPS() }
+
+// SetDefaultRPS changes the default per-key rate at runtime.
+func (l *RedisLimiter) SetDefaultRPS(rps float64) {
+	l.local.SetDefaultRPS(rps)
+	l.Fallback.SetDefaultRPS(rps)
+}
+
 // SetLimit overrides the rate for a single API key.
 func (l *RedisLimiter) SetLimit(apiKey string, lim Limit) {
 	l.local.SetLimit(apiKey, lim)

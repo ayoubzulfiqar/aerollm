@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // ChannelType defines notification channel types.
@@ -108,12 +110,14 @@ type Options struct {
 }
 
 // Store manages notifications in memory. It is safe for concurrent use and
-// always hands out copies.
+// always hands out copies. EnablePersistence adds opt-in write-through
+// durability.
 type Store struct {
 	mu            sync.RWMutex
 	channels      map[string]Channel
 	subscriptions map[string]Subscription
 	opts          Options
+	ps            persist.Store // nil unless persistence is enabled
 }
 
 // NewStore creates a notification store with strict (production) validation.
@@ -281,6 +285,9 @@ func (s *Store) UpsertChannel(channel Channel) (Channel, error) {
 	if !exists && len(s.channels) >= s.opts.MaxChannels {
 		return Channel{}, ErrStoreFull
 	}
+	if err := s.putLocked(BucketChannels, channel.ID, channel); err != nil {
+		return Channel{}, err
+	}
 	s.channels[channel.ID] = channel
 	return copyChannel(channel), nil
 }
@@ -311,6 +318,9 @@ func (s *Store) ModifyChannel(id string, fn func(*Channel) error) (Channel, erro
 	if err := ValidateChannel(next, s.opts); err != nil {
 		return Channel{}, err
 	}
+	if err := s.putLocked(BucketChannels, id, next); err != nil {
+		return Channel{}, err
+	}
 	s.channels[id] = next
 	return copyChannel(next), nil
 }
@@ -335,20 +345,15 @@ func (s *Store) ListChannels() []Channel {
 	return out
 }
 
-// DeleteChannel removes a channel and every subscription referencing it.
+// DeleteChannel removes a channel and every subscription referencing it and
+// reports whether the channel was deleted. Persistence failures are logged
+// (and the channel kept); use RemoveChannel to observe them.
 func (s *Store) DeleteChannel(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.channels[id]; !ok {
-		return false
+	err := s.RemoveChannel(id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		logPersistError("delete_channel", id, err)
 	}
-	delete(s.channels, id)
-	for sid, sub := range s.subscriptions {
-		if sub.ChannelID == id {
-			delete(s.subscriptions, sid)
-		}
-	}
-	return true
+	return err == nil
 }
 
 // UpsertSubscription validates and adds or replaces a subscription. The
@@ -367,6 +372,9 @@ func (s *Store) UpsertSubscription(sub Subscription) (Subscription, error) {
 	}
 	if _, exists := s.subscriptions[sub.ID]; !exists && len(s.subscriptions) >= s.opts.MaxSubscriptions {
 		return Subscription{}, ErrStoreFull
+	}
+	if err := s.putLocked(BucketSubscriptions, sub.ID, sub); err != nil {
+		return Subscription{}, err
 	}
 	s.subscriptions[sub.ID] = sub
 	return sub, nil
@@ -399,6 +407,9 @@ func (s *Store) ModifySubscription(id string, fn func(*Subscription) error) (Sub
 	}
 	if _, ok := s.channels[next.ChannelID]; !ok {
 		return Subscription{}, ErrUnknownChannel
+	}
+	if err := s.putLocked(BucketSubscriptions, id, next); err != nil {
+		return Subscription{}, err
 	}
 	s.subscriptions[id] = next
 	return next, nil
@@ -438,15 +449,15 @@ func (s *Store) SubscriptionsForAlert(alertID string) []Subscription {
 	return out
 }
 
-// DeleteSubscription removes a subscription.
+// DeleteSubscription removes a subscription and reports whether it was
+// deleted. Persistence failures are logged (and the subscription kept); use
+// RemoveSubscription to observe them.
 func (s *Store) DeleteSubscription(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.subscriptions[id]; !ok {
-		return false
+	err := s.RemoveSubscription(id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		logPersistError("delete_subscription", id, err)
 	}
-	delete(s.subscriptions, id)
-	return true
+	return err == nil
 }
 
 // Redacted returns a copy of the channel that is safe to expose over the API:

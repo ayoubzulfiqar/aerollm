@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -403,6 +404,10 @@ type Manager struct {
 
 	mu  sync.Mutex // serializes read-modify-write for non-atomic stores
 	now func() time.Time
+
+	// teams, when set, enforces team budgets (see SetTeamStore).
+	teams  atomic.Pointer[teamStoreRef]
+	teamMu sync.Mutex // serializes team updates for non-atomic team stores
 }
 
 // MinMasterKeyLength is the minimum length for the master key to be accepted
@@ -1037,7 +1042,10 @@ func (m *Manager) lookup(ctx context.Context, key string) (*VirtualKey, error) {
 
 // Validate authenticates a plaintext key for gateway use. It rejects
 // unknown, revoked, blocked and expired keys and keys whose budget is
-// exhausted (ErrBudgetExceeded). The returned key is a private copy whose
+// exhausted (ErrBudgetExceeded) or whose team budget is exhausted
+// (ErrTeamBudgetExceeded, which also matches ErrBudgetExceeded). A failing
+// team-store lookup rejects the key (fail closed). The returned key is a
+// private copy whose
 // Metadata carries "rate_limit_rps"/"rate_limit_tpm" when per-key limits are
 // configured. An optional "Bearer " prefix is ignored.
 func (m *Manager) Validate(ctx context.Context, key string) (*VirtualKey, error) {
@@ -1051,6 +1059,9 @@ func (m *Manager) Validate(ctx context.Context, key string) (*VirtualKey, error)
 	}
 	if vk.MaxBudget > 0 && vk.EffectiveSpend(now) >= vk.MaxBudget {
 		return nil, ErrBudgetExceeded
+	}
+	if err := m.checkTeamBudget(ctx, vk.TeamID, now); err != nil {
+		return nil, err
 	}
 	if vk.BudgetDuration != "" && !vk.BudgetResetAt.IsZero() && !now.Before(vk.BudgetResetAt) {
 		vk.Spend = 0
@@ -1072,16 +1083,18 @@ func (m *Manager) validateForManagement(ctx context.Context, key string) (*Virtu
 }
 
 // CheckBudget returns ErrBudgetExceeded if the key (plaintext or hash) has
-// exhausted its budget, or another error if it cannot be found.
+// exhausted its budget, ErrTeamBudgetExceeded (matching ErrBudgetExceeded)
+// if its team has, or another error if it cannot be found.
 func (m *Manager) CheckBudget(ctx context.Context, keyOrHash string) error {
 	vk, err := m.get(ctx, m.resolveHash(keyOrHash))
 	if err != nil {
 		return err
 	}
-	if vk.MaxBudget > 0 && vk.EffectiveSpend(m.now()) >= vk.MaxBudget {
+	now := m.now()
+	if vk.MaxBudget > 0 && vk.EffectiveSpend(now) >= vk.MaxBudget {
 		return ErrBudgetExceeded
 	}
-	return nil
+	return m.checkTeamBudget(ctx, vk.TeamID, now)
 }
 
 // RecordSpend adds usd to the key's spend. keyOrHash may be the plaintext
@@ -1094,11 +1107,26 @@ func (m *Manager) RecordSpend(ctx context.Context, keyOrHash string, usd float64
 }
 
 // RecordSpendByHash adds usd to the spend of the key with the given hash and
-// returns the updated key.
+// returns the updated key. When the key belongs to a team known to the
+// team store (see SetTeamStore) the spend also accrues atomically to the
+// team. The key and team updates are separate atomic operations: if the
+// team update fails the key spend is still recorded and the returned error
+// (non-nil, with the updated key) reports the team failure.
 func (m *Manager) RecordSpendByHash(ctx context.Context, keyHash string, usd float64) (*VirtualKey, error) {
 	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 {
 		return nil, ErrInvalidAmount
 	}
+	vk, err := m.recordKeySpend(ctx, keyHash, usd)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.accrueTeamSpend(ctx, vk.TeamID, usd); err != nil {
+		return vk, fmt.Errorf("keymanager: key spend recorded but team %q spend update failed: %w", vk.TeamID, err)
+	}
+	return vk, nil
+}
+
+func (m *Manager) recordKeySpend(ctx context.Context, keyHash string, usd float64) (*VirtualKey, error) {
 	return m.update(ctx, normalizeHash(keyHash), func(vk *VirtualKey) error {
 		now := m.now().UTC()
 		if vk.BudgetDuration != "" && !vk.BudgetResetAt.IsZero() && !now.Before(vk.BudgetResetAt) {

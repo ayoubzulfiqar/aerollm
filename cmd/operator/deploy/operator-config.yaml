@@ -1,0 +1,38 @@
+# Example aero-operator configuration (--operator-config). Every key is
+# optional; command-line flags override these values. Unknown keys are
+# rejected.
+
+# Watch Kubernetes custom resources (the default inside a pod when no
+# manifest source is configured).
+kube: true
+
+# Kubernetes access: empty = in-cluster service account, then $KUBECONFIG
+# or ~/.kube/config.
+kubeconfig: ""
+context: ""
+# Namespace to watch; empty = all namespaces (needs the ClusterRole).
+namespace: ""
+# Honour insecure-skip-tls-verify in a kubeconfig (unsafe).
+allow_insecure_tls: false
+# Kinds to watch (default: all three).
+kinds: [AeroRoute, AeroBudget, AeroAgentPipeline]
+# Re-apply every resource this often so a restarted gateway converges
+# ("0s" disables).
+resync_interval: 10m
+# Server-side watch timeout before reconnecting (randomized up to 2x).
+watch_timeout: 5m
+
+# Gateway admin API. The admin key is read from the environment variable
+# named by admin_key_env and is never logged.
+gateway_url: http://aerollm.aerollm-system.svc:8080
+# Required for a plain-http in-cluster Service: the admin key travels in
+# clear text inside the cluster network. Prefer https + gateway_ca_file.
+gateway_allow_http: true
+gateway_ca_file: ""
+admin_key_env: AEROLLM_ADMIN_KEY
+request_timeout: 15s
+
+# Manifest mode instead of kube mode:
+# manifest: /etc/aero-operator/manifests.json
+# manifest_url: https://config.example.com/aerollm.json
+# interval: 2s

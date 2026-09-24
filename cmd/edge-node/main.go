@@ -1,17 +1,30 @@
 // Command edge-node is the local-first AeroLLM edge runtime: bbolt state,
-// hardware detection, an in-process mesh, Open Standard marketplace routes,
-// PQC handshake, spatial streaming and a realtime WebSocket.
+// hardware detection, a peer mesh (in-process, or mutual-TLS over TCP), Open
+// Standard marketplace routes, PQC handshake, spatial streaming and a
+// realtime WebSocket.
 //
 // Configuration (flags override environment):
 //
-//	-listen            EDGE_LISTEN             listen address (default 127.0.0.1:7910)
-//	-state             EDGE_STATE_PATH         bbolt state file (default edge-state.db)
-//	-token-file        EDGE_API_TOKEN_FILE     file holding the API bearer token
-//	                   EDGE_API_TOKEN          API bearer token (min 16 chars)
-//	-allowed-origins   EDGE_ALLOWED_ORIGINS    extra WebSocket origins (comma separated)
-//	-max-stream-bytes  EDGE_MAX_STREAM_BYTES   cap for /v1/edge/spatial/stream bodies
-//	-shutdown-timeout  EDGE_SHUTDOWN_TIMEOUT   graceful shutdown budget
-//	-insecure-no-auth  EDGE_INSECURE_NO_AUTH   allow a non-loopback listener without a token
+//	-listen               EDGE_LISTEN               listen address (default 127.0.0.1:7910)
+//	-state                EDGE_STATE_PATH           bbolt state file (default edge-state.db)
+//	-token-file           EDGE_API_TOKEN_FILE       file holding the API bearer token
+//	                      EDGE_API_TOKEN            API bearer token (min 16 chars)
+//	-allowed-origins      EDGE_ALLOWED_ORIGINS      extra WebSocket origins (comma separated)
+//	-max-stream-bytes     EDGE_MAX_STREAM_BYTES     cap for /v1/edge/spatial/stream bodies
+//	-stream-idle-timeout  EDGE_STREAM_IDLE_TIMEOUT  max stall of one stream read/write (default 30s)
+//	-stream-max-duration  EDGE_STREAM_MAX_DURATION  max duration of one stream (default 15m)
+//	-max-receipts         EDGE_MAX_RECEIPTS         receipts kept; oldest evicted (default 100000)
+//	-receipt-max-age      EDGE_RECEIPT_MAX_AGE      evict receipts older than this (default: never)
+//	-shutdown-timeout     EDGE_SHUTDOWN_TIMEOUT     graceful shutdown budget
+//	-insecure-no-auth     EDGE_INSECURE_NO_AUTH     allow a non-loopback listener without a token
+//	-mesh-listen          EDGE_MESH_LISTEN          mTLS mesh listen address (default: in-process mesh)
+//	-mesh-advertise       EDGE_MESH_ADVERTISE       mesh address announced to peers (default: bound address)
+//	-mesh-peers           EDGE_MESH_PEERS           seed peers, "id@host:port" (comma separated)
+//
+// The network mesh (-mesh-listen) needs AEROLLM_MESH_TLS_CERT and
+// AEROLLM_MESH_TLS_KEY (file paths or inline PEM) plus AEROLLM_MESH_TLS_CA
+// and/or AEROLLM_MESH_TLS_PINS ("id=sha256hex,..."); the node's peer id is
+// then the one bound to its certificate.
 //
 // Without a token the node only serves loopback clients and rejects requests
 // whose Host header is not a loopback name (DNS-rebinding protection). With a
@@ -50,7 +63,9 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/mesh"
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
+	"github.com/ayoubzulfiqar/aerollm/internal/sandbox"
 	"github.com/ayoubzulfiqar/aerollm/internal/spatial"
+	"github.com/ayoubzulfiqar/aerollm/internal/wasmrt"
 	"go.etcd.io/bbolt"
 )
 
@@ -58,32 +73,69 @@ const (
 	defaultListenAddr     = "127.0.0.1:7910"
 	defaultStatePath      = "edge-state.db"
 	defaultMaxStreamBytes = 64 << 20
+	defaultMaxReceipts    = 100_000
 	minTokenLen           = 16
 	edgeWalletID          = "edge-wallet"
+	// bodyReadTimeout bounds reading a JSON request body, so a client that
+	// stalls mid-body cannot hold a handler until the connection closes.
+	bodyReadTimeout = 30 * time.Second
+	// maxReceiptEvictionsPerWrite bounds age-based eviction work done by a
+	// single receipt write; the backlog drains over subsequent writes.
+	maxReceiptEvictionsPerWrite = 1024
 )
 
 var (
 	bucketEdge     = []byte("edge")
 	bucketState    = []byte("state")
 	bucketReceipts = []byte("receipts")
-	bucketWallets  = []byte("wallets")
-	bucketQueue    = []byte("queue")
-	bucketTxLog    = []byte("wallet_tx")
-	keyPeerID      = []byte("peer_id")
-	keyCapability  = []byte("capability_manifest")
+	// bucketReceiptIndex orders receipts by recording time for eviction:
+	// key = 8-byte big-endian unix nanos || receipt ID, empty value. Its
+	// bucket sequence holds the receipt count.
+	bucketReceiptIndex = []byte("receipts_by_time")
+	bucketWallets      = []byte("wallets")
+	bucketQueue        = []byte("queue")
+	bucketTxLog        = []byte("wallet_tx")
+	keyPeerID          = []byte("peer_id")
+	keyCapability      = []byte("capability_manifest")
 )
 
 // errReceiptConflict reports a receipt ID reused with different content.
 var errReceiptConflict = errors.New("edge: receipt id already used with different content")
 
 type edgeConfig struct {
-	listenAddr      string
-	statePath       string
-	apiToken        string
-	allowedOrigins  []string
-	insecureNoAuth  bool
-	maxStreamBytes  int64
-	shutdownTimeout time.Duration
+	listenAddr        string
+	statePath         string
+	apiToken          string
+	allowedOrigins    []string
+	insecureNoAuth    bool
+	maxStreamBytes    int64
+	streamIdleTimeout time.Duration
+	streamMaxDuration time.Duration
+	receipts          receiptLimits
+	shutdownTimeout   time.Duration
+
+	// meshListen enables the mutual-TLS network mesh; empty keeps the
+	// in-process mesh.
+	meshListen    string
+	meshAdvertise string
+	meshPeers     []string
+	meshTLS       *mesh.TLSTransportConfig
+}
+
+// receiptLimits bounds the receipt bucket.
+type receiptLimits struct {
+	// maxCount caps stored receipts; the oldest are evicted (<= 0 selects
+	// defaultMaxReceipts).
+	maxCount int
+	// maxAge evicts receipts recorded longer ago than this (0 disables).
+	maxAge time.Duration
+}
+
+func (l receiptLimits) count() int {
+	if l.maxCount <= 0 {
+		return defaultMaxReceipts
+	}
+	return l.maxCount
 }
 
 func main() {
@@ -117,7 +169,14 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	origins := fs.String("allowed-origins", env("EDGE_ALLOWED_ORIGINS", ""), "comma-separated extra WebSocket origins")
 	insecure := fs.Bool("insecure-no-auth", strings.EqualFold(env("EDGE_INSECURE_NO_AUTH", ""), "true"), "allow a non-loopback listener without an API token")
 	maxStream := fs.Int64("max-stream-bytes", 0, "maximum spatial stream body size")
+	streamIdle := fs.String("stream-idle-timeout", env("EDGE_STREAM_IDLE_TIMEOUT", spatial.DefaultStreamIdleTimeout.String()), "maximum stall of one spatial stream read or write")
+	streamMax := fs.String("stream-max-duration", env("EDGE_STREAM_MAX_DURATION", spatial.DefaultStreamMaxDuration.String()), "maximum duration of one spatial stream")
+	maxReceipts := fs.String("max-receipts", env("EDGE_MAX_RECEIPTS", strconv.Itoa(defaultMaxReceipts)), "maximum stored billing receipts (oldest evicted)")
+	receiptAge := fs.String("receipt-max-age", env("EDGE_RECEIPT_MAX_AGE", "0"), "evict billing receipts older than this (0 = never)")
 	shutdown := fs.Duration("shutdown-timeout", 0, "graceful shutdown timeout")
+	meshListen := fs.String("mesh-listen", env("EDGE_MESH_LISTEN", ""), "mutual-TLS mesh listen address (empty = in-process mesh)")
+	meshAdvertise := fs.String("mesh-advertise", env("EDGE_MESH_ADVERTISE", ""), "mesh address announced to peers")
+	meshPeers := fs.String("mesh-peers", env("EDGE_MESH_PEERS", ""), "comma-separated mesh seed peers (id@host:port)")
 	if err := fs.Parse(args); err != nil {
 		return edgeConfig{}, err
 	}
@@ -147,6 +206,32 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	}
 	if cfg.maxStreamBytes <= 0 {
 		return edgeConfig{}, errors.New("max stream bytes must be positive")
+	}
+
+	for _, d := range []struct {
+		name string
+		raw  string
+		dst  *time.Duration
+		zero bool
+	}{
+		{"stream idle timeout", *streamIdle, &cfg.streamIdleTimeout, false},
+		{"stream max duration", *streamMax, &cfg.streamMaxDuration, false},
+		{"receipt max age", *receiptAge, &cfg.receipts.maxAge, true},
+	} {
+		v, err := time.ParseDuration(strings.TrimSpace(d.raw))
+		if err != nil || v < 0 || (v == 0 && !d.zero) {
+			return edgeConfig{}, fmt.Errorf("invalid %s %q", d.name, d.raw)
+		}
+		*d.dst = v
+	}
+	n, err := parsePositiveInt(strings.TrimSpace(*maxReceipts))
+	if err != nil || n > math.MaxInt32 {
+		return edgeConfig{}, fmt.Errorf("invalid max receipts %q", *maxReceipts)
+	}
+	cfg.receipts.maxCount = int(n)
+
+	if err := loadMeshConfig(&cfg, *meshListen, *meshAdvertise, *meshPeers, getenv); err != nil {
+		return edgeConfig{}, err
 	}
 
 	cfg.shutdownTimeout = *shutdown
@@ -189,6 +274,47 @@ func loadConfig(args []string, getenv func(string) string) (edgeConfig, error) {
 	return cfg, nil
 }
 
+// loadMeshConfig validates the network mesh settings. The TLS material is
+// loaded here so a bad certificate fails at startup, not on first dial.
+func loadMeshConfig(cfg *edgeConfig, listen, advertise, peers string, getenv func(string) string) error {
+	cfg.meshListen = strings.TrimSpace(listen)
+	cfg.meshAdvertise = strings.TrimSpace(advertise)
+	cfg.meshPeers = mesh.ParsePeerAddresses(peers)
+	if cfg.meshListen == "" {
+		if cfg.meshAdvertise != "" || len(cfg.meshPeers) > 0 {
+			return errors.New("mesh advertise address and peers require -mesh-listen (EDGE_MESH_LISTEN)")
+		}
+		return nil
+	}
+	if _, err := mesh.ParseTCPAddress(cfg.meshListen); err != nil {
+		return fmt.Errorf("invalid mesh listen address: %w", err)
+	}
+	if cfg.meshAdvertise != "" {
+		hostport, err := mesh.ParseTCPAddress(cfg.meshAdvertise)
+		if err != nil {
+			return fmt.Errorf("invalid mesh advertise address: %w", err)
+		}
+		if _, port, _ := net.SplitHostPort(hostport); port == "0" {
+			return errors.New("mesh advertise address needs a port")
+		}
+	}
+	tlsCfg, ok, err := mesh.TLSTransportConfigFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("-mesh-listen requires %s and %s plus %s or %s", mesh.EnvMeshTLSCert, mesh.EnvMeshTLSKey, mesh.EnvMeshTLSCA, mesh.EnvMeshTLSPins)
+	}
+	// Validate the certificate and its peer id now.
+	tr, err := mesh.NewTLSTransport(tlsCfg)
+	if err != nil {
+		return err
+	}
+	_ = tr.Close()
+	cfg.meshTLS = &tlsCfg
+	return nil
+}
+
 func parsePositiveInt(s string) (int64, error) {
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || v <= 0 {
@@ -228,14 +354,18 @@ func run(ctx context.Context, cfg edgeConfig) error {
 		return err
 	}
 
-	transport := mesh.NewInMemoryTransport(peerID)
+	transport, dcfg, err := newMesh(cfg, peerID)
+	if err != nil {
+		return err
+	}
 	defer transport.Close()
-	discovery := mesh.NewDiscovery(mesh.DiscoveryConfig{
-		LocalID:     peerID,
-		BindAddress: "/ip4/127.0.0.1/tcp/0",
-		Transport:   transport,
-	})
+	dcfg.Transport = transport
+	peerID = dcfg.LocalID
+	discovery := mesh.NewDiscovery(dcfg)
 	discovery.Start(ctx)
+	if cfg.meshListen != "" {
+		fmt.Printf("edge-node mesh (mTLS) listening on %s as %s, %d seed peer(s)\n", discovery.Self().Address, peerID, len(dcfg.Peers))
+	}
 	defer func() {
 		discovery.Stop()
 		select {
@@ -244,7 +374,18 @@ func run(ctx context.Context, cfg edgeConfig) error {
 		}
 	}()
 
-	srv, err := newEdgeServer(ctx, cfg, db, peerID, hardware.NewLocalDetector().Detect(), discovery)
+	// The WASM runtime is optional: without it the node runs, but does not
+	// advertise "wasm" and refuses WASM jobs. Closed after the HTTP server
+	// has shut down, which interrupts any job still running.
+	wasmRT, err := newWasmRuntime()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "edge-node: wasm runtime unavailable, not advertising %q: %v\n", wasmCapability, err)
+		wasmRT = nil
+	} else {
+		defer wasmRT.Close()
+	}
+
+	srv, err := newEdgeServer(ctx, cfg, db, peerID, hardware.NewLocalDetector().Detect(), discovery, wasmRT)
 	if err != nil {
 		return err
 	}
@@ -286,6 +427,36 @@ func run(ctx context.Context, cfg edgeConfig) error {
 	return nil
 }
 
+// newMesh returns the mesh transport and discovery configuration: the
+// mutual-TLS network mesh when -mesh-listen is set (the peer id is then the
+// certificate's), else the in-process mesh under the stored peer id.
+func newMesh(cfg edgeConfig, storedID mesh.PeerID) (mesh.SecureTransport, mesh.DiscoveryConfig, error) {
+	if cfg.meshListen == "" {
+		return mesh.NewInMemoryTransport(storedID), mesh.DiscoveryConfig{
+			LocalID:     storedID,
+			BindAddress: "/ip4/127.0.0.1/tcp/0",
+		}, nil
+	}
+	if cfg.meshTLS == nil {
+		return nil, mesh.DiscoveryConfig{}, errors.New("mesh TLS not configured")
+	}
+	tr, err := mesh.NewTLSTransport(*cfg.meshTLS)
+	if err != nil {
+		return nil, mesh.DiscoveryConfig{}, err
+	}
+	id := tr.LocalID()
+	dcfg := mesh.DiscoveryConfig{
+		LocalID:     id,
+		BindAddress: cfg.meshListen,
+		Peers:       mesh.MeshConfig{LocalPeerID: id, PeerAddresses: cfg.meshPeers}.PeerDescriptors(),
+		Transport:   tr,
+	}
+	if cfg.meshAdvertise != "" {
+		dcfg.Advertise = mesh.PeerDescriptor{ID: id, Address: cfg.meshAdvertise}
+	}
+	return tr, dcfg, nil
+}
+
 func authMode(cfg edgeConfig) string {
 	switch {
 	case cfg.apiToken != "":
@@ -308,13 +479,17 @@ type edgeServer struct {
 	pqcKM     *pqc.QuantumSafeKeyManager
 	hub       *realtime.Hub
 	discovery *mesh.Discovery
-	now       func() time.Time
+	// wasm runs WASM jobs; nil when the runtime is unavailable.
+	wasm *sandbox.WasmExecutor
+	now  func() time.Time
 
 	mu       sync.RWMutex
 	manifest marketplace.CapabilityManifest
 }
 
-func newEdgeServer(ctx context.Context, cfg edgeConfig, db *bbolt.DB, peerID mesh.PeerID, caps []hardware.Capability, discovery *mesh.Discovery) (*edgeServer, error) {
+// newEdgeServer builds the HTTP-facing node state. wasmRT may be nil (WASM
+// runtime unavailable); the server does not close it.
+func newEdgeServer(ctx context.Context, cfg edgeConfig, db *bbolt.DB, peerID mesh.PeerID, caps []hardware.Capability, discovery *mesh.Discovery, wasmRT *wasmrt.Runtime) (*edgeServer, error) {
 	wallet, err := newBboltWalletStore(db).Wallet(ctx, edgeWalletID)
 	if err != nil {
 		return nil, fmt.Errorf("wallet init: %w", err)
@@ -331,25 +506,37 @@ func newEdgeServer(ctx context.Context, cfg edgeConfig, db *bbolt.DB, peerID mes
 		discovery: discovery,
 		now:       time.Now,
 	}
-	s.manifest = toOpenStandardCapabilityManifest(caps, cfg.listenAddr)
+	if wasmRT != nil {
+		s.wasm = sandbox.NewWasmExecutorWithRuntime(wasmRT, sandbox.DefaultLimits())
+	}
+	s.manifest = toOpenStandardCapabilityManifest(caps, cfg.listenAddr, s.wasm != nil)
 	if stored, ok, err := loadCapabilityManifest(db); err != nil {
 		return nil, err
 	} else if ok {
 		s.manifest = stored
+	}
+	s.manifest.Capabilities = s.servableCapabilities(s.manifest.Capabilities)
+	if err := ensureReceiptIndex(db, cfg.receipts, time.Now()); err != nil {
+		return nil, fmt.Errorf("receipt index: %w", err)
 	}
 	return s, nil
 }
 
 func (s *edgeServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/v1/marketplace/openstandard/capability", s.registry.CapabilityManifestHandler())
-	mux.HandleFunc("/v1/marketplace/openstandard/capability/self", s.handleCapabilitySelf)
-	mux.HandleFunc("/v1/marketplace/openstandard/receipt", s.handleReceipt)
+	mux.Handle("/v1/marketplace/openstandard/capability", readDeadline(s.registry.CapabilityManifestHandler()))
+	mux.Handle("/v1/marketplace/openstandard/capability/self", readDeadline(http.HandlerFunc(s.handleCapabilitySelf)))
+	mux.Handle("/v1/marketplace/openstandard/receipt", readDeadline(http.HandlerFunc(s.handleReceipt)))
 	mux.HandleFunc("/v1/marketplace/openstandard/receipt/self", s.handleReceiptSelf)
 	mux.HandleFunc("/v1/edge/capabilities", s.handleCapabilities)
-	mux.Handle("/v1/edge/pqc/handshake", onlyMethods(pqc.HandshakeHandler(s.pqcKM), http.MethodPost))
+	mux.Handle("/v1/edge/pqc/handshake", readDeadline(onlyMethods(pqc.HandshakeHandler(s.pqcKM), http.MethodPost)))
+	mux.Handle("/v1/edge/wasm/run", readDeadlineFor(wasmRunReadTimeout, onlyMethods(http.HandlerFunc(s.handleWasmRun), http.MethodPost)))
+	// The stream handler manages its own per-read/write deadlines
+	// (IdleTimeout) so long streams are not cut off.
 	stream := spatial.NewVideo3DStreamHandler()
 	stream.MaxBytes = s.cfg.maxStreamBytes
+	stream.IdleTimeout = s.cfg.streamIdleTimeout
+	stream.MaxDuration = s.cfg.streamMaxDuration
 	mux.Handle("/v1/edge/spatial/stream", onlyMethods(s.capBody(stream, s.cfg.maxStreamBytes), http.MethodPost))
 	rtCfg := realtime.DefaultConfig()
 	rtCfg.AllowedOrigins = append(rtCfg.AllowedOrigins, s.cfg.allowedOrigins...)
@@ -446,6 +633,21 @@ func onlyMethods(h http.Handler, methods ...string) http.Handler {
 	})
 }
 
+// readDeadline bounds reading the request body of non-streaming routes: the
+// server has no global ReadTimeout (it would cut spatial streams), so without
+// this a client that stalls mid-body would hold the handler until the
+// connection closes.
+func readDeadline(h http.Handler) http.Handler { return readDeadlineFor(bodyReadTimeout, h) }
+
+func readDeadlineFor(d time.Duration, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.Body != http.NoBody {
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 func (s *edgeServer) capBody(h http.Handler, limit int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
@@ -468,6 +670,7 @@ func (s *edgeServer) handleCapabilitySelf(w http.ResponseWriter, r *http.Request
 			return
 		}
 		m.UpdatedAt = s.now().UTC()
+		m.Capabilities = s.servableCapabilities(m.Capabilities)
 		if err := saveCapabilityManifest(s.db, m); err != nil {
 			respondErr(w, "failed to persist manifest", http.StatusInternalServerError)
 			return
@@ -493,7 +696,7 @@ func (s *edgeServer) handleReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.RecordedAt = s.now().UTC()
-	stored, created, err := storeReceipt(s.db, rec)
+	stored, created, err := storeReceiptBounded(s.db, rec, s.cfg.receipts, s.now())
 	switch {
 	case errors.Is(err, errReceiptConflict):
 		respondErr(w, err.Error(), http.StatusConflict)
@@ -533,6 +736,7 @@ func (s *edgeServer) handleCapabilities(w http.ResponseWriter, r *http.Request) 
 		"peer_id":  string(s.peerID),
 		"hardware": hardware.AdvertisedCapabilities(s.caps),
 		"system":   hardware.DetectSystemInfo(),
+		"wasm":     s.wasm != nil,
 	}
 	if b, err := s.wallet.Balance(r.Context()); err != nil {
 		resp["wallet"] = nil
@@ -580,7 +784,9 @@ func respondErr(w http.ResponseWriter, msg string, code int) {
 	}{Error: msg})
 }
 
-func toOpenStandardCapabilityManifest(caps []hardware.Capability, listenAddr string) marketplace.CapabilityManifest {
+// toOpenStandardCapabilityManifest builds the detected manifest. "wasm" is
+// advertised only when the WASM runtime is available.
+func toOpenStandardCapabilityManifest(caps []hardware.Capability, listenAddr string, wasm bool) marketplace.CapabilityManifest {
 	gpuName := ""
 	// Prefer the most capable accelerator deterministically.
 	rank := map[string]int{"cuda": 4, "rocm": 3, "metal": 2, "vulkan": 1}
@@ -602,9 +808,17 @@ func toOpenStandardCapabilityManifest(caps []hardware.Capability, listenAddr str
 			Currency:        "USD",
 			InvoiceURL:      invoiceURL(listenAddr),
 		},
-		Capabilities: []string{"mesh", "wasm", "billing", "privacy"},
+		Capabilities: advertisedCapabilities(wasm),
 		UpdatedAt:    time.Now().UTC(),
 	}
+}
+
+func advertisedCapabilities(wasm bool) []string {
+	out := []string{"mesh", "billing", "privacy"}
+	if wasm {
+		out = append(out, wasmCapability)
+	}
+	return out
 }
 
 // invoiceURL derives the self-receipt URL from the listen address. Wildcard
@@ -671,8 +885,17 @@ func queueReceipt(db *bbolt.DB, rec marketplace.BillingReceipt) error {
 }
 
 // storeReceipt is queueReceipt that also returns the stored receipt and
-// whether it was newly created.
+// whether it was newly created. It applies the default receipt limits.
 func storeReceipt(db *bbolt.DB, rec marketplace.BillingReceipt) (marketplace.BillingReceipt, bool, error) {
+	return storeReceiptBounded(db, rec, receiptLimits{}, time.Now())
+}
+
+// storeReceiptBounded stores rec and keeps the receipt bucket within limits:
+// once more than limits.count() receipts are stored the oldest (by recording
+// time) are evicted, and receipts recorded before now-limits.maxAge are
+// evicted as well (at most maxReceiptEvictionsPerWrite per call). An evicted
+// receipt ID is no longer remembered, so replaying it creates it again.
+func storeReceiptBounded(db *bbolt.DB, rec marketplace.BillingReceipt, limits receiptLimits, now time.Time) (marketplace.BillingReceipt, bool, error) {
 	if err := rec.Validate(); err != nil {
 		return marketplace.BillingReceipt{}, false, err
 	}
@@ -682,11 +905,7 @@ func storeReceipt(db *bbolt.DB, rec marketplace.BillingReceipt) (marketplace.Bil
 	}
 	stored, created := rec, false
 	err = db.Update(func(tx *bbolt.Tx) error {
-		eb, err := tx.CreateBucketIfNotExists(bucketEdge)
-		if err != nil {
-			return err
-		}
-		rb, err := eb.CreateBucketIfNotExists(bucketReceipts)
+		rb, ib, err := receiptBuckets(tx)
 		if err != nil {
 			return err
 		}
@@ -703,12 +922,131 @@ func storeReceipt(db *bbolt.DB, rec marketplace.BillingReceipt) (marketplace.Bil
 			return nil
 		}
 		created = true
-		return rb.Put(key, payload)
+		if err := rb.Put(key, payload); err != nil {
+			return err
+		}
+		if err := ib.Put(receiptIndexKey(rec.RecordedAt, rec.ReceiptID), nil); err != nil {
+			return err
+		}
+		if err := ib.SetSequence(ib.Sequence() + 1); err != nil {
+			return err
+		}
+		return pruneReceipts(rb, ib, limits, now)
 	})
 	if err != nil {
 		return marketplace.BillingReceipt{}, false, err
 	}
 	return stored, created, nil
+}
+
+func receiptBuckets(tx *bbolt.Tx) (receipts, index *bbolt.Bucket, err error) {
+	eb, err := tx.CreateBucketIfNotExists(bucketEdge)
+	if err != nil {
+		return nil, nil, err
+	}
+	if receipts, err = eb.CreateBucketIfNotExists(bucketReceipts); err != nil {
+		return nil, nil, err
+	}
+	if index, err = eb.CreateBucketIfNotExists(bucketReceiptIndex); err != nil {
+		return nil, nil, err
+	}
+	return receipts, index, nil
+}
+
+// receiptIndexKey orders receipts by recording time, then ID. Times before
+// the epoch sort first.
+func receiptIndexKey(at time.Time, id string) []byte {
+	key := make([]byte, 8, 8+len(id))
+	ts := at.UnixNano()
+	if at.IsZero() || ts < 0 {
+		ts = 0
+	}
+	binary.BigEndian.PutUint64(key, uint64(ts))
+	return append(key, id...)
+}
+
+// pruneReceipts evicts the oldest receipts beyond the count cap and, with a
+// max age, receipts recorded before the cutoff.
+func pruneReceipts(rb, ib *bbolt.Bucket, limits receiptLimits, now time.Time) error {
+	var cutoff uint64
+	if limits.maxAge > 0 {
+		if c := now.Add(-limits.maxAge).UnixNano(); c > 0 {
+			cutoff = uint64(c)
+		}
+	}
+	maxCount := uint64(limits.count())
+	evicted := 0
+	for {
+		count := ib.Sequence()
+		k, _ := ib.Cursor().First()
+		if k == nil {
+			if count != 0 {
+				return ib.SetSequence(0)
+			}
+			return nil
+		}
+		overCap := count > maxCount
+		expired := len(k) >= 8 && binary.BigEndian.Uint64(k[:8]) < cutoff && evicted < maxReceiptEvictionsPerWrite
+		if !overCap && !expired {
+			return nil
+		}
+		key := append([]byte(nil), k...)
+		if err := ib.Delete(key); err != nil {
+			return err
+		}
+		if len(key) > 8 {
+			if err := rb.Delete(key[8:]); err != nil {
+				return err
+			}
+		}
+		if count > 0 {
+			if err := ib.SetSequence(count - 1); err != nil {
+				return err
+			}
+		}
+		evicted++
+	}
+}
+
+// ensureReceiptIndex (re)builds the receipt time index when it is missing or
+// out of step with the receipt bucket (for example a state file written by
+// an older edge-node), then applies the limits once.
+func ensureReceiptIndex(db *bbolt.DB, limits receiptLimits, now time.Time) error {
+	return db.Update(func(tx *bbolt.Tx) error {
+		eb := tx.Bucket(bucketEdge)
+		if eb == nil || eb.Bucket(bucketReceipts) == nil {
+			return nil
+		}
+		rb := eb.Bucket(bucketReceipts)
+		n := rb.Stats().KeyN
+		if ib := eb.Bucket(bucketReceiptIndex); ib != nil && ib.Sequence() == uint64(n) {
+			return pruneReceipts(rb, ib, limits, now)
+		}
+		if eb.Bucket(bucketReceiptIndex) != nil {
+			if err := eb.DeleteBucket(bucketReceiptIndex); err != nil {
+				return err
+			}
+		}
+		ib, err := eb.CreateBucket(bucketReceiptIndex)
+		if err != nil {
+			return err
+		}
+		count := uint64(0)
+		err = rb.ForEach(func(k, v []byte) error {
+			var rec marketplace.BillingReceipt
+			// Unreadable receipts get the zero time and are evicted first.
+			_ = json.Unmarshal(v, &rec)
+			count++
+			return ib.Put(receiptIndexKey(rec.RecordedAt, string(k)), nil)
+		})
+		if err != nil {
+			return err
+		}
+		if err := ib.SetSequence(count); err != nil {
+			return err
+		}
+		return pruneReceipts(rb, ib, limits, now)
+	})
 }
 
 func sameReceipt(a, b marketplace.BillingReceipt) bool {

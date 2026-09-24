@@ -17,8 +17,9 @@ func newRootCmd() *cobra.Command {
 		Short: "AeroLLM gateway command line interface",
 		Long: `AeroLLM command line interface.
 
-Talk to an AeroLLM gateway (chat, models, keys, metrics, health and the
-admin APIs), migrate LiteLLM configs, scaffold projects and build plugins.
+Talk to an AeroLLM gateway (chat, models, keys, batches, budgets, spend,
+cache, config, metrics, health and the admin APIs), migrate LiteLLM
+configs, scaffold projects and build plugins.
 
 Connection settings:
   --server   / $AEROLLM_URL      gateway base URL (default ` + defaultServerURL + `)
@@ -63,6 +64,14 @@ Connection settings:
 	root.AddCommand(newRegionCmd())
 	root.AddCommand(newMigrateCmd())
 	root.AddCommand(newRSICmd())
+	root.AddCommand(newBatchesCmd())
+	root.AddCommand(newBudgetsCmd())
+	root.AddCommand(newRAGCmd())
+	root.AddCommand(newNotifyCmd())
+	root.AddCommand(newShadowCmd())
+	root.AddCommand(newCacheCmd())
+	root.AddCommand(newSpendCmd())
+	root.AddCommand(newConfigCmd())
 
 	return root
 }

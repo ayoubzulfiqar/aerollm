@@ -126,6 +126,10 @@ type AeroRouteStatus struct {
 	LatencyMs   float64           `json:"latency_ms,omitempty"`
 	CircuitOpen bool              `json:"circuit_open,omitempty"`
 	Providers   map[string]string `json:"providers,omitempty"`
+	// ObservedGeneration is the metadata.generation last reconciled by the
+	// operator; Conditions describe the outcome.
+	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 }
 
 // AeroRoute represents an externally managed routing policy.

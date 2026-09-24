@@ -68,10 +68,19 @@ definitions:
         additionalProperties:
           $ref: '#/definitions/analytics.SpendBucket'
         type: object
+      by_provider:
+        additionalProperties:
+          $ref: '#/definitions/analytics.SpendBucket'
+        type: object
       by_team:
         additionalProperties:
           $ref: '#/definitions/analytics.SpendBucket'
         type: object
+      data_since:
+        description: |-
+          DataSince is the timestamp of the oldest retained entry; spend before
+          it has been evicted from the in-memory window.
+        type: string
       generated_at:
         type: string
       time_range:
@@ -99,6 +108,62 @@ definitions:
       start:
         type: string
     type: object
+  api.BatchObject:
+    properties:
+      cancelled_at:
+        type: integer
+      cancelling_at:
+        type: integer
+      completed_at:
+        type: integer
+      completed_requests:
+        type: integer
+      completion_window:
+        type: string
+      created_at:
+        type: integer
+      endpoint:
+        type: string
+      error:
+        type: string
+      error_file_id:
+        type: string
+      errors:
+        items:
+          $ref: '#/definitions/batch.BatchError'
+        type: array
+      expired_at:
+        type: integer
+      expires_at:
+        type: integer
+      failed_at:
+        type: integer
+      failed_requests:
+        type: integer
+      finalizing_at:
+        type: integer
+      id:
+        type: string
+      in_progress_at:
+        type: integer
+      input_file_id:
+        type: string
+      metadata:
+        additionalProperties:
+          type: string
+        type: object
+      object:
+        type: string
+      output_file_id:
+        type: string
+      request_counts:
+        $ref: '#/definitions/batch.RequestCounts'
+      status:
+        type: string
+      total_requests:
+        description: Flat counters kept for backward compatibility.
+        type: integer
+    type: object
   api.CacheInspectEntry:
     properties:
       created_at:
@@ -125,16 +190,143 @@ definitions:
     properties:
       exact:
         properties:
+          error:
+            type: string
+          hit_rate:
+            type: number
+          hits:
+            type: integer
+          misses:
+            type: integer
           total_entries:
             type: integer
+          truncated:
+            type: boolean
         type: object
       semantic:
         properties:
           active_entries:
             type: integer
+          enabled:
+            type: boolean
           total_entries:
             type: integer
         type: object
+    type: object
+  api.ModelEntry:
+    properties:
+      created:
+        type: integer
+      id:
+        type: string
+      object:
+        type: string
+      owned_by:
+        type: string
+    type: object
+  api.ModelList:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/api.ModelEntry'
+        type: array
+      object:
+        type: string
+    type: object
+  api.anthropicBlock:
+    properties:
+      cache_control:
+        $ref: '#/definitions/models.CacheControl'
+      content:
+        type: string
+      id:
+        type: string
+      input:
+        type: object
+      is_error:
+        type: boolean
+      name:
+        type: string
+      source:
+        $ref: '#/definitions/api.anthropicSource'
+      text:
+        type: string
+      tool_use_id:
+        type: string
+      type:
+        type: string
+    type: object
+  api.anthropicResponse:
+    properties:
+      content:
+        items:
+          $ref: '#/definitions/api.anthropicBlock'
+        type: array
+      id:
+        type: string
+      model:
+        type: string
+      role:
+        type: string
+      stop_reason:
+        type: string
+      stop_sequence:
+        type: string
+      type:
+        type: string
+      usage:
+        $ref: '#/definitions/api.anthropicUsage'
+    type: object
+  api.anthropicSource:
+    properties:
+      data:
+        type: string
+      media_type:
+        type: string
+      type:
+        type: string
+      url:
+        type: string
+    type: object
+  api.anthropicUsage:
+    properties:
+      input_tokens:
+        type: integer
+      output_tokens:
+        type: integer
+    type: object
+  batch.BatchError:
+    properties:
+      code:
+        type: string
+      line:
+        type: integer
+      message:
+        type: string
+      param:
+        type: string
+    type: object
+  batch.RequestCounts:
+    properties:
+      completed:
+        type: integer
+      failed:
+        type: integer
+      total:
+        type: integer
+    type: object
+  config.AgentConfig:
+    properties:
+      cache_tool_results:
+        type: boolean
+      enabled:
+        type: boolean
+      max_concurrent:
+        type: integer
+      max_iterations:
+        type: integer
+      tool_timeout:
+        $ref: '#/definitions/time.Duration'
     type: object
   config.AppConfig:
     properties:
@@ -145,7 +337,374 @@ definitions:
       version:
         type: string
     type: object
+  config.AuthConfig:
+    properties:
+      admin_keys:
+        description: AdminKeys are additional keys with admin access.
+        items:
+          type: string
+        type: array
+      api_keys:
+        description: APIKeys are static client keys allowed to call the inference
+          endpoints.
+        items:
+          type: string
+        type: array
+      master_key:
+        description: |-
+          MasterKey grants admin access (key management, config, control plane).
+          When empty a random key is generated at startup and printed once.
+        type: string
+    type: object
+  config.CacheConfig:
+    properties:
+      enabled:
+        type: boolean
+      exact_prefix:
+        type: string
+      semantic_embedding_model:
+        description: |-
+          SemanticEmbeddingModel, when set, embeds prompts for the semantic
+          cache through the gateway's embeddings route (otherwise a local
+          lexical embedder is used).
+        type: string
+      semantic_enabled:
+        description: SemanticEnabled turns on similarity-based caching.
+        type: boolean
+      semantic_prefix:
+        type: string
+      semantic_threshold:
+        type: number
+      shared_across_keys:
+        description: |-
+          SharedAcrossKeys lets different API keys share cache entries. Off by
+          default so one tenant can never be served another tenant's response.
+        type: boolean
+      ttl:
+        $ref: '#/definitions/time.Duration'
+    type: object
+  config.CallbackDatadogConfig:
+    properties:
+      api_key:
+        type: string
+      base_url:
+        type: string
+      enabled:
+        type: boolean
+      site:
+        type: string
+    type: object
+  config.CallbackLangfuseConfig:
+    properties:
+      api_key:
+        description: APIKey is the legacy single-key form ("pk:sk" or the secret key).
+        type: string
+      base_url:
+        type: string
+      enabled:
+        type: boolean
+      project_id:
+        type: string
+      public_key:
+        description: PublicKey/SecretKey are the Langfuse project key pair (preferred).
+        type: string
+      secret_key:
+        type: string
+    type: object
+  config.CallbackWebhookConfig:
+    properties:
+      enabled:
+        type: boolean
+      retries:
+        type: integer
+      retry_delay:
+        $ref: '#/definitions/time.Duration'
+      secret:
+        type: string
+      timeout:
+        $ref: '#/definitions/time.Duration'
+      url:
+        type: string
+    type: object
+  config.CallbacksConfig:
+    properties:
+      datadog:
+        $ref: '#/definitions/config.CallbackDatadogConfig'
+      langfuse:
+        $ref: '#/definitions/config.CallbackLangfuseConfig'
+      webhook:
+        $ref: '#/definitions/config.CallbackWebhookConfig'
+    type: object
+  config.CircuitBreakConfig:
+    properties:
+      half_open_max_calls:
+        type: integer
+      max_failures:
+        type: integer
+      reset_timeout:
+        $ref: '#/definitions/time.Duration'
+    type: object
   config.Config:
+    properties:
+      agent:
+        $ref: '#/definitions/config.AgentConfig'
+      app:
+        $ref: '#/definitions/config.AppConfig'
+      auth:
+        $ref: '#/definitions/config.AuthConfig'
+      cache:
+        $ref: '#/definitions/config.CacheConfig'
+      callbacks:
+        $ref: '#/definitions/config.CallbacksConfig'
+      finops:
+        $ref: '#/definitions/config.FinopsConfig'
+      guardrails:
+        $ref: '#/definitions/config.GuardrailsConfig'
+      logging:
+        $ref: '#/definitions/config.LoggingConfig'
+      persistence:
+        $ref: '#/definitions/config.PersistenceConfig'
+      plugins:
+        $ref: '#/definitions/config.PluginsConfig'
+      providers:
+        items:
+          $ref: '#/definitions/config.ProviderConfig'
+        type: array
+      rate_limit:
+        $ref: '#/definitions/config.RateLimitConfig'
+      redis:
+        $ref: '#/definitions/config.RedisConfig'
+      router:
+        $ref: '#/definitions/config.RouterConfig'
+      security:
+        $ref: '#/definitions/config.SecurityConfig'
+      server:
+        $ref: '#/definitions/config.ServerConfig'
+      telemetry:
+        $ref: '#/definitions/config.TelemetryConfig'
+      webhooks:
+        $ref: '#/definitions/config.WebhooksConfig'
+    type: object
+  config.FinopsConfig:
+    properties:
+      budget_period:
+        description: |-
+          BudgetPeriod resets per-key spend: "lifetime" (default), "daily" or
+          "monthly" (UTC).
+        type: string
+      default_max_usd:
+        type: number
+      enabled:
+        type: boolean
+    type: object
+  config.GuardrailsConfig:
+    properties:
+      enabled:
+        type: boolean
+    type: object
+  config.LoggingConfig:
+    properties:
+      format:
+        type: string
+      level:
+        type: string
+    type: object
+  config.PersistenceConfig:
+    properties:
+      enabled:
+        type: boolean
+      path:
+        description: Path of the database file (default <AEROLLM_STATE_DIR>/gateway.db).
+        type: string
+    type: object
+  config.PluginHookConfig:
+    properties:
+      file:
+        type: string
+      id:
+        type: string
+    type: object
+  config.PluginToolConfig:
+    properties:
+      description:
+        type: string
+      file:
+        type: string
+      name:
+        type: string
+      parameters:
+        additionalProperties: true
+        type: object
+    type: object
+  config.PluginsConfig:
+    properties:
+      allow_clock:
+        description: |-
+          AllowClock / AllowRandom expose real clocks / crypto randomness to
+          guests (deterministic fakes otherwise).
+        type: boolean
+      allow_random:
+        type: boolean
+      dir:
+        description: Dir holds the .wasm files; tool files are resolved inside it
+          only.
+        type: string
+      hooks:
+        description: |-
+          Hooks run, in order, on every chat request (OnRequest) and
+          non-streaming response (OnResponse).
+        items:
+          $ref: '#/definitions/config.PluginHookConfig'
+        type: array
+      max_concurrent:
+        description: MaxConcurrent bounds simultaneous runs (0 = runtime default).
+        type: integer
+      memory_mib:
+        description: MemoryMiB caps each module's linear memory.
+        type: integer
+      timeout:
+        allOf:
+        - $ref: '#/definitions/time.Duration'
+        description: Timeout bounds one tool invocation.
+      tools:
+        items:
+          $ref: '#/definitions/config.PluginToolConfig'
+        type: array
+    type: object
+  config.ProviderConfig:
+    properties:
+      api_key:
+        type: string
+      api_version:
+        description: APIVersion is sent as ?api-version= for Azure OpenAI deployment
+          URLs.
+        type: string
+      base_url:
+        type: string
+      models:
+        items:
+          type: string
+        type: array
+      name:
+        type: string
+      rate_limit_rps:
+        type: number
+      timeout:
+        $ref: '#/definitions/time.Duration'
+      type:
+        type: string
+      weight:
+        type: integer
+    type: object
+  config.RateLimitConfig:
+    properties:
+      burst_multiplier:
+        type: integer
+      default_rps:
+        type: number
+      default_tpm:
+        description: DefaultTPM is the advertised tokens-per-minute limit.
+        type: integer
+      strategy:
+        type: string
+    type: object
+  config.RedisConfig:
+    properties:
+      addr:
+        type: string
+      db:
+        type: integer
+      min_idle_conns:
+        type: integer
+      password:
+        type: string
+      pool_size:
+        type: integer
+      required:
+        description: |-
+          Required makes startup fail when Redis is unreachable. When false the
+          gateway starts in degraded mode (in-memory limiter, no exact cache).
+        type: boolean
+    type: object
+  config.RouterConfig:
+    properties:
+      circuit_break:
+        $ref: '#/definitions/config.CircuitBreakConfig'
+      health_check_interval:
+        allOf:
+        - $ref: '#/definitions/time.Duration'
+        description: |-
+          HealthCheckInterval actively probes providers (cheap model-list GETs)
+          so readiness and routing reflect upstream health. 0 disables.
+      max_attempts:
+        description: |-
+          MaxAttempts bounds how many providers are tried for one request when
+          earlier attempts fail with retryable errors.
+        type: integer
+      max_retry_wait:
+        allOf:
+        - $ref: '#/definitions/time.Duration'
+        description: |-
+          MaxRetryWait is the longest upstream Retry-After the router will wait
+          out before retrying when no other provider is left (0 disables).
+      strategy:
+        type: string
+    type: object
+  config.SecurityConfig:
+    properties:
+      cors_allowed_origins:
+        description: |-
+          CORSAllowedOrigins lists origins allowed to call the API from browsers.
+          Empty disables CORS; "*" allows any origin (credentials never allowed).
+        items:
+          type: string
+        type: array
+      enable_pprof:
+        description: EnablePprof exposes net/http/pprof on localhost:6060.
+        type: boolean
+      public_metrics:
+        description: PublicMetrics serves /metrics without authentication.
+        type: boolean
+    type: object
+  config.ServerConfig:
+    properties:
+      idle_timeout:
+        $ref: '#/definitions/time.Duration'
+      max_body_bytes:
+        description: MaxBodyBytes caps request bodies on JSON endpoints.
+        type: integer
+      port:
+        type: integer
+      read_header_timeout:
+        $ref: '#/definitions/time.Duration'
+      read_timeout:
+        $ref: '#/definitions/time.Duration'
+      shutdown_timeout:
+        $ref: '#/definitions/time.Duration'
+      write_timeout:
+        allOf:
+        - $ref: '#/definitions/time.Duration'
+        description: |-
+          WriteTimeout bounds non-streaming responses. Streaming (SSE) responses
+          lift the deadline per request so long generations are not cut off.
+    type: object
+  config.TelemetryConfig:
+    properties:
+      enabled:
+        type: boolean
+      exporter:
+        type: string
+      otlp_addr:
+        type: string
+      sample_rate:
+        type: number
+      service_name:
+        type: string
+    type: object
+  config.WebhooksConfig:
+    properties:
+      enabled:
+        type: boolean
     type: object
   keymanager.DeleteRequest:
     properties:
@@ -162,6 +721,10 @@ definitions:
         items:
           type: string
         type: array
+      blocked:
+        type: boolean
+      budget_duration:
+        type: string
       duration:
         type: string
       max_budget:
@@ -173,7 +736,15 @@ definitions:
         items:
           type: string
         type: array
+      rate_limit_rps:
+        type: number
+      rate_limit_tpm:
+        type: integer
+      role:
+        $ref: '#/definitions/keymanager.KeyRole'
       team_id:
+        type: string
+      tenant_id:
         type: string
       user_id:
         type: string
@@ -181,10 +752,13 @@ definitions:
   keymanager.GenerateResponse:
     properties:
       expires:
+        description: Expires is RFC 3339, or "" when the key never expires.
         type: string
       key:
         type: string
       key_hash:
+        type: string
+      prefix:
         type: string
       token:
         type: string
@@ -204,6 +778,12 @@ definitions:
         items:
           type: string
         type: array
+      blocked:
+        type: boolean
+      budget_duration:
+        type: string
+      budget_reset_at:
+        type: string
       created_at:
         type: string
       expires_at:
@@ -219,9 +799,33 @@ definitions:
         items:
           type: string
         type: array
+      prefix:
+        type: string
+      rate_limit_rps:
+        type: number
+      rate_limit_tpm:
+        type: integer
+      role:
+        $ref: '#/definitions/keymanager.KeyRole'
+      spend:
+        type: number
       status:
         $ref: '#/definitions/keymanager.KeyStatus'
+      team_id:
+        type: string
+      tenant_id:
+        type: string
+      user_id:
+        type: string
     type: object
+  keymanager.KeyRole:
+    enum:
+    - ""
+    - team_admin
+    type: string
+    x-enum-varnames:
+    - RoleMember
+    - RoleTeamAdmin
   keymanager.KeyStatus:
     enum:
     - active
@@ -236,6 +840,12 @@ definitions:
     properties:
       budget:
         type: number
+      budget_duration:
+        description: BudgetDuration, if set (e.g. "30d"), resets Spend periodically.
+        type: string
+      budget_reset_at:
+        description: BudgetResetAt is when Spend is next reset (zero if no BudgetDuration).
+        type: string
       created_at:
         type: string
       id:
@@ -249,6 +859,53 @@ definitions:
         type: object
       name:
         type: string
+      spend:
+        description: |-
+          Spend is the accumulated spend in USD of all keys of the team in the
+          current budget period.
+        type: number
+    type: object
+  keymanager.TeamInfoResponse:
+    properties:
+      budget:
+        type: number
+      budget_duration:
+        description: BudgetDuration, if set (e.g. "30d"), resets Spend periodically.
+        type: string
+      budget_exceeded:
+        description: |-
+          BudgetExceeded reports whether keys of the team are currently
+          rejected because of the team budget.
+        type: boolean
+      budget_reset_at:
+        description: BudgetResetAt is when Spend is next reset (zero if no BudgetDuration).
+        type: string
+      created_at:
+        type: string
+      id:
+        type: string
+      keys:
+        description: Keys is the number of non-revoked keys assigned to the team.
+        type: integer
+      members:
+        items:
+          type: string
+        type: array
+      metadata:
+        additionalProperties: true
+        type: object
+      name:
+        type: string
+      remaining_budget:
+        description: |-
+          RemainingBudget is Budget - Spend (never negative); absent when the
+          team has no budget.
+        type: number
+      spend:
+        description: |-
+          Spend is the accumulated spend in USD of all keys of the team in the
+          current budget period.
+        type: number
     type: object
   keymanager.User:
     properties:
@@ -291,6 +948,10 @@ definitions:
         type: string
       index:
         type: integer
+      logprobs:
+        description: Logprobs is passed through verbatim when the upstream returns
+          it.
+        type: object
       message:
         $ref: '#/definitions/models.Message'
     type: object
@@ -307,9 +968,15 @@ definitions:
     type: object
   models.EmbeddingRequest:
     properties:
+      dimensions:
+        type: integer
+      encoding_format:
+        type: string
       input:
         type: string
       model:
+        type: string
+      user:
         type: string
     type: object
   models.EmbeddingResponse:
@@ -354,6 +1021,8 @@ definitions:
     type: object
   models.JSONSchema:
     properties:
+      description:
+        type: string
       name:
         type: string
       schema:
@@ -368,6 +1037,18 @@ definitions:
     properties:
       frequency_penalty:
         type: number
+      logit_bias:
+        additionalProperties:
+          format: float64
+          type: number
+        description: LogitBias maps token IDs to bias values (-100..100).
+        type: object
+      logprobs:
+        description: Logprobs requests log probabilities of output tokens.
+        type: boolean
+      max_completion_tokens:
+        description: MaxCompletionTokens is the newer OpenAI name for MaxTokens.
+        type: integer
       max_tokens:
         description: Maximum tokens to generate.
         example: 4096
@@ -381,6 +1062,12 @@ definitions:
         description: The model identifier (e.g. "gpt-4o", "claude-3-opus").
         example: gpt-4o
         type: string
+      "n":
+        description: N is the number of choices to generate.
+        type: integer
+      parallel_tool_calls:
+        description: ParallelToolCalls enables parallel function calling.
+        type: boolean
       presence_penalty:
         type: number
       rag_enabled:
@@ -389,6 +1076,9 @@ definitions:
         allOf:
         - $ref: '#/definitions/models.ResponseFormat'
         description: ResponseFormat controls structured output.
+      seed:
+        description: Seed requests deterministic sampling.
+        type: integer
       stop:
         description: Stop sequences.
         items:
@@ -397,18 +1087,32 @@ definitions:
       stream:
         example: false
         type: boolean
+      stream_options:
+        allOf:
+        - $ref: '#/definitions/models.StreamOptions'
+        description: StreamOptions configures streaming (e.g. include_usage).
       temperature:
         description: Sampling temperature (0-2).
         example: 0.7
         type: number
+      tool_choice:
+        allOf:
+        - $ref: '#/definitions/models.ToolChoice'
+        description: ToolChoice controls which (if any) tool is called.
       tools:
         items:
           $ref: '#/definitions/models.ToolDefinition'
         type: array
+      top_logprobs:
+        description: TopLogprobs is the number of most likely tokens to return (0-20).
+        type: integer
       top_p:
         description: Nucleus sampling (0-1).
         example: 1
         type: number
+      user:
+        description: User is an end-user identifier for abuse monitoring.
+        type: string
     type: object
   models.LLMResponse:
     description: Unified LLM response.
@@ -428,6 +1132,8 @@ definitions:
         type: string
       object:
         example: chat.completion
+        type: string
+      system_fingerprint:
         type: string
       usage:
         $ref: '#/definitions/models.Usage'
@@ -461,12 +1167,19 @@ definitions:
     - user
     - assistant
     - tool
+    - developer
     type: string
     x-enum-varnames:
     - RoleSystem
     - RoleUser
     - RoleAssistant
     - RoleTool
+    - RoleDeveloper
+  models.PromptTokensDetails:
+    properties:
+      cached_tokens:
+        type: integer
+    type: object
   models.ResponseFormat:
     properties:
       json_schema:
@@ -505,6 +1218,11 @@ definitions:
       usage:
         $ref: '#/definitions/models.Usage'
     type: object
+  models.StreamOptions:
+    properties:
+      include_usage:
+        type: boolean
+    type: object
   models.ToolCall:
     properties:
       function:
@@ -512,6 +1230,15 @@ definitions:
       id:
         type: string
       type:
+        type: string
+    type: object
+  models.ToolChoice:
+    properties:
+      function:
+        description: Function forces a specific function tool by name.
+        type: string
+      mode:
+        description: Mode is "none", "auto" or "required" when Function is empty.
         type: string
     type: object
   models.ToolDefinition:
@@ -523,6 +1250,9 @@ definitions:
       parameters:
         additionalProperties: true
         type: object
+      strict:
+        description: Strict enables OpenAI strict schema adherence.
+        type: boolean
     type: object
   models.ToolFunction:
     properties:
@@ -540,10 +1270,35 @@ definitions:
       prompt_tokens:
         example: 100
         type: integer
+      prompt_tokens_details:
+        allOf:
+        - $ref: '#/definitions/models.PromptTokensDetails'
+        description: PromptTokensDetails reports cached prompt tokens when known.
       total_tokens:
         example: 150
         type: integer
     type: object
+  time.Duration:
+    enum:
+    - -9223372036854775808
+    - 9223372036854775807
+    - 1
+    - 1000
+    - 1000000
+    - 1000000000
+    - 60000000000
+    - 3600000000000
+    format: int64
+    type: integer
+    x-enum-varnames:
+    - minDuration
+    - maxDuration
+    - Nanosecond
+    - Microsecond
+    - Millisecond
+    - Second
+    - Minute
+    - Hour
 host: localhost:8080
 info:
   contact:
@@ -551,9 +1306,9 @@ info:
     name: AeroLLM Contributors
     url: https://github.com/ayoubzulfiqar/aerollm
   description: AeroLLM is a high-performance, multi-provider LLM gateway that serves
-    as a drop-in replacement for the LiteLLM proxy. It supports 100+ LLM providers
-    with advanced routing, virtual keys, semantic caching, spend analytics, and async
-    observability callbacks.
+    as a drop-in replacement for the LiteLLM proxy. It supports OpenAI- and Anthropic-compatible
+    APIs with streaming, advanced routing and fallback, virtual keys, caching, spend
+    analytics, and async observability callbacks.
   license:
     name: MIT
     url: https://github.com/ayoubzulfiqar/aerollm/blob/main/LICENSE
@@ -565,10 +1320,12 @@ paths:
     post:
       consumes:
       - application/json
-      description: Accepts a partial or full config (JSON), validates it, and hot-reloads
-        the provider registry without dropping active connections.
+      description: Merges a partial JSON config onto the active one (arrays such as
+        providers are replaced), validates it, and hot-reloads the provider registry
+        without dropping connections. Secrets echoed back as "***REDACTED***" keep
+        their current value. Durations are nanoseconds.
       parameters:
-      - description: Updated configuration
+      - description: Partial or full configuration
         in: body
         name: req
         required: true
@@ -587,13 +1344,13 @@ paths:
       - config
   /config/yaml:
     get:
-      description: Returns the current active configuration with all secrets masked.
+      description: Returns the active configuration (as JSON) with every secret redacted.
       responses:
         "200":
           description: OK
           schema:
-            type: string
-      summary: Get config YAML
+            $ref: '#/definitions/config.Config'
+      summary: Get active config
       tags:
       - config
   /global/spend/logs:
@@ -754,6 +1511,19 @@ paths:
       summary: Create team
       tags:
       - teams
+  /team/info:
+    get:
+      description: Get a team's budget, spend and key count.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/keymanager.TeamInfoResponse'
+      summary: Get team info
+      tags:
+      - teams
   /team/update:
     post:
       consumes:
@@ -818,10 +1588,113 @@ paths:
       summary: Transcribe audio
       tags:
       - audio
+  /v1/batches:
+    get:
+      parameters:
+      - description: 'Cursor: last batch ID of the previous page'
+        in: query
+        name: after
+        type: string
+      - description: Page size (1-100, default 20)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses: {}
+      summary: List batches
+      tags:
+      - batches
+    post:
+      consumes:
+      - multipart/form-data
+      description: 'Create a batch job from JSONL input (multipart field "file", or
+        JSON {"input": "<jsonl>", "metadata": {}, "completion_window": "24h"}). Each
+        line is {"custom_id","method":"POST","url":"/v1/chat/completions","body":{...}}.'
+      parameters:
+      - description: JSONL file containing batch requests
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.BatchObject'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create batch
+      tags:
+      - batches
+  /v1/batches/{batch_id}:
+    get:
+      parameters:
+      - description: Batch ID
+        in: path
+        name: batch_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.BatchObject'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get batch status
+      tags:
+      - batches
+  /v1/batches/{batch_id}/cancel:
+    post:
+      parameters:
+      - description: Batch ID
+        in: path
+        name: batch_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.BatchObject'
+      summary: Cancel batch
+      tags:
+      - batches
+  /v1/batches/{batch_id}/results:
+    get:
+      description: Returns the output JSONL (available for completed, cancelled and
+        expired batches).
+      parameters:
+      - description: Batch ID
+        in: path
+        name: batch_id
+        required: true
+        type: string
+      produces:
+      - application/jsonl
+      responses: {}
+      summary: Get batch results
+      tags:
+      - batches
   /v1/cache:
     delete:
-      description: Clears the entire cache. Optionally target a specific type via
-        ?type=semantic or ?type=exact.
+      description: Clears the cache. Target a type via ?type=semantic|exact|all (default
+        all).
       parameters:
       - description: 'Cache type to clear: ''exact'', ''semantic'', or ''all'' (default:
           all)'
@@ -839,10 +1712,9 @@ paths:
       - cache
   /v1/cache/inspect:
     get:
-      description: Returns a paginated list of cached keys/hashes (does not return
-        full payloads for security).
+      description: Returns a paginated list of cached keys (never payloads).
       parameters:
-      - description: 'Cache type: ''exact'' (default), ''semantic'', or ''all'''
+      - description: 'Cache type: ''exact'' (default) or ''semantic'''
         in: query
         name: type
         type: string
@@ -864,8 +1736,8 @@ paths:
       - cache
   /v1/cache/stats:
     get:
-      description: Returns statistics about the exact-match and semantic caches (total
-        entries, hit/miss rates).
+      description: Returns statistics about the exact-match and semantic caches (entries,
+        hit/miss rates).
       produces:
       - application/json
       responses:
@@ -880,7 +1752,8 @@ paths:
     post:
       consumes:
       - application/json
-      description: Send a chat completion request to an LLM provider.
+      description: Send a chat completion request to an LLM provider. Set stream=true
+        for Server-Sent Events.
       parameters:
       - description: Chat completion request
         in: body
@@ -957,24 +1830,31 @@ paths:
     post:
       consumes:
       - application/json
-      description: Anthropic-compatible /v1/messages endpoint (routes to chat completions).
-      parameters:
-      - description: Messages request
-        in: body
-        name: req
-        required: true
-        schema:
-          $ref: '#/definitions/models.LLMRequest'
+      description: Anthropic Messages API compatible endpoint, served through the
+        gateway's routing, caching and accounting. Supports stream=true.
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/models.LLMResponse'
+            $ref: '#/definitions/api.anthropicResponse'
       summary: Anthropic-style messages
       tags:
       - chat
+  /v1/models:
+    get:
+      description: Lists the models the gateway can route to (OpenAI-compatible).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.ModelList'
+      summary: List models
+      tags:
+      - models
   /v1/responses:
     post:
       consumes:

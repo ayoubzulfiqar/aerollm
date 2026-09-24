@@ -1,0 +1,72 @@
+// Command __PLUGIN_NAME__ is an AeroLLM WASM tool: a WASI preview1 program the
+// gateway runs in a sandbox (no filesystem, network, environment variables or
+// real clock) once per tool call.
+//
+// Build:
+//
+//	GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm
+//	# or: aerollm plugin build . -o plugin.wasm
+//
+// Protocol. The gateway writes the call's JSON arguments object to stdin, e.g.
+//
+//	{"text":"hello world"}
+//
+// and the tool must write exactly one JSON value (its result) to stdout. To
+// fail the call, write a message to stderr and exit with a non-zero code.
+//
+// Register the tool with this JSON schema for its arguments:
+//
+//	{"type":"object","properties":{"text":{"type":"string","description":"Text to analyse"}},"required":["text"]}
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"unicode/utf8"
+)
+
+// maxInput bounds how much of stdin is read.
+const maxInput = 16 << 20
+
+func main() {
+	out, err := respond(os.Stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "__PLUGIN_NAME__:", err)
+		os.Exit(1)
+	}
+	os.Stdout.Write(out)
+}
+
+// respond reads the arguments and returns the JSON result line.
+func respond(r io.Reader) ([]byte, error) {
+	args := map[string]any{}
+	if err := json.NewDecoder(io.LimitReader(r, maxInput)).Decode(&args); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("invalid arguments: %v", err)
+	}
+	result, err := call(args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encoding result: %v", err)
+	}
+	return append(out, '\n'), nil
+}
+
+// call implements the tool. Example: count the words and characters of
+// args["text"].
+func call(args map[string]any) (any, error) {
+	text, ok := args["text"].(string)
+	if !ok {
+		return nil, errors.New(`argument "text" (string) is required`)
+	}
+	return map[string]any{
+		"words":      len(strings.Fields(text)),
+		"characters": utf8.RuneCountInString(text),
+	}, nil
+}

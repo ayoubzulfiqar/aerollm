@@ -200,7 +200,7 @@ func TestInvoiceURLAndLoopback(t *testing.T) {
 			t.Errorf("isLoopbackListen(%q)=%v want %v", addr, got, want)
 		}
 	}
-	m := toOpenStandardCapabilityManifest(nil, "127.0.0.1:7910")
+	m := toOpenStandardCapabilityManifest(nil, "127.0.0.1:7910", true)
 	if err := m.Validate(); err != nil {
 		t.Fatalf("generated manifest invalid: %v", err)
 	}

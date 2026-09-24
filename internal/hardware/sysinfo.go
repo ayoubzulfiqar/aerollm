@@ -3,6 +3,7 @@ package hardware
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"io"
 	"math"
 	"os"
@@ -22,8 +23,10 @@ type SystemInfo struct {
 	// TotalMemoryBytes is the usable memory (the smaller of physical memory
 	// and any cgroup limit); 0 when unknown.
 	TotalMemoryBytes uint64 `json:"total_memory_bytes,omitempty"`
-	// MemoryKnown is false on platforms where memory cannot be determined
-	// without cgo or external tools (currently everything except Linux).
+	// MemoryKnown is false when memory could not be determined. Detection
+	// is implemented for Linux (/proc/meminfo plus cgroup limits), macOS
+	// (sysctl hw.memsize) and Windows (GlobalMemoryStatusEx); other platforms
+	// report unknown.
 	MemoryKnown bool `json:"memory_known"`
 }
 
@@ -41,7 +44,7 @@ func (s SystemInfo) MemoryGB() int {
 
 // DetectSystemInfo reports OS, architecture, CPU count and memory.
 func DetectSystemInfo() SystemInfo {
-	return detectSystemInfo(runtime.GOOS, readFileLimited)
+	return detectSystemInfo(runtime.GOOS, readFileLimited, nativeTotalMemory)
 }
 
 // TotalMemoryBytes returns usable memory in bytes and whether it is known.
@@ -50,9 +53,18 @@ func TotalMemoryBytes() (uint64, bool) {
 	return info.TotalMemoryBytes, info.MemoryKnown
 }
 
-func detectSystemInfo(goos string, read func(string) ([]byte, error)) SystemInfo {
+// detectSystemInfo reports host resources. On Linux memory comes from read
+// (/proc and cgroup files); elsewhere from native, the platform-specific
+// system call (nil or (0, false) means unknown).
+func detectSystemInfo(goos string, read func(string) ([]byte, error), native func() (uint64, bool)) SystemInfo {
 	info := SystemInfo{OS: goos, Arch: runtime.GOARCH, NumCPU: runtime.NumCPU()}
 	if goos != "linux" && goos != "android" {
+		if native != nil {
+			if total, ok := native(); ok && total > 0 {
+				info.TotalMemoryBytes = total
+				info.MemoryKnown = true
+			}
+		}
 		return info
 	}
 	data, err := read("/proc/meminfo")
@@ -119,6 +131,20 @@ func parseCgroupLimit(data []byte) (uint64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// decodeLittleEndianUint64 decodes a sysctl integer value returned as a byte
+// string. syscall.Sysctl strips one trailing NUL byte, which for a
+// little-endian integer is its most significant byte, so the value may be
+// shorter than 8 bytes; missing high bytes are zero. Empty or longer-than-8
+// inputs are rejected.
+func decodeLittleEndianUint64(s string) (uint64, bool) {
+	if len(s) == 0 || len(s) > 8 {
+		return 0, false
+	}
+	var b [8]byte
+	copy(b[:], s)
+	return binary.LittleEndian.Uint64(b[:]), true
 }
 
 // readFileLimited reads at most maxProcFileBytes from a fixed system path.

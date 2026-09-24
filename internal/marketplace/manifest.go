@@ -426,6 +426,22 @@ func (t *TrustStore) Check(creatorID string, pub []byte) error {
 	return fmt.Errorf("%w: key is not pinned for creator %q", ErrUntrustedKey, creatorID)
 }
 
+// lookup reports, without pinning anything, whether pub is pinned for
+// creatorID (trusted) and whether the creator has any pinned key (known).
+func (t *TrustStore) lookup(creatorID string, pub []byte) (trusted, known bool) {
+	if t == nil {
+		return false, false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	keys, known := t.keys[creatorID]
+	match := 0
+	for _, k := range keys {
+		match |= subtle.ConstantTimeCompare(k, pub)
+	}
+	return match == 1, known
+}
+
 // ParseTrustedKeys parses "creator:base64key[,creator:base64key...]" (for
 // example from an environment variable) into a strict TrustStore.
 func ParseTrustedKeys(spec string) (*TrustStore, error) {

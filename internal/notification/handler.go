@@ -172,8 +172,12 @@ func handleChannels(store *Store, w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusBadRequest, "missing id")
 			return
 		}
-		if !store.DeleteChannel(id) {
-			writeError(w, http.StatusNotFound, "channel not found")
+		if err := store.RemoveChannel(id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusNotFound, "channel not found")
+				return
+			}
+			writeStoreError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -267,8 +271,12 @@ func handleSubscriptions(store *Store, w http.ResponseWriter, r *http.Request, i
 			writeError(w, http.StatusBadRequest, "missing id")
 			return
 		}
-		if !store.DeleteSubscription(id) {
-			writeError(w, http.StatusNotFound, "subscription not found")
+		if err := store.RemoveSubscription(id); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusNotFound, "subscription not found")
+				return
+			}
+			writeStoreError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -288,6 +296,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrStoreFull):
 		writeError(w, http.StatusInsufficientStorage, err.Error())
+	case errors.Is(err, ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "persistence failure")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

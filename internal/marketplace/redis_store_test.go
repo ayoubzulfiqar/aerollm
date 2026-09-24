@@ -10,12 +10,9 @@ import (
 )
 
 func TestRedisStoreLifecycle(t *testing.T) {
-	client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	client := testRedisClient(t)
 	ctx := context.Background()
-	if err := client.Ping(ctx).Err(); err != nil {
-		t.Skip("redis not available")
-	}
-	store := NewRedisStore(RedisOptions{Client: client, Prefix: "aerollm:test:" + time.Now().Format("150405.000000")})
+	store := NewRedisStore(RedisOptions{Client: client, Prefix: testRedisPrefix(t, client)})
 	manifest := VerifiedManifest{ID: "p1", Name: "Redis Plugin", Version: "1.0.0", CreatorID: "creator", PublicKey: []byte("pk"), Signature: []byte("sig"), Payload: []byte("payload")}
 	meta := Metadata{ID: "p1", Name: "Redis Plugin", Version: "1.0.0", CreatorID: "creator"}
 	if err := store.Put(ctx, manifest, meta); err != nil {

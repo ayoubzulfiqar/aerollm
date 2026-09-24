@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/config"
+	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 )
@@ -252,5 +253,97 @@ func TestBatchLifecycleAndOwnerIsolation(t *testing.T) {
 	}
 	if w := do(a, "GET", "/v1/batches", "other-key-abcdefghijklmnopq", ""); !strings.Contains(w.Body.String(), `"data":[]`) {
 		t.Fatalf("list must be owner-scoped: %s", w.Body.String())
+	}
+}
+
+func TestBudgetsEndpointAndDefaultBudget(t *testing.T) {
+	a, _ := newTestApp(t, func(c *config.Config) { c.Finops.DefaultMaxUSD = 5 })
+	a.router.RegisterProvider(echoProvider{})
+	client := "client-key-abcdefghijklmnop"
+	if w := do(a, "POST", "/v1/chat/completions", client, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`); w.Code != 200 {
+		t.Fatalf("chat: %d", w.Code)
+	}
+	w := do(a, "GET", "/v1/budgets?key="+client, testAdminKey, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"limit_usd":5`) {
+		t.Fatalf("default budget not applied: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "PUT", "/v1/budgets", testAdminKey, `{"key":"`+client+`","max_usd":0}`); w.Code != 200 {
+		t.Fatalf("set budget: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "POST", "/v1/chat/completions", client, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi again"}]}`); w.Code != http.StatusPaymentRequired {
+		t.Fatalf("zero budget must block: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "GET", "/v1/budgets?key="+client, client, ""); w.Code != 403 {
+		t.Fatalf("budgets are admin-only: %d", w.Code)
+	}
+}
+
+func TestStateSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	start := func() *app {
+		t.Setenv("AEROLLM_STATE_DIR", dir)
+		cfg, err := config.LoadConfig(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Auth.MasterKey = testAdminKey
+		a, err := newApp(context.Background(), cfg, newLogger(io.Discard, "error", "json"), appOptions{skipRedis: true, notice: io.Discard})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.router.RegisterProvider(echoProvider{})
+		return a
+	}
+
+	a := start()
+	w := do(a, "POST", "/key/generate", testAdminKey, `{"models":["gpt-4o"]}`)
+	var gen struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &gen); err != nil || gen.Key == "" {
+		t.Fatalf("generate: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "PUT", "/v1/budgets", testAdminKey, `{"key":"`+gen.Key+`","max_usd":7}`); w.Code != 200 {
+		t.Fatalf("budget: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "POST", "/v1/flags", testAdminKey, `{"key":"beta","enabled":true,"strategy":"global"}`); w.Code >= 300 {
+		t.Fatalf("flag: %d %s", w.Code, w.Body.String())
+	}
+	a.close(5 * time.Second)
+
+	b := start()
+	defer b.close(5 * time.Second)
+	if w := do(b, "POST", "/v1/chat/completions", gen.Key, `{"model":"gpt-4o","messages":[{"role":"user","content":"after restart"}]}`); w.Code != 200 {
+		t.Fatalf("virtual key must survive a restart: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(b, "GET", "/v1/budgets?key="+gen.Key, testAdminKey, ""); !strings.Contains(w.Body.String(), `"limit_usd":7`) {
+		t.Fatalf("budget must survive a restart: %s", w.Body.String())
+	}
+	if w := do(b, "GET", "/v1/flags?key=beta", testAdminKey, ""); !strings.Contains(w.Body.String(), "beta") {
+		t.Fatalf("flags must survive a restart: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOpenStandardReceipts(t *testing.T) {
+	a, _ := newTestApp(t, nil)
+	client := "client-key-abcdefghijklmnop"
+	receipt := `{"receipt_id":"r-1","provider_id":"prov","event_name":"tokens","value":10,"currency":"USD","recorded_at":"2026-01-01T00:00:00Z"}`
+	if w := do(a, "POST", "/v1/marketplace/openstandard/receipt", "", receipt); w.Code != 401 {
+		t.Fatalf("receipts need a key: %d", w.Code)
+	}
+	w := do(a, "POST", "/v1/marketplace/openstandard/receipt", client, receipt)
+	if w.Code != 201 || !strings.Contains(w.Body.String(), middleware.KeyID(client)) {
+		t.Fatalf("record: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(a, "POST", "/v1/marketplace/openstandard/receipt", client, receipt); w.Code >= 300 {
+		t.Fatalf("idempotent replay: %d %s", w.Code, w.Body.String())
+	}
+	conflict := strings.Replace(receipt, `"value":10`, `"value":99`, 1)
+	if w := do(a, "POST", "/v1/marketplace/openstandard/receipt", client, conflict); w.Code != 409 {
+		t.Fatalf("conflicting reuse: %d %s", w.Code, w.Body.String())
+	}
+	spoof := strings.Replace(receipt, `"receipt_id":"r-1"`, `"receipt_id":"r-2","customer_id":"someone-else"`, 1)
+	if w := do(a, "POST", "/v1/marketplace/openstandard/receipt", client, spoof); w.Code != 403 {
+		t.Fatalf("recording for another customer must be forbidden: %d %s", w.Code, w.Body.String())
 	}
 }

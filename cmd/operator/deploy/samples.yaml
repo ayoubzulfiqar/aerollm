@@ -1,0 +1,62 @@
+# Sample AeroLLM custom resources.
+#
+#   kubectl apply -f cmd/operator/deploy/samples.yaml
+#   kubectl get aerollm -A        # Ready/Reason columns show the outcome
+---
+# The gateway has one global router config, so only one AeroRoute can own
+# it; others report Ready=False reason=Conflict. strategy and
+# breaker_config are applied via POST /config/update; models, providers,
+# fallback and weights are validated but not expressible there.
+apiVersion: aerollm.io/v1alpha1
+kind: AeroRoute
+metadata:
+  name: default-routing
+  namespace: aerollm-system
+spec:
+  strategy: cost
+  breaker_config:
+    max_failures: 5
+    reset_timeout: 30s
+    half_open_max_calls: 1
+---
+# A gateway-wide default budget (no api key): finops.default_max_usd.
+apiVersion: aerollm.io/v1alpha1
+kind: AeroBudget
+metadata:
+  name: gateway-default
+  namespace: aerollm-system
+spec:
+  max_usd: 500
+---
+# A per-key budget. The key is read from a Secret and only its non-secret
+# ID (key_<16 hex>) is sent to the gateway (PUT /v1/budgets).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: team-a-llm-key
+  namespace: aerollm-system
+type: Opaque
+stringData:
+  api-key: sk-replace-me
+---
+apiVersion: aerollm.io/v1alpha1
+kind: AeroBudget
+metadata:
+  name: team-a
+  namespace: aerollm-system
+spec:
+  api_key_secret_ref: team-a-llm-key/api-key
+  monthly_cap: 100
+---
+# Pipelines are validated (DAG, node names) and reported; the gateway has
+# no admin API for them yet, so Ready=False reason=Unsupported.
+apiVersion: aerollm.io/v1alpha1
+kind: AeroAgentPipeline
+metadata:
+  name: research
+  namespace: aerollm-system
+spec:
+  version: "1"
+  nodes: [retrieve, summarize, review]
+  edges: ["retrieve->summarize", "summarize->review"]
+  tools: [web_search]

@@ -109,10 +109,12 @@ func metaEqual(a, b map[string]string) bool {
 
 // SecureTransport handles communication with peers.
 //
-// NOTE: the only implementation in this package (NewInMemoryTransport /
-// InMemoryNetwork) is in-process and unencrypted; "Secure" describes the
-// contract a production transport must satisfy (authenticated peers, From set
-// by the transport rather than the sender, encrypted links).
+// Implementations must authenticate peers and set Envelope.From on inbound
+// envelopes from the authenticated peer identity, never from the sender's
+// claim. TLSTransport (NewTLSTransport) is the network implementation:
+// mutual TLS 1.3 over TCP with peer ids bound to certificates. The in-memory
+// transport (NewInMemoryTransport / InMemoryNetwork) is in-process and
+// unencrypted, for tests and single-process deployments.
 type SecureTransport interface {
 	Dial(ctx context.Context, peer PeerDescriptor) (PeerConn, error)
 	Listen(ctx context.Context, address string) (PeerListener, error)
@@ -220,8 +222,21 @@ func (r *statsRecorder) last() error {
 	return r.lastErr
 }
 
+// remotePeerConn is implemented by connections that know the authenticated
+// id of the remote peer.
+type remotePeerConn interface {
+	RemotePeer() PeerID
+}
+
 // sendTo dials peer, sends env and closes the connection, bounded by timeout.
 func sendTo(ctx context.Context, transport SecureTransport, peer PeerDescriptor, env Envelope, timeout time.Duration) error {
+	_, err := sendToPeer(ctx, transport, peer, env, timeout)
+	return err
+}
+
+// sendToPeer is sendTo that also reports the authenticated id of the peer
+// that received env, when the connection exposes it ("" otherwise).
+func sendToPeer(ctx context.Context, transport SecureTransport, peer PeerDescriptor, env Envelope, timeout time.Duration) (PeerID, error) {
 	if timeout <= 0 {
 		timeout = DefaultDialTimeout
 	}
@@ -229,13 +244,17 @@ func sendTo(ctx context.Context, transport SecureTransport, peer PeerDescriptor,
 	defer cancel()
 	conn, err := transport.Dial(dctx, peer)
 	if err != nil {
-		return fmt.Errorf("mesh: dial %q: %w", peer.ID, err)
+		return "", fmt.Errorf("mesh: dial %q: %w", peer.ID, err)
 	}
 	defer conn.Close()
 	if err := conn.Send(dctx, env); err != nil {
-		return fmt.Errorf("mesh: send to %q: %w", peer.ID, err)
+		return "", fmt.Errorf("mesh: send to %q: %w", peer.ID, err)
 	}
-	return nil
+	var remote PeerID
+	if rp, ok := conn.(remotePeerConn); ok {
+		remote = rp.RemotePeer()
+	}
+	return remote, nil
 }
 
 // GossipWorker periodically pushes the local state snapshot to a static peer

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -127,4 +129,32 @@ func decodeBody(t *testing.T, body string) map[string]any {
 func (g *fakeGateway) run(t *testing.T, stdin string, args ...string) (string, string, error) {
 	t.Helper()
 	return runCLI(t, stdin, append([]string{"--server", g.URL, "--api-key", "sk-test-master-key"}, args...)...)
+}
+
+// assertPerm checks the Unix permission bits of path. Windows has no Unix
+// permission bits (os.Stat reports 0666/0444), so only existence is checked
+// there.
+func assertPerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %v, want %v", path, got, want)
+	}
+}
+
+// trySymlink creates a symlink, reporting false when the platform or
+// account cannot (e.g. Windows without developer mode).
+func trySymlink(t *testing.T, target, link string) bool {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Logf("symlinks unsupported here, skipping symlink checks: %v", err)
+		return false
+	}
+	return true
 }

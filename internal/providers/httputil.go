@@ -112,6 +112,12 @@ func (l *ModelList) Match(model string) (matched, ok bool) {
 
 // HealthTracker records call outcomes to derive a provider's health. The
 // zero value is ready to use.
+//
+// Passive signals come from real calls (Observe); active signals from
+// optional health probes (ObserveProbe). A provider is healthy until proven
+// otherwise: it turns unhealthy after unhealthyAfter consecutive retryable
+// failures, or when the most recent probe failed and no successful call has
+// happened since.
 type HealthTracker struct {
 	mu                  sync.Mutex
 	consecutiveFailures int64
@@ -119,6 +125,10 @@ type HealthTracker struct {
 	latencyEWMA         float64
 	samples             int64
 	lastChecked         time.Time
+
+	lastProbe    time.Time
+	probeFailing bool
+	probeErr     string
 }
 
 // unhealthyAfter is the number of consecutive failures after which a
@@ -140,6 +150,12 @@ func (h *HealthTracker) Observe(latency time.Duration, err error) {
 		return
 	}
 	h.consecutiveFailures = 0
+	if err == nil {
+		// Only a real success disproves a failed probe: a non-retryable
+		// error (e.g. 401 with a revoked key) must not mask it.
+		h.probeFailing = false
+		h.probeErr = ""
+	}
 	if err == nil && latency > 0 {
 		ms := float64(latency) / float64(time.Millisecond)
 		if h.samples == 0 {
@@ -151,21 +167,50 @@ func (h *HealthTracker) Observe(latency time.Duration, err error) {
 	}
 }
 
+// ObserveProbe records the outcome of an active health probe (see
+// ProbeEndpoint). A failed probe marks the provider unhealthy until a later
+// probe or real call succeeds; a successful probe clears passive failures.
+// Probe latency is not mixed into the call-latency average. Caller
+// cancellations are ignored.
+func (h *HealthTracker) ObserveProbe(latency time.Duration, err error) {
+	_ = latency
+	if err != nil && errors.Is(err, context.Canceled) {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastProbe = time.Now()
+	h.lastChecked = h.lastProbe
+	if err != nil {
+		h.probeFailing = true
+		h.probeErr = truncate(err.Error(), 300)
+		return
+	}
+	h.probeFailing = false
+	h.probeErr = ""
+	h.consecutiveFailures = 0
+}
+
 // Snapshot returns the current health.
 func (h *HealthTracker) Snapshot(name string, typ ProviderType) ProviderHealth {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	var last int64
+	var last, lastProbe int64
 	if !h.lastChecked.IsZero() {
 		last = h.lastChecked.Unix()
+	}
+	if !h.lastProbe.IsZero() {
+		lastProbe = h.lastProbe.Unix()
 	}
 	return ProviderHealth{
 		Name:        name,
 		Type:        typ,
-		Healthy:     h.consecutiveFailures < unhealthyAfter,
+		Healthy:     h.consecutiveFailures < unhealthyAfter && !h.probeFailing,
 		LatencyMs:   h.latencyEWMA,
 		Failures:    h.totalFailures,
 		LastChecked: last,
+		LastProbe:   lastProbe,
+		ProbeError:  h.probeErr,
 	}
 }
 
@@ -422,6 +467,103 @@ func runSSE(ctx context.Context, provider string, conn *streamConn, decode strea
 		}
 	}()
 	return out
+}
+
+// StreamPump reads the rest of an established upstream stream and emits
+// chunks. emit returns false once the consumer is gone (ctx cancelled); the
+// pump must then return promptly (any error is ignored in that case). A nil
+// return means the stream completed successfully. Errors that are not
+// *UpstreamError or *TransportError are reported as transport failures.
+type StreamPump func(emit func(models.StreamChunk) bool) error
+
+// StreamStarter inspects a freshly opened 2xx stream before StartStream
+// returns. It may consume the beginning of body (e.g. to surface an error
+// sent as the first event, so callers can still fall back to another
+// provider) and returns the pump that serves the rest of the stream. A
+// non-nil error aborts the stream and is returned directly by StartStream.
+type StreamStarter func(header http.Header, body io.Reader) (StreamPump, error)
+
+// StartStream sends req, waits for the response headers (bounded by
+// client.Timeout; non-2xx responses become *UpstreamError), runs start and
+// then pumps the stream in a goroutine into a channel that follows the
+// StreamingProvider contract: ctx cancellation stops reading and closes the
+// channel, a failure is sent as a final chunk with Err set, and the body is
+// abandoned after StreamIdleTimeout without data. observe, if non-nil, is
+// called once with the time to first byte and the stream's final error.
+// It is the transport for streams that are not Server-Sent Events (e.g. AWS
+// event-stream framing).
+func StartStream(ctx context.Context, client *http.Client, provider string, req *http.Request, observe func(time.Duration, error), start StreamStarter) (<-chan models.StreamChunk, error) {
+	if start == nil {
+		return nil, errors.New("providers: nil stream starter")
+	}
+	began := time.Now()
+	conn, err := openStream(ctx, client, provider, req)
+	if err != nil {
+		if observe != nil {
+			observe(time.Since(began), err)
+		}
+		return nil, err
+	}
+	ttfb := time.Since(began)
+	classify := func(err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if conn.timedOut.Load() {
+			return &UpstreamError{Provider: provider, StatusCode: http.StatusGatewayTimeout, Message: "upstream stream idle timeout"}
+		}
+		var ue *UpstreamError
+		var te *TransportError
+		if errors.As(err, &ue) || errors.As(err, &te) {
+			return err
+		}
+		return &TransportError{Provider: provider, Err: err}
+	}
+	pump, err := start(conn.resp.Header, conn.body)
+	if err == nil && pump == nil {
+		err = BadResponseError(provider, errors.New("stream starter returned no pump"))
+	}
+	if err != nil {
+		err = classify(err)
+		conn.close()
+		if observe != nil {
+			observe(ttfb, err)
+		}
+		return nil, err
+	}
+	out := make(chan models.StreamChunk)
+	go func() {
+		var final error
+		defer func() {
+			conn.close()
+			if observe != nil {
+				observe(ttfb, final)
+			}
+			close(out)
+		}()
+		emit := func(c models.StreamChunk) bool {
+			select {
+			case out <- c:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		err := pump(emit)
+		if ctx.Err() != nil {
+			final = ctx.Err()
+			return
+		}
+		if err == nil {
+			return
+		}
+		final = classify(err)
+		select {
+		case out <- models.StreamChunk{Object: "chat.completion.chunk", Choices: []models.StreamChoice{}, Err: final}:
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
 }
 
 // chunksFromJSONBody serves a stream request answered with a complete JSON

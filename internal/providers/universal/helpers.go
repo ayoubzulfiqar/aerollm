@@ -115,6 +115,12 @@ func healthMap(name, typ string, h *providers.HealthTracker, configErr error) ma
 	if configErr != nil {
 		m["error"] = configErr.Error()
 	}
+	if s.LastProbe != 0 {
+		m["last_probe"] = s.LastProbe
+	}
+	if s.ProbeError != "" {
+		m["probe_error"] = s.ProbeError
+	}
 	return m
 }
 

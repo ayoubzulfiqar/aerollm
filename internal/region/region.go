@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // Region defines a deployment region.
@@ -85,16 +87,21 @@ var (
 	// ErrNoCompliantRoute is returned by Resolve when residency is required
 	// but no allowed region has an enabled route rule.
 	ErrNoCompliantRoute = errors.New("no residency-compliant route available")
+	// ErrPersistence is returned (wrapped) when the durable store rejects a
+	// read or write. The in-memory state is left unchanged.
+	ErrPersistence = errors.New("region: persistence failed")
 
 	idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 )
 
-// Store manages regions, residency policies, and route rules.
+// Store manages regions, residency policies, and route rules. It is
+// in-memory by default; EnablePersistence adds write-through durability.
 type Store struct {
 	mu       sync.RWMutex
 	regions  map[string]Region
 	policies map[string]ResidencyPolicy
 	rules    map[string]RouteRule
+	ps       persist.Store // nil unless persistence is enabled
 }
 
 // NewStore creates a region store.
@@ -157,15 +164,22 @@ func (s *Store) UpsertRegion(region Region) (Region, error) {
 	if _, exists := s.regions[region.ID]; !exists && len(s.regions) >= MaxRegions {
 		return Region{}, ErrStoreFull
 	}
+	// The upserted region is written first, then any demoted primary.
+	changed := []Region{region}
 	if region.Primary {
 		for id, other := range s.regions {
 			if id != region.ID && other.Primary {
 				other.Primary = false
-				s.regions[id] = other
+				changed = append(changed, other)
 			}
 		}
 	}
-	s.regions[region.ID] = region
+	if err := s.persistRegionsLocked(changed); err != nil {
+		return Region{}, err
+	}
+	for _, r := range changed {
+		s.regions[r.ID] = r
+	}
 	return region, nil
 }
 
@@ -208,6 +222,9 @@ func (s *Store) DeleteRegion(id string) error {
 			return ErrInUse
 		}
 	}
+	if err := s.deleteLocked(BucketRegions, id); err != nil {
+		return err
+	}
 	delete(s.regions, id)
 	return nil
 }
@@ -220,21 +237,32 @@ func (s *Store) UpsertPolicy(policy ResidencyPolicy) (ResidencyPolicy, error) {
 	if policy.ID == "" {
 		policy.ID = s.freshIDLocked("rp")
 	}
-	if err := checkID(policy.ID); err != nil {
+	if err := validatePolicy(&policy, s.regions); err != nil {
 		return ResidencyPolicy{}, err
-	}
-	policy.DataType = strings.ToLower(strings.TrimSpace(policy.DataType))
-	if policy.DataType == "" || len(policy.DataType) > maxDataTypeLength {
-		return ResidencyPolicy{}, invalid("data_type is required (max %d bytes)", maxDataTypeLength)
-	}
-	if _, ok := s.regions[policy.Region]; !ok {
-		return ResidencyPolicy{}, invalid("unknown region %q", policy.Region)
 	}
 	if _, exists := s.policies[policy.ID]; !exists && len(s.policies) >= MaxPolicies {
 		return ResidencyPolicy{}, ErrStoreFull
 	}
+	if err := s.putLocked(BucketPolicies, policy.ID, policy); err != nil {
+		return ResidencyPolicy{}, err
+	}
 	s.policies[policy.ID] = policy
 	return policy, nil
+}
+
+// validatePolicy normalizes and validates p against the known regions.
+func validatePolicy(p *ResidencyPolicy, regions map[string]Region) error {
+	if err := checkID(p.ID); err != nil {
+		return err
+	}
+	p.DataType = strings.ToLower(strings.TrimSpace(p.DataType))
+	if p.DataType == "" || len(p.DataType) > maxDataTypeLength {
+		return invalid("data_type is required (max %d bytes)", maxDataTypeLength)
+	}
+	if _, ok := regions[p.Region]; !ok {
+		return invalid("unknown region %q", p.Region)
+	}
+	return nil
 }
 
 // GetPolicy retrieves a residency policy by id.
@@ -264,6 +292,9 @@ func (s *Store) DeletePolicy(id string) error {
 	if _, ok := s.policies[id]; !ok {
 		return ErrNotFound
 	}
+	if err := s.deleteLocked(BucketPolicies, id); err != nil {
+		return err
+	}
 	delete(s.policies, id)
 	return nil
 }
@@ -276,25 +307,36 @@ func (s *Store) UpsertRule(rule RouteRule) (RouteRule, error) {
 	if rule.ID == "" {
 		rule.ID = s.freshIDLocked("rr")
 	}
-	if err := checkID(rule.ID); err != nil {
+	if err := validateRule(&rule, s.regions); err != nil {
 		return RouteRule{}, err
 	}
-	if _, ok := s.regions[rule.Region]; !ok {
-		return RouteRule{}, invalid("unknown region %q", rule.Region)
-	}
-	if rule.Priority < 0 {
-		return RouteRule{}, invalid("priority must be >= 0")
-	}
-	providers, err := cleanProviders(rule.Providers)
-	if err != nil {
-		return RouteRule{}, err
-	}
-	rule.Providers = providers
 	if _, exists := s.rules[rule.ID]; !exists && len(s.rules) >= MaxRules {
 		return RouteRule{}, ErrStoreFull
 	}
+	if err := s.putLocked(BucketRules, rule.ID, rule); err != nil {
+		return RouteRule{}, err
+	}
 	s.rules[rule.ID] = rule
 	return cloneRule(rule), nil
+}
+
+// validateRule normalizes and validates r against the known regions.
+func validateRule(r *RouteRule, regions map[string]Region) error {
+	if err := checkID(r.ID); err != nil {
+		return err
+	}
+	if _, ok := regions[r.Region]; !ok {
+		return invalid("unknown region %q", r.Region)
+	}
+	if r.Priority < 0 {
+		return invalid("priority must be >= 0")
+	}
+	providers, err := cleanProviders(r.Providers)
+	if err != nil {
+		return err
+	}
+	r.Providers = providers
+	return nil
 }
 
 func cleanProviders(in []string) ([]string, error) {
@@ -366,6 +408,9 @@ func (s *Store) DeleteRule(id string) error {
 	defer s.mu.Unlock()
 	if _, ok := s.rules[id]; !ok {
 		return ErrNotFound
+	}
+	if err := s.deleteLocked(BucketRules, id); err != nil {
+		return err
 	}
 	delete(s.rules, id)
 	return nil
@@ -742,6 +787,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusInsufficientStorage, err.Error())
 	case errors.Is(err, ErrNoRegions), errors.Is(err, ErrNoCompliantRoute):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "persistence failure")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

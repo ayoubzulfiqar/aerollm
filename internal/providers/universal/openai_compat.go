@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -35,6 +36,13 @@ type OpenAICompatibleAdapter struct {
 
 	mu                 sync.RWMutex
 	includeStreamUsage bool
+
+	// Azure OpenAI (see NewAzureAdapter). apiVersion is sent as
+	// ?api-version=; in deployment mode base is the resource root and
+	// requests go to /openai/deployments/{deployment}/...
+	azureDeployments bool
+	azureDeployment  string // fixed deployment taken from the base URL
+	apiVersion       string
 
 	health providers.HealthTracker
 }
@@ -98,11 +106,16 @@ func NewOpenAICompatibleAdapter(name, providerType, apiKey, baseURL string) *Ope
 	switch providerType {
 	case "azure":
 		a.authHeader, a.authPrefix = "api-key", ""
-	case "google", "gemini", "cohere":
-		// Their compatibility layers do not document stream_options; usage
-		// is still read from any chunk that carries it.
+	case "cohere":
+		// Cohere's Compatibility API does not document stream_options, so
+		// it is not sent (usage is still read from any chunk carrying it and
+		// the gateway estimates it otherwise). Enable with
+		// SetIncludeStreamUsage(true); an upstream that rejects the field
+		// is retried without it.
 		a.includeStreamUsage = false
 	}
+	// Gemini's OpenAI compatibility layer documents
+	// stream_options.include_usage, so it keeps the default (true).
 	return a
 }
 
@@ -134,7 +147,10 @@ func (a *OpenAICompatibleAdapter) SetHTTPClient(c *http.Client) {
 }
 
 // SetIncludeStreamUsage controls whether streams request a final usage
-// chunk via stream_options.include_usage.
+// chunk via stream_options.include_usage. When false, stream_options is not
+// sent at all (not even when the client set it): the gateway synthesizes the
+// usage chunk for clients that asked for one. It defaults to true except for
+// Cohere, whose compatibility API does not document the field.
 func (a *OpenAICompatibleAdapter) SetIncludeStreamUsage(v bool) {
 	a.mu.Lock()
 	a.includeStreamUsage = v
@@ -147,11 +163,82 @@ func (a *OpenAICompatibleAdapter) streamUsage() bool {
 	return a.includeStreamUsage
 }
 
+// IncludeStreamUsage reports whether streams request usage via
+// stream_options.include_usage.
+func (a *OpenAICompatibleAdapter) IncludeStreamUsage() bool { return a.streamUsage() }
+
+// endpoint returns the URL for an operation that is not bound to a model
+// deployment (e.g. /models, /responses).
 func (a *OpenAICompatibleAdapter) endpoint(path string) (string, error) {
 	if a.baseErr != nil {
 		return "", configError(a.name, a.baseErr)
 	}
-	return providers.JoinURL(a.base, path), nil
+	if a.azureDeployments {
+		u := *a.base
+		u.Path = strings.TrimRight(u.Path, "/") + "/openai/" + strings.TrimLeft(path, "/")
+		u.RawPath = ""
+		return withAPIVersion(&u, a.apiVersion), nil
+	}
+	ep := providers.JoinURL(a.base, path)
+	if a.apiVersion == "" {
+		return ep, nil
+	}
+	u, err := url.Parse(ep)
+	if err != nil {
+		return "", configError(a.name, err)
+	}
+	return withAPIVersion(u, a.apiVersion), nil
+}
+
+// modelEndpoint returns the URL for a model operation (chat, embeddings,
+// images, audio). For Azure deployment URLs the deployment is model (the
+// upstream model name after alias resolution) unless the base URL fixes one.
+func (a *OpenAICompatibleAdapter) modelEndpoint(path, model string) (string, error) {
+	if a.baseErr != nil {
+		return "", configError(a.name, a.baseErr)
+	}
+	if !a.azureDeployments {
+		return a.endpoint(path)
+	}
+	dep := a.azureDeployment
+	if dep == "" {
+		dep = strings.TrimSpace(model)
+	}
+	if err := validAzureDeployment(dep); err != nil {
+		return "", &providers.UpstreamError{Provider: a.name, StatusCode: http.StatusBadRequest, Type: "invalid_request_error", Message: err.Error()}
+	}
+	u := *a.base
+	u.Path = strings.TrimRight(u.Path, "/") + "/openai/deployments/" + dep + "/" + strings.TrimLeft(path, "/")
+	u.RawPath = ""
+	return withAPIVersion(&u, a.apiVersion), nil
+}
+
+// withAPIVersion sets ?api-version= on u when version is non-empty.
+func withAPIVersion(u *url.URL, version string) string {
+	if version != "" {
+		q := u.Query()
+		q.Set("api-version", version)
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// validAzureDeployment checks an Azure OpenAI deployment name before it is
+// placed in the URL path (Azure allows letters, digits, '-', '_' and '.').
+func validAzureDeployment(dep string) error {
+	if dep == "" {
+		return fmt.Errorf("model (the Azure OpenAI deployment name) is required")
+	}
+	if len(dep) > 256 || dep == "." || dep == ".." {
+		return fmt.Errorf("invalid Azure OpenAI deployment name %q", truncateStr(dep, 64))
+	}
+	for i := 0; i < len(dep); i++ {
+		c := dep[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return fmt.Errorf("invalid Azure OpenAI deployment name %q: only letters, digits, '-', '_' and '.' are allowed", truncateStr(dep, 64))
+		}
+	}
+	return nil
 }
 
 func (a *OpenAICompatibleAdapter) headers() http.Header {
@@ -169,7 +256,7 @@ func (a *OpenAICompatibleAdapter) ChatCompletions(ctx context.Context, req *mode
 	if req == nil {
 		return nil, errNilRequest
 	}
-	endpoint, err := a.endpoint("/chat/completions")
+	endpoint, err := a.modelEndpoint("/chat/completions", req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -178,17 +265,42 @@ func (a *OpenAICompatibleAdapter) ChatCompletions(ctx context.Context, req *mode
 	})
 }
 
-// StreamChatCompletions implements providers.StreamingProvider.
+// StreamChatCompletions implements providers.StreamingProvider. Usage is
+// requested with stream_options.include_usage unless disabled (see
+// SetIncludeStreamUsage); if the upstream rejects stream_options with a
+// 400/422, the stream is retried once without it and the option is turned
+// off for this adapter.
 func (a *OpenAICompatibleAdapter) StreamChatCompletions(ctx context.Context, req *models.LLMRequest) (<-chan models.StreamChunk, error) {
 	if req == nil {
 		return nil, errNilRequest
 	}
-	endpoint, err := a.endpoint("/chat/completions")
+	endpoint, err := a.modelEndpoint("/chat/completions", req.Model)
 	if err != nil {
 		return nil, err
 	}
-	body := providers.NewOpenAIChatRequest(req, "", true, a.streamUsage())
-	return providers.OpenAIChatStream(ctx, a.http, a.name, endpoint, a.headers(), body, a.health.Observe)
+	usage := a.streamUsage()
+	body := providers.NewOpenAIChatRequest(req, "", true, usage)
+	if !usage {
+		body.StreamOptions = nil
+	}
+	ch, err := providers.OpenAIChatStream(ctx, a.http, a.name, endpoint, a.headers(), body, a.health.Observe)
+	if err != nil && body.StreamOptions != nil && rejectsStreamOptions(err) && ctx.Err() == nil {
+		a.SetIncludeStreamUsage(false)
+		body.StreamOptions = nil
+		return providers.OpenAIChatStream(ctx, a.http, a.name, endpoint, a.headers(), body, a.health.Observe)
+	}
+	return ch, err
+}
+
+// rejectsStreamOptions reports whether err is an upstream validation error
+// about the stream_options field.
+func rejectsStreamOptions(err error) bool {
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) || (ue.StatusCode != http.StatusBadRequest && ue.StatusCode != http.StatusUnprocessableEntity) {
+		return false
+	}
+	msg := strings.ToLower(ue.Message)
+	return strings.Contains(msg, "stream_options") || strings.Contains(msg, "include_usage")
 }
 
 // Stream sends a streaming chat completion request (legacy chunk format).
@@ -206,7 +318,7 @@ func (a *OpenAICompatibleAdapter) Embeddings(ctx context.Context, req *models.Em
 	if req == nil {
 		return nil, errNilRequest
 	}
-	endpoint, err := a.endpoint("/embeddings")
+	endpoint, err := a.modelEndpoint("/embeddings", req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +336,7 @@ func (a *OpenAICompatibleAdapter) ImageGenerations(ctx context.Context, req *mod
 	if req == nil {
 		return nil, errNilRequest
 	}
-	endpoint, err := a.endpoint("/images/generations")
+	endpoint, err := a.modelEndpoint("/images/generations", req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +415,7 @@ func (a *OpenAICompatibleAdapter) AudioTranscriptions(ctx context.Context, req *
 	if req == nil {
 		return nil, errNilRequest
 	}
-	endpoint, err := a.endpoint("/audio/transcriptions")
+	endpoint, err := a.modelEndpoint("/audio/transcriptions", req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +510,21 @@ func (a *OpenAICompatibleAdapter) Responses(ctx context.Context, req *models.Res
 			return nil, err
 		}
 		return &out, nil
+	})
+}
+
+// Probe implements providers.Prober: an authenticated GET of the model list
+// ({base}/models; /openai/models?api-version= for Azure deployment URLs),
+// bounded by providers.DefaultProbeTimeout. Its outcome is reflected in
+// Health until a later probe or successful call. It is opt-in: nothing
+// probes unless the caller runs Probe (e.g. ProviderRegistry.ProbeAll).
+func (a *OpenAICompatibleAdapter) Probe(ctx context.Context) error {
+	return providers.RunProbe(&a.health, func() error {
+		endpoint, err := a.endpoint("/models")
+		if err != nil {
+			return err
+		}
+		return providers.ProbeEndpoint(ctx, a.http, a.name, endpoint, a.headers())
 	})
 }
 

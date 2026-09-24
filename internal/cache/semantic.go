@@ -305,6 +305,9 @@ type SemanticStats struct {
 	Evictions     int64   `json:"evictions"`
 	HitRate       float64 `json:"hit_rate"`
 	Enabled       bool    `json:"enabled"`
+	// EmbedErrors counts failed embedding calls (served as misses when
+	// they wrap ErrEmbeddingUnavailable).
+	EmbedErrors int64 `json:"embed_errors"`
 }
 
 type vsNode struct {
@@ -335,9 +338,10 @@ type VectorSemanticCache struct {
 	index map[string]map[string]*list.Element // namespace -> key -> element
 	bytes int64
 
-	hits      atomic.Int64
-	misses    atomic.Int64
-	evictions atomic.Int64
+	hits        atomic.Int64
+	misses      atomic.Int64
+	evictions   atomic.Int64
+	embedErrors atomic.Int64
 
 	now func() time.Time
 }
@@ -455,10 +459,12 @@ func (s *VectorSemanticCache) embed(ctx context.Context, text string) ([]float64
 	}
 	resp, err := embedder.Embedding(ctx, &models.EmbeddingRequest{Model: model, Input: text})
 	if err != nil {
+		s.embedErrors.Add(1)
 		return nil, err
 	}
 	if resp == nil || len(resp.Data) == 0 || len(resp.Data[0].Embedding) == 0 {
-		return nil, errors.New("cache: embedder returned no vector")
+		s.embedErrors.Add(1)
+		return nil, fmt.Errorf("%w: embedder returned no vector", ErrEmbeddingUnavailable)
 	}
 	return resp.Data[0].Embedding, nil
 }
@@ -479,6 +485,9 @@ func (s *VectorSemanticCache) SearchNS(ctx context.Context, ns, query string) (*
 	queryVec, err := s.embed(ctx, query)
 	if err != nil {
 		s.misses.Add(1)
+		if errors.Is(err, ErrEmbeddingUnavailable) {
+			return nil, nil // degrade to a miss
+		}
 		return nil, err
 	}
 	if queryVec == nil {
@@ -562,6 +571,9 @@ func (s *VectorSemanticCache) UpsertNS(ctx context.Context, ns, key, query strin
 	}
 	vec, err := s.embed(ctx, query)
 	if err != nil {
+		if errors.Is(err, ErrEmbeddingUnavailable) {
+			return nil // nothing cached; the response was served anyway
+		}
 		return err
 	}
 	if vec == nil {
@@ -569,8 +581,12 @@ func (s *VectorSemanticCache) UpsertNS(ctx context.Context, ns, key, query strin
 	}
 	for _, x := range vec {
 		if math.IsNaN(x) || math.IsInf(x, 0) {
+			s.embedErrors.Add(1)
 			return errors.New("cache: embedder returned non-finite vector")
 		}
+	}
+	if vectorNorm(vec) == 0 {
+		return nil // a zero vector can never match; do not store it
 	}
 
 	var meta map[string]interface{}
@@ -714,6 +730,7 @@ func (s *VectorSemanticCache) Snapshot() SemanticStats {
 	}
 	s.mu.RUnlock()
 	st.Hits, st.Misses, st.Evictions = s.hits.Load(), s.misses.Load(), s.evictions.Load()
+	st.EmbedErrors = s.embedErrors.Load()
 	if total := st.Hits + st.Misses; total > 0 {
 		st.HitRate = float64(st.Hits) / float64(total)
 	}

@@ -131,13 +131,23 @@ func TestOpenAICompatibleStreamAndLegacyStream(t *testing.T) {
 	if body["stream_options"].(map[string]interface{})["include_usage"] != true {
 		t.Fatal("include_usage not requested")
 	}
-	// Gemini does not get stream_options by default.
+	// Gemini documents stream_options.include_usage; Cohere does not, so it
+	// never gets stream_options (not even the client's).
 	body = nil
 	g := NewGeminiAdapter("k", srv.URL)
 	ch, _ = g.StreamChatCompletions(context.Background(), userReq("gemini-2.0-flash", "hi"))
 	collectChunks(t, ch)
-	if _, ok := body["stream_options"]; ok {
-		t.Fatal("stream_options sent to gemini")
+	if so, ok := body["stream_options"].(map[string]interface{}); !ok || so["include_usage"] != true {
+		t.Fatalf("gemini must request stream usage: %v", body["stream_options"])
+	}
+	body = nil
+	co := NewCohereAdapter("k", srv.URL)
+	creq := userReq("command-a-03-2025", "hi")
+	creq.StreamOptions = &models.StreamOptions{IncludeUsage: true}
+	ch, _ = co.StreamChatCompletions(context.Background(), creq)
+	collectChunks(t, ch)
+	if _, ok := body["stream_options"]; ok || co.IncludeStreamUsage() {
+		t.Fatal("stream_options sent to cohere")
 	}
 
 	legacy, err := a.Stream(context.Background(), userReq("m", "hi"))
@@ -444,8 +454,8 @@ func TestBedrockEndpointAndRegion(t *testing.T) {
 		t.Fatalf("expected error chunk for invalid request: %+v", c)
 	}
 	var s interface{} = NewBedrockAdapter("k", "")
-	if _, ok := s.(streamer); ok {
-		t.Fatal("bedrock must not claim streaming support (gateway falls back)")
+	if _, ok := s.(streamer); !ok {
+		t.Fatal("bedrock must implement native streaming")
 	}
 }
 

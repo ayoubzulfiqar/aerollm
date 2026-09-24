@@ -1,6 +1,16 @@
 // Package aiops implements a small closed-loop runtime tuner ("meta agent")
 // that watches platform health metrics and applies/reverts registered
 // runtime adjustments when the platform is degraded/recovered.
+//
+// Two kinds of adjustments are supported:
+//
+//   - Actions (Register): independent closed-loop controllers with
+//     per-target hysteresis, sustained-breach debouncing, cooldowns, a
+//     dry-run mode (the default) and an audit trail. Built-ins:
+//     LatencyStrategyAction, RateLimitAction and CircuitBreakerAction, all
+//     driven by caller-supplied callbacks.
+//   - TunerActions (RegisterAction, legacy): a single escalation ladder that
+//     applies one action per cooldown while the platform is degraded.
 package aiops
 
 import (
@@ -54,6 +64,12 @@ type MetricsSnapshot struct {
 	HeapAllocMB   float64
 	RequestsTotal int64
 	ErrorsTotal   int64
+	// P95LatencyMs is the 95th percentile latency in milliseconds (0 when
+	// the source does not provide it). Actions prefer it over P99/Avg.
+	P95LatencyMs float64
+	// Providers holds optional per-provider stats keyed by provider name
+	// (see ProviderStats). Used by per-provider Actions.
+	Providers map[string]ProviderStats
 }
 
 // MetricsSource provides current metrics.
@@ -123,6 +139,10 @@ type TunerStats struct {
 	LastError      string    `json:"last_error,omitempty"`
 	LastEvaluation time.Time `json:"last_evaluation"`
 	LastChange     time.Time `json:"last_change"`
+	// DryRun reports whether registered Actions run in dry-run mode.
+	DryRun bool `json:"dry_run"`
+	// RegisteredActions is the number of Actions added via Register.
+	RegisteredActions int `json:"registered_actions"`
 }
 
 // MetaAgentTuner evaluates metrics and applies runtime adjustments.
@@ -148,6 +168,13 @@ type MetaAgentTuner struct {
 	prev          *MetricsSnapshot
 	healthyStreak int
 	stats         TunerStats
+
+	// Action engine (see actions.go). live=false (the zero value) means
+	// dry-run.
+	clock      func() time.Time
+	live       bool
+	registered []*registeredAction
+	audit      auditRing
 }
 
 // NewMetaAgentTuner creates a new tuner with default thresholds.
@@ -225,6 +252,8 @@ func (t *MetaAgentTuner) Stats() TunerStats {
 	for _, idx := range t.active {
 		out.ActiveActions = append(out.ActiveActions, t.actions[idx].Name)
 	}
+	out.DryRun = !t.live
+	out.RegisteredActions = len(t.registered)
 	return out
 }
 
@@ -258,7 +287,7 @@ func (t *MetaAgentTuner) Run(ctx context.Context) {
 }
 
 func validSnapshot(s MetricsSnapshot) bool {
-	for _, v := range []float64{s.P99LatencyMs, s.AvgLatencyMs, s.ErrorRate} {
+	for _, v := range []float64{s.P99LatencyMs, s.AvgLatencyMs, s.P95LatencyMs, s.ErrorRate} {
 		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
 			return false
 		}
@@ -331,10 +360,28 @@ func (t *MetaAgentTuner) evaluate(ctx context.Context) {
 	if source == nil {
 		return
 	}
-	snap := source.Snapshot()
-	now := time.Now()
+	t.evaluateSnapshot(ctx, source.Snapshot())
+}
 
+// Observe evaluates a pushed snapshot immediately (instead of, or in
+// addition to, polling the MetricsSource in Run). It runs the legacy ladder
+// and every registered Action exactly like a scheduled evaluation.
+func (t *MetaAgentTuner) Observe(ctx context.Context, snap MetricsSnapshot) {
+	if t == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t.evalMu.Lock()
+	defer t.evalMu.Unlock()
+	t.evaluateSnapshot(ctx, snap)
+}
+
+// evaluateSnapshot runs one evaluation. Caller holds t.evalMu.
+func (t *MetaAgentTuner) evaluateSnapshot(ctx context.Context, snap MetricsSnapshot) {
 	t.mu.Lock()
+	now := t.now()
 	t.stats.Evaluations++
 	t.stats.LastEvaluation = now
 	if !validSnapshot(snap) {
@@ -343,9 +390,12 @@ func (t *MetaAgentTuner) evaluate(ctx context.Context) {
 		t.mu.Unlock()
 		return
 	}
-	errRate := windowErrorRate(t.prev, snap)
-	prev := snap
-	t.prev = &prev
+	prevSnap := t.prev
+	errRate := windowErrorRate(prevSnap, snap)
+	sig := buildSignals(prevSnap, snap, errRate, now)
+	stored := snap
+	stored.Providers = copyProviders(snap.Providers)
+	t.prev = &stored
 	latency := math.Max(snap.P99LatencyMs, snap.AvgLatencyMs)
 	cfg := t.cfg
 	if cfg == (TunerConfig{}) {
@@ -356,47 +406,60 @@ func (t *MetaAgentTuner) evaluate(ctx context.Context) {
 	t.stats.LastLatencyMs = latency
 	t.stats.LastErrorRate = errRate
 	cooldownElapsed := t.lastApply.IsZero() || now.Sub(t.lastApply) >= t.cooldown
+	reason := fmt.Sprintf("latency_ms=%.1f error_rate=%.4f", latency, errRate)
 
+	applyIdx, revertIdx := -1, -1
 	if degraded {
 		t.healthyStreak = 0
-		if !cooldownElapsed {
-			t.mu.Unlock()
-			return
+		if cooldownElapsed {
+			applyIdx = t.nextActionLocked()
 		}
-		idx := t.nextActionLocked()
-		if idx < 0 {
-			t.mu.Unlock()
-			return
+	} else {
+		t.healthyStreak++
+		if len(t.active) > 0 && t.healthyStreak >= cfg.RecoveryEvaluations && cooldownElapsed {
+			revertIdx = t.active[len(t.active)-1]
 		}
-		action := t.actions[idx]
-		t.mu.Unlock()
-
-		err := safeCall(ctx, action.Apply)
-
-		t.mu.Lock()
-		t.lastApply = time.Now() // back off after both success and failure
-		if err != nil {
-			t.stats.ApplyFailures++
-			t.stats.LastError = fmt.Sprintf("apply %q: %v", action.Name, err)
-		} else {
-			t.active = append(t.active, idx)
-			t.stats.Applied++
-			t.stats.LastChange = t.lastApply
-		}
-		t.mu.Unlock()
-		return
 	}
-
-	// Healthy.
-	t.healthyStreak++
-	if len(t.active) == 0 || t.healthyStreak < cfg.RecoveryEvaluations || !cooldownElapsed {
-		t.mu.Unlock()
-		return
+	var action TunerAction
+	switch {
+	case applyIdx >= 0:
+		action = t.actions[applyIdx]
+	case revertIdx >= 0:
+		action = t.actions[revertIdx]
 	}
-	idx := t.active[len(t.active)-1]
-	action := t.actions[idx]
 	t.mu.Unlock()
 
+	switch {
+	case applyIdx >= 0:
+		t.ladderApply(ctx, applyIdx, action, reason)
+	case revertIdx >= 0:
+		t.ladderRevert(ctx, revertIdx, action, reason)
+	}
+	t.runActions(ctx, sig)
+}
+
+// ladderApply applies a legacy TunerAction. Caller holds t.evalMu.
+func (t *MetaAgentTuner) ladderApply(ctx context.Context, idx int, action TunerAction, reason string) {
+	err := safeCall(ctx, action.Apply)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastApply = t.now() // back off after both success and failure
+	if err != nil {
+		t.stats.ApplyFailures++
+		t.recordLocked(action.Name, "", OutcomeApplyFailed, false, reason, "", err, t.lastApply)
+		t.stats.LastError = fmt.Sprintf("apply %q: %v", action.Name, err)
+		return
+	}
+	t.active = append(t.active, idx)
+	t.stats.Applied++
+	t.stats.LastChange = t.lastApply
+	t.recordLocked(action.Name, "", OutcomeApplied, false, reason, "", nil, t.lastApply)
+}
+
+// ladderRevert reverts the most recently applied legacy TunerAction. Caller
+// holds t.evalMu.
+func (t *MetaAgentTuner) ladderRevert(ctx context.Context, idx int, action TunerAction, reason string) {
 	var err error
 	if action.Revert != nil {
 		err = safeCall(ctx, action.Revert)
@@ -407,19 +470,21 @@ func (t *MetaAgentTuner) evaluate(ctx context.Context) {
 	t.healthyStreak = 0
 	if err != nil {
 		t.stats.RevertFailures++
+		t.recordLocked(action.Name, "", OutcomeRevertFailed, false, reason, "", err, t.now())
 		t.stats.LastError = fmt.Sprintf("revert %q: %v", action.Name, err)
 		return
 	}
-	// Pop the action (it may have been reapplied concurrently only via this
-	// goroutine, so the top of the stack is still idx).
+	// Pop the action. Evaluations are serialized by evalMu, so the top of
+	// the stack is still idx.
 	if n := len(t.active); n > 0 && t.active[n-1] == idx {
 		t.active = t.active[:n-1]
 	}
 	if action.Revert != nil {
 		t.stats.Reverted++
 	}
-	t.lastApply = time.Now()
+	t.lastApply = t.now()
 	t.stats.LastChange = t.lastApply
+	t.recordLocked(action.Name, "", OutcomeReverted, false, reason, "", nil, t.lastApply)
 }
 
 // nextActionLocked returns the index of the first registered action with a
@@ -445,15 +510,37 @@ func (t *MetaAgentTuner) nextActionLocked() int {
 
 // DefaultMetricsSource samples Go runtime stats plus external telemetry hooks.
 type DefaultMetricsSource struct {
-	requestsFn func() int64
-	errorsFn   func() int64
-	latencyFn  func() float64
+	requestsFn  func() int64
+	errorsFn    func() int64
+	latencyFn   func() float64
+	p95Fn       func() float64
+	providersFn func() map[string]ProviderStats
 }
 
 // NewDefaultMetricsSource creates a source using Go runtime stats.
 // latencyFn is expected to return the AVERAGE request latency in ms.
 func NewDefaultMetricsSource(requestsFn func() int64, errorsFn func() int64, latencyFn func() float64) *DefaultMetricsSource {
 	return &DefaultMetricsSource{requestsFn: requestsFn, errorsFn: errorsFn, latencyFn: latencyFn}
+}
+
+// WithP95 sets a hook returning the p95 request latency in ms, used by
+// latency-driven Actions. Call it before the tuner starts. It returns s.
+func (s *DefaultMetricsSource) WithP95(fn func() float64) *DefaultMetricsSource {
+	if s != nil {
+		s.p95Fn = fn
+	}
+	return s
+}
+
+// WithProviders sets a hook returning per-provider stats (preferably
+// cumulative RequestsTotal/ErrorsTotal counters), used by per-provider
+// Actions such as CircuitBreakerAction. Call it before the tuner starts. It
+// returns s.
+func (s *DefaultMetricsSource) WithProviders(fn func() map[string]ProviderStats) *DefaultMetricsSource {
+	if s != nil {
+		s.providersFn = fn
+	}
+	return s
 }
 
 // Snapshot returns current metrics. ErrorRate is cumulative since process
@@ -464,7 +551,15 @@ func (s *DefaultMetricsSource) Snapshot() MetricsSnapshot {
 	requests := int64(0)
 	errs := int64(0)
 	latency := 0.0
+	p95 := 0.0
+	var providers map[string]ProviderStats
 	if s != nil {
+		if s.p95Fn != nil {
+			p95 = s.p95Fn()
+		}
+		if s.providersFn != nil {
+			providers = copyProviders(s.providersFn())
+		}
 		if s.requestsFn != nil {
 			requests = s.requestsFn()
 		}
@@ -488,5 +583,7 @@ func (s *DefaultMetricsSource) Snapshot() MetricsSnapshot {
 		HeapAllocMB:   float64(mem.Alloc) / 1024 / 1024,
 		RequestsTotal: requests,
 		ErrorsTotal:   errs,
+		P95LatencyMs:  p95,
+		Providers:     providers,
 	}
 }

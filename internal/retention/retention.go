@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"regexp"
@@ -30,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // RetentionPolicy defines data retention rules.
@@ -57,6 +60,9 @@ var (
 	ErrNotFound = errors.New("retention policy not found")
 	// ErrStoreFull is returned when MaxPolicies is reached.
 	ErrStoreFull = errors.New("retention store is full")
+	// ErrPersistence is returned (wrapped) when the durable store rejects a
+	// read or write. The in-memory state is left unchanged.
+	ErrPersistence = errors.New("retention: persistence failed")
 
 	idPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 	resourcePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
@@ -295,12 +301,15 @@ func (m *MemoryTarget) Delete(_ context.Context, keys []string) error {
 	return nil
 }
 
-// RetentionStore manages retention policies and their enforcement.
+// RetentionStore manages retention policies and their enforcement. It is
+// in-memory by default; EnablePersistence adds write-through durability for
+// policies (targets are runtime wiring and are never persisted).
 type RetentionStore struct {
 	mu       sync.RWMutex
 	policies map[string]RetentionPolicy
 	targets  map[string]Target
 	now      func() time.Time
+	ps       persist.Store // nil unless persistence is enabled
 
 	sweepMu sync.Mutex
 }
@@ -339,6 +348,9 @@ func (s *RetentionStore) Upsert(policy RetentionPolicy) (RetentionPolicy, error)
 	} else {
 		policy.CreatedAt = s.now()
 	}
+	if err := s.putLocked(policy); err != nil {
+		return RetentionPolicy{}, err
+	}
 	s.policies[policy.ID] = policy
 	return policy, nil
 }
@@ -363,13 +375,34 @@ func (s *RetentionStore) List() []RetentionPolicy {
 	return out
 }
 
-// Delete removes a policy and reports whether it existed.
+// Delete removes a policy and reports whether it was removed. When
+// persistence is enabled and the durable delete fails, the policy is kept,
+// the failure is logged and false is returned; use Remove to observe the
+// error.
 func (s *RetentionStore) Delete(id string) bool {
+	err := s.Remove(id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		slog.Error("retention: delete policy failed", "id", id, "error", err)
+	}
+	return err == nil
+}
+
+// Remove deletes a policy. It returns ErrNotFound when the policy does not
+// exist and an error wrapping ErrPersistence (leaving the policy in place)
+// when the durable delete fails.
+func (s *RetentionStore) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.policies[id]
+	if _, ok := s.policies[id]; !ok {
+		return ErrNotFound
+	}
+	if s.ps != nil {
+		if err := s.ps.Delete(BucketPolicies, id); err != nil {
+			return fmt.Errorf("%w: delete %s/%s: %w", ErrPersistence, BucketPolicies, id, err)
+		}
+	}
 	delete(s.policies, id)
-	return ok
+	return nil
 }
 
 // RegisterTarget attaches the data set that policies for resource are
@@ -638,6 +671,8 @@ func WebhookHandler(store *RetentionStore) http.HandlerFunc {
 					writeError(w, http.StatusBadRequest, err.Error())
 				case errors.Is(err, ErrStoreFull):
 					writeError(w, http.StatusInsufficientStorage, err.Error())
+				case errors.Is(err, ErrPersistence):
+					writeError(w, http.StatusInternalServerError, "persistence failure")
 				default:
 					writeError(w, http.StatusInternalServerError, "internal error")
 				}
@@ -649,8 +684,15 @@ func WebhookHandler(store *RetentionStore) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "missing id")
 				return
 			}
-			if !store.Delete(id) {
-				writeError(w, http.StatusNotFound, "not found")
+			if err := store.Remove(id); err != nil {
+				switch {
+				case errors.Is(err, ErrNotFound):
+					writeError(w, http.StatusNotFound, "not found")
+				case errors.Is(err, ErrPersistence):
+					writeError(w, http.StatusInternalServerError, "persistence failure")
+				default:
+					writeError(w, http.StatusInternalServerError, "internal error")
+				}
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)

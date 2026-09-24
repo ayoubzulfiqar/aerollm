@@ -30,8 +30,12 @@ type CronSchedule struct {
 	dow     uint64
 	domStar bool
 	dowStar bool
-	every   time.Duration
-	loc     *time.Location
+	// fixedTime is set when neither the minute nor the hour field is a
+	// wildcard or step ("*", "*/n"); such jobs run once per wall-clock time
+	// during a DST fall-back overlap.
+	fixedTime bool
+	every     time.Duration
+	loc       *time.Location
 }
 
 type cronField struct {
@@ -153,6 +157,7 @@ func parseFields(s string, loc *time.Location) (*CronSchedule, error) {
 	}
 	cs.domStar = isStar(fields[2])
 	cs.dowStar = isStar(fields[4])
+	cs.fixedTime = !isStar(fields[0]) && !isStar(fields[1])
 	return cs, nil
 }
 
@@ -315,14 +320,28 @@ func (c *CronSchedule) Location() *time.Location {
 
 // Next returns the first activation time strictly after `after` (seconds are
 // truncated), or the zero time if the schedule never fires within the search
-// horizon (e.g. "0 0 30 2 *").
+// horizon (e.g. "0 0 30 2 *"). For "@every" schedules Next returns
+// after + interval.
 //
-// Times are evaluated on the wall clock of the schedule's location. Wall
-// clock times that do not exist because of a DST spring-forward gap are
-// skipped. For ambiguous wall clock times during a DST fall-back, the
-// earliest occurrence after `after` is chosen, so consecutive calls that feed
-// the previous activation back in fire at most once per wall-clock minute.
-// For "@every" schedules Next returns after + interval.
+// Times are evaluated on the wall clock of the schedule's location using the
+// location's real UTC offsets, so DST shifts of any size (30 minutes on Lord
+// Howe Island, 2 hours at Troll station, historical double summer time) are
+// handled the same way:
+//
+//   - Gaps (spring forward): wall-clock times that do not exist are skipped
+//     entirely; the job does not run late to make up for them. A job at
+//     02:30 in America/New_York does not run on the day clocks jump from
+//     02:00 to 03:00, and an every-15-minutes job goes 01:45 -> 03:00 EDT
+//     (15 real minutes later).
+//   - Overlaps (fall back): a fixed-time job (neither the minute nor the hour
+//     field starts with "*", e.g. "30 1 * * *" or "0 9-17 * * *") runs once,
+//     at the first occurrence of the repeated wall-clock time. A job with a
+//     wildcard/step minute or hour field (e.g. "*/15 * * * *", "@hourly")
+//     keeps its real-time cadence and also fires during the repeated period,
+//     like Vixie cron's wildcard jobs.
+//
+// Consecutive calls that feed the previous activation back in therefore never
+// fire a fixed-time job twice for the same wall-clock time.
 func (c *CronSchedule) Next(after time.Time) time.Time {
 	if c == nil {
 		return time.Time{}
@@ -335,28 +354,77 @@ func (c *CronSchedule) Next(after time.Time) time.Time {
 		loc = after.Location()
 	}
 	local := after.In(loc)
+	maxYear := local.Year() + maxSearchYears
 
-	// Start at the wall-clock minute following `after`.
-	sy, smo, sd := local.Date()
-	sh, smi := local.Hour(), local.Minute()+1
-	if smi == 60 {
-		smi = 0
-		sh++
-	}
-	if sh == 24 {
-		sh = 0
-		sd++
-	}
-	if sd > daysIn(smo, sy) {
-		sd = 1
-		smo++
-	}
-	if smo > time.December {
-		smo = time.January
-		sy++
-	}
+	// The search walks the zone segments of loc (intervals with a constant
+	// UTC offset) in chronological order. Within a segment wall-clock time is
+	// a linear function of real time, so the first matching wall-clock time
+	// inside the segment is the first activation in it.
+	lo := civil(local).Truncate(time.Minute).Add(time.Minute)
+	segStart, segEnd := local.ZoneBounds()
+	_, offset := local.Zone()
 
-	for year := sy; year <= sy+maxSearchYears; year++ {
+	// seenUntil is the latest wall-clock time already reached before the
+	// current segment. After a backward transition wall-clock times before it
+	// repeat; fixed-time jobs must not fire for them again.
+	var seenUntil time.Time
+	if !segStart.IsZero() {
+		seenUntil = civil(segStart.Add(-time.Nanosecond).In(loc))
+	}
+	for {
+		if c.fixedTime && lo.Before(seenUntil) {
+			lo = ceilMinute(seenUntil)
+		}
+		var hi time.Time // exclusive wall-clock bound of this segment
+		if !segEnd.IsZero() {
+			// The wall-clock reading the current offset would show at segEnd.
+			hi = segEnd.UTC().Add(time.Duration(offset) * time.Second)
+		}
+		if w, ok := c.searchWall(lo, hi, maxYear); ok {
+			return w.Add(-time.Duration(offset) * time.Second).In(loc)
+		}
+		if segEnd.IsZero() {
+			return time.Time{}
+		}
+		if hi.After(seenUntil) {
+			seenUntil = hi
+		}
+		next := segEnd.In(loc)
+		if next.Year() > maxYear {
+			return time.Time{}
+		}
+		lo = ceilMinute(civil(next))
+		_, offset = next.Zone()
+		_, segEnd = next.ZoneBounds()
+	}
+}
+
+// civil returns t's wall-clock reading as a UTC time, which makes wall-clock
+// arithmetic and comparisons independent of zone offsets.
+func civil(t time.Time) time.Time {
+	y, mo, d := t.Date()
+	h, mi, s := t.Clock()
+	return time.Date(y, mo, d, h, mi, s, t.Nanosecond(), time.UTC)
+}
+
+func ceilMinute(t time.Time) time.Time {
+	if tr := t.Truncate(time.Minute); !tr.Equal(t) {
+		return tr.Add(time.Minute)
+	}
+	return t
+}
+
+// searchWall returns the first wall-clock time w (a civil time, see civil)
+// with lo <= w < hi that matches the schedule. A zero hi means unbounded.
+// The search stops after maxYear.
+func (c *CronSchedule) searchWall(lo, hi time.Time, maxYear int) (time.Time, bool) {
+	sy, smo, sd := lo.Date()
+	sh, smi := lo.Hour(), lo.Minute()
+	bounded := !hi.IsZero()
+	for year := sy; year <= maxYear; year++ {
+		if bounded && year > hi.Year() {
+			return time.Time{}, false
+		}
 		mStart := time.January
 		if year == sy {
 			mStart = smo
@@ -372,6 +440,9 @@ func (c *CronSchedule) Next(after time.Time) time.Time {
 			}
 			last := daysIn(month, year)
 			for day := dStart; day <= last; day++ {
+				if bounded && !time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Before(hi) {
+					return time.Time{}, false
+				}
 				if !c.dayMatches(year, month, day) {
 					continue
 				}
@@ -392,15 +463,17 @@ func (c *CronSchedule) Next(after time.Time) time.Time {
 						if c.minute&(1<<uint(minute)) == 0 {
 							continue
 						}
-						if t, ok := resolveWallClock(year, month, day, hour, minute, loc, after); ok {
-							return t
+						w := time.Date(year, month, day, hour, minute, 0, 0, time.UTC)
+						if bounded && !w.Before(hi) {
+							return time.Time{}, false
 						}
+						return w, true
 					}
 				}
 			}
 		}
 	}
-	return time.Time{}
+	return time.Time{}, false
 }
 
 func (c *CronSchedule) dayMatches(year int, month time.Month, day int) bool {
@@ -411,28 +484,6 @@ func (c *CronSchedule) dayMatches(year int, month time.Month, day int) bool {
 		return domOK && dowOK
 	}
 	return domOK || dowOK
-}
-
-// resolveWallClock maps a wall-clock time in loc to an instant strictly after
-// `after`. It returns false when the wall-clock time does not exist (DST gap)
-// or all of its occurrences are not after `after`.
-func resolveWallClock(year int, month time.Month, day, hour, minute int, loc *time.Location, after time.Time) (time.Time, bool) {
-	t := time.Date(year, month, day, hour, minute, 0, 0, loc)
-	var best time.Time
-	for _, cand := range [...]time.Time{t.Add(-time.Hour), t, t.Add(time.Hour)} {
-		if !wallMatches(cand, year, month, day, hour, minute) || !cand.After(after) {
-			continue
-		}
-		if best.IsZero() || cand.Before(best) {
-			best = cand
-		}
-	}
-	return best, !best.IsZero()
-}
-
-func wallMatches(t time.Time, year int, month time.Month, day, hour, minute int) bool {
-	y, m, d := t.Date()
-	return y == year && m == month && d == day && t.Hour() == hour && t.Minute() == minute
 }
 
 func daysIn(month time.Month, year int) int {

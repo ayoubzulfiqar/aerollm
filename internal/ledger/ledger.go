@@ -1,12 +1,23 @@
 // Package ledger implements an append-only, hash-chained audit ledger of
 // request/response pairs.
 //
-// Every record carries ChainHash = ComputeChainHash(PrevHash, request,
-// response), where PrevHash is the ChainHash of the preceding record (""
-// for the genesis record). Verify walks the chain and detects modified
-// payloads, re-ordered, removed or inserted records. Timestamps and Metadata
-// are NOT covered by the chain hash (Metadata is used for annotations such as
-// signatures added after hashing).
+// Every record carries a ChainHash linking it to its predecessor (PrevHash
+// is the ChainHash of the preceding record, "" for the genesis record).
+// Verify walks the chain and detects modified payloads, re-ordered, removed
+// or inserted records.
+//
+// Records are versioned (LedgerRecord.Version):
+//
+//   - Version 0/1 (legacy): ChainHash = ComputeChainHash(PrevHash, request,
+//     response). Timestamp and Metadata are NOT covered.
+//   - Version 2 (current; every record chained by the stores in this
+//     package): ChainHash = ComputeChainHashV2(PrevHash, request, response,
+//     Timestamp, Metadata). The timestamp and the metadata are covered,
+//     except annotation keys added after hashing (the PQC signature keys,
+//     see AnnotationKeys).
+//
+// Existing v1 records keep verifying with the v1 rule, so chains that mix
+// legacy and new records verify.
 package ledger
 
 import (
@@ -14,11 +25,20 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"sync"
 	"time"
+)
+
+// Record versions (see the package documentation).
+const (
+	RecordVersion1 = 1
+	RecordVersion2 = 2
+	// CurrentRecordVersion is the version of records chained by this package.
+	CurrentRecordVersion = RecordVersion2
 )
 
 // LedgerRecord represents an append-only audit entry.
@@ -31,6 +51,8 @@ type LedgerRecord struct {
 	Metadata        map[string]interface{}
 	RequestPayload  string
 	ResponsePayload string
+	// Version selects the chain-hash rule: 0 or 1 = v1 (legacy), 2 = v2.
+	Version int
 }
 
 // LedgerStore persists ledger records.
@@ -75,6 +97,8 @@ type InMemoryLedgerStore struct {
 	autoChain  bool
 	pruned     uint64
 	anchor     string // ChainHash of the newest pruned record
+
+	disk *ledgerDisk // non-nil when persistence is enabled
 }
 
 // NewInMemoryLedgerStore creates a store with AutoChain enabled and
@@ -112,7 +136,34 @@ func (s *InMemoryLedgerStore) pruneLocked() {
 	s.pruned += uint64(drop)
 	clear(s.records[:drop]) // release payload memory
 	s.records = s.records[drop:]
+	if s.disk != nil {
+		s.disk.seqs = s.disk.seqs[drop:]
+	}
 }
+
+// storeLocked persists (when enabled) and appends rec, then prunes. A
+// persistence failure leaves the store unchanged.
+func (s *InMemoryLedgerStore) storeLocked(rec LedgerRecord) error {
+	if s.disk != nil {
+		if err := s.disk.put(rec); err != nil {
+			return err
+		}
+	}
+	s.records = append(s.records, rec)
+	s.pruneLocked()
+	if s.disk != nil {
+		if err := s.disk.compact(s.anchor, s.pruned); err != nil {
+			return fmt.Errorf("%w: %w", ErrPersistPrune, err)
+		}
+	}
+	return nil
+}
+
+// ErrPersistPrune is returned (wrapped) by appends to a persistent store
+// when the record was stored durably but deleting pruned records from the
+// persist.Store failed. The ledger stays consistent (leftover records are
+// ignored on load and deletion is retried on the next append).
+var ErrPersistPrune = errors.New("ledger: record stored, but pruning persisted records failed")
 
 func cloneRecord(r LedgerRecord) LedgerRecord {
 	r.Metadata = maps.Clone(r.Metadata)
@@ -131,30 +182,44 @@ func (s *InMemoryLedgerStore) lastHashLocked() string {
 	return s.anchor
 }
 
-// chainLocked fills the hash fields of rec so it extends the current chain.
-func (s *InMemoryLedgerStore) chainLocked(rec *LedgerRecord) {
-	rec.PrevHash = s.lastHashLocked()
-	rec.RequestHash = hashHex(rec.RequestPayload)
-	rec.ResponseHash = hashHex(rec.ResponsePayload)
-	rec.ChainHash = ComputeChainHash(rec.PrevHash, rec.RequestPayload, rec.ResponsePayload)
+// chainLocked fills the hash fields of rec (as a v2 record) so it extends
+// the current chain.
+func (s *InMemoryLedgerStore) chainLocked(rec *LedgerRecord) error {
+	return chainRecord(rec, s.lastHashLocked())
+}
+
+// chainRecord fills the hash fields of rec as a CurrentRecordVersion record
+// following prevHash. A zero Timestamp is set to now (UTC).
+func chainRecord(rec *LedgerRecord, prevHash string) error {
 	if rec.Timestamp.IsZero() {
 		rec.Timestamp = time.Now().UTC()
 	}
+	rec.Version = CurrentRecordVersion
+	rec.PrevHash = prevHash
+	rec.RequestHash = hashHex(rec.RequestPayload)
+	rec.ResponseHash = hashHex(rec.ResponsePayload)
+	h, err := ComputeChainHashV2(rec.PrevHash, rec.RequestPayload, rec.ResponsePayload, rec.Timestamp, rec.Metadata)
+	if err != nil {
+		return err
+	}
+	rec.ChainHash = h
+	return nil
 }
 
 // Append stores a new record. With AutoChain (the default for
-// NewInMemoryLedgerStore) the hash fields are computed atomically; otherwise
-// the record is stored as given.
+// NewInMemoryLedgerStore) the hash fields are computed atomically (as a v2
+// record, keeping the caller's Timestamp if set); otherwise the record is
+// stored as given.
 func (s *InMemoryLedgerStore) Append(ctx context.Context, record LedgerRecord) error {
 	record = cloneRecord(record)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.autoChain {
-		s.chainLocked(&record)
+		if err := s.chainLocked(&record); err != nil {
+			return err
+		}
 	}
-	s.records = append(s.records, record)
-	s.pruneLocked()
-	return nil
+	return s.storeLocked(record)
 }
 
 // SealFunc may annotate a freshly chained record (e.g. add a signature to its
@@ -189,14 +254,20 @@ func (s *InMemoryLedgerStore) AppendChainedSealed(ctx context.Context, requestPa
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.chainLocked(&rec)
+	if err := s.chainLocked(&rec); err != nil {
+		return LedgerRecord{}, err
+	}
 	if seal != nil {
 		if err := seal(&rec); err != nil {
 			return LedgerRecord{}, err
 		}
 	}
-	s.records = append(s.records, rec)
-	s.pruneLocked()
+	if err := s.storeLocked(rec); err != nil {
+		if errors.Is(err, ErrPersistPrune) {
+			return cloneRecord(rec), err // stored; see ErrPersistPrune
+		}
+		return LedgerRecord{}, err
+	}
 	return cloneRecord(rec), nil
 }
 
@@ -265,7 +336,8 @@ var ErrChainBroken = errors.New("ledger: chain broken")
 func (e *ChainError) Is(target error) bool { return target == ErrChainBroken }
 
 // VerifyRecords verifies that records form an intact chain starting from
-// anchor ("" for a chain that starts at genesis).
+// anchor ("" for a chain that starts at genesis). Each record is checked
+// with the rule of its Version.
 func VerifyRecords(anchor string, records []LedgerRecord) error {
 	prev := anchor
 	for i, r := range records {
@@ -278,7 +350,11 @@ func VerifyRecords(anchor string, records []LedgerRecord) error {
 		if r.ResponseHash != "" && r.ResponseHash != hashHex(r.ResponsePayload) {
 			return &ChainError{Index: i, Reason: "response hash mismatch"}
 		}
-		if r.ChainHash != ComputeChainHash(r.PrevHash, r.RequestPayload, r.ResponsePayload) {
+		want, err := ComputeRecordHash(r)
+		if err != nil {
+			return &ChainError{Index: i, Reason: err.Error()}
+		}
+		if r.ChainHash != want {
 			return &ChainError{Index: i, Reason: "chain hash mismatch"}
 		}
 		prev = r.ChainHash
@@ -286,9 +362,92 @@ func VerifyRecords(anchor string, records []LedgerRecord) error {
 	return nil
 }
 
-// ComputeChainHash computes the chained hash for a new record. The inputs
-// are length-prefixed and domain-separated, so moving bytes between the
-// request and response (or the previous hash) changes the result.
+// ComputeRecordHash returns the chain hash r must carry according to its
+// Version (0/1: ComputeChainHash, 2: ComputeChainHashV2).
+func ComputeRecordHash(r LedgerRecord) (string, error) {
+	switch r.Version {
+	case 0, RecordVersion1:
+		return ComputeChainHash(r.PrevHash, r.RequestPayload, r.ResponsePayload), nil
+	case RecordVersion2:
+		return ComputeChainHashV2(r.PrevHash, r.RequestPayload, r.ResponsePayload, r.Timestamp, r.Metadata)
+	default:
+		return "", fmt.Errorf("unsupported record version %d", r.Version)
+	}
+}
+
+// AnnotationKeys are Metadata keys excluded from the v2 chain hash because
+// they are added after the record has been hashed (signatures over the
+// chain hash).
+var AnnotationKeys = []string{MetadataSignature, MetadataSignatureAlgorithm, MetadataSignatureKeyID}
+
+func isAnnotationKey(k string) bool {
+	for _, a := range AnnotationKeys {
+		if k == a {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalMetadata returns a canonical JSON encoding of md without the
+// annotation keys: object keys sorted, every value normalised through a
+// JSON round trip (so a record verifies identically before and after it
+// was persisted as JSON). Numbers are compared as float64.
+func canonicalMetadata(md map[string]interface{}) ([]byte, error) {
+	filtered := make(map[string]interface{}, len(md))
+	for k, v := range md {
+		if !isAnnotationKey(k) {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		return []byte("{}"), nil
+	}
+	raw, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: metadata is not JSON-encodable: %w", err)
+	}
+	var generic interface{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return nil, fmt.Errorf("ledger: metadata: %w", err)
+	}
+	return json.Marshal(generic)
+}
+
+// canonicalTimestamp is the v2 encoding of a record timestamp.
+func canonicalTimestamp(ts time.Time) string {
+	return ts.UTC().Format(time.RFC3339Nano)
+}
+
+// ComputeChainHashV2 computes the v2 chain hash, which additionally covers
+// the record timestamp (to the nanosecond, as UTC) and its metadata (minus
+// AnnotationKeys). Inputs are length-prefixed and domain-separated. It fails
+// only when metadata cannot be encoded as JSON (e.g. NaN values).
+func ComputeChainHashV2(prevHash, requestPayload, responsePayload string, ts time.Time, metadata map[string]interface{}) (string, error) {
+	md, err := canonicalMetadata(metadata)
+	if err != nil {
+		return "", err
+	}
+	if prevHash == "" {
+		prevHash = "genesis"
+	}
+	h := sha256.New()
+	h.Write([]byte("aerollm-ledger-v2"))
+	for _, part := range [][]byte{[]byte(prevHash), []byte(requestPayload), []byte(responsePayload), []byte(canonicalTimestamp(ts)), md} {
+		var l [8]byte
+		binary.BigEndian.PutUint64(l[:], uint64(len(part)))
+		h.Write(l[:])
+		h.Write(part)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ComputeChainHash computes the v1 (legacy) chained hash, which covers only
+// the previous hash and the payloads. New records use ComputeChainHashV2;
+// ComputeChainHash remains for verifying and producing Version 0/1 records.
+// The inputs are length-prefixed and domain-separated, so moving bytes
+// between the request and response (or the previous hash) changes the
+// result.
 func ComputeChainHash(prevHash, requestPayload, responsePayload string) string {
 	if prevHash == "" {
 		prevHash = "genesis"
@@ -320,19 +479,16 @@ func RecordRequestResponse(store LedgerStore, prevHash, requestPayload, response
 		}
 		return rec.ChainHash, nil
 	}
-	chainHash := ComputeChainHash(prevHash, requestPayload, responsePayload)
 	record := LedgerRecord{
-		Timestamp:       time.Now().UTC(),
-		PrevHash:        prevHash,
-		RequestHash:     hashHex(requestPayload),
-		ResponseHash:    hashHex(responsePayload),
-		ChainHash:       chainHash,
 		Metadata:        metadata,
 		RequestPayload:  requestPayload,
 		ResponsePayload: responsePayload,
 	}
+	if err := chainRecord(&record, prevHash); err != nil {
+		return "", err
+	}
 	if err := store.Append(ctx, record); err != nil {
 		return "", err
 	}
-	return chainHash, nil
+	return record.ChainHash, nil
 }

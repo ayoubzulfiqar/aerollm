@@ -16,6 +16,7 @@ import (
 
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 )
 
@@ -77,9 +78,11 @@ type nodeGetter interface {
 	GetNode(ctx context.Context, id string) (Node, bool)
 }
 
-// bboltGraphStore is an in-memory temporal graph store (the name is kept for
-// API compatibility; nothing is persisted to bbolt). It is safe for
-// concurrent use.
+// bboltGraphStore is an in-memory temporal graph store. By default nothing
+// is persisted (the name is kept for API compatibility); EnablePersistence
+// (or NewBboltGraphStoreWithPersistence) writes nodes and edges through to a
+// persist.Store such as persist.OpenBolt, so the graph survives restarts. It
+// is safe for concurrent use.
 type bboltGraphStore struct {
 	mu        sync.RWMutex
 	bucket    []byte
@@ -87,7 +90,16 @@ type bboltGraphStore struct {
 	edges     map[string]Edge
 	sourceIdx map[string]map[string]struct{}
 	targetIdx map[string]map[string]struct{}
+
+	// writeMu serializes writers so persisted documents and the in-memory
+	// graph are updated in the same order; ps is only accessed with it held.
+	writeMu sync.Mutex
+	ps      persist.Store
 }
+
+// BboltGraphStore names the concrete store returned by NewBboltGraphStore
+// and NewBboltGraphStoreWithPersistence.
+type BboltGraphStore = bboltGraphStore
 
 // NewBboltGraphStore creates an in-memory temporal graph store.
 func NewBboltGraphStore() *bboltGraphStore {
@@ -112,16 +124,26 @@ func (s *bboltGraphStore) UpsertNode(ctx context.Context, node Node) (string, er
 		node.ID = nodeID(node.Label, node.Type, node.Props)
 	}
 	node.Props = copyProps(node.Props)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	existing, exists := s.nodes[node.ID]
+	s.mu.RUnlock()
 	now := time.Now().UTC()
-	if existing, ok := s.nodes[node.ID]; ok && !existing.CreatedAt.IsZero() {
+	if exists && !existing.CreatedAt.IsZero() {
 		node.CreatedAt = existing.CreatedAt
 	} else if node.CreatedAt.IsZero() {
 		node.CreatedAt = now
 	}
 	node.UpdatedAt = now
+	if s.ps != nil {
+		if err := s.ps.Put(NodesBucket, node.ID, node); err != nil {
+			return "", fmt.Errorf("graphrag: persist node: %w", err)
+		}
+	}
+	s.mu.Lock()
 	s.nodes[node.ID] = node
+	s.mu.Unlock()
 	return node.ID, nil
 }
 
@@ -152,15 +174,14 @@ func (s *bboltGraphStore) UpsertEdge(ctx context.Context, edge Edge) (string, er
 		v := *edge.ValidTo
 		edge.ValidTo = &v
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	old, exists := s.edges[edge.ID]
+	s.mu.RUnlock()
 	now := time.Now().UTC()
-	if old, ok := s.edges[edge.ID]; ok {
-		if !old.CreatedAt.IsZero() {
-			edge.CreatedAt = old.CreatedAt
-		}
-		removeIdx(s.sourceIdx, old.Source, old.ID)
-		removeIdx(s.targetIdx, old.Target, old.ID)
+	if exists && !old.CreatedAt.IsZero() {
+		edge.CreatedAt = old.CreatedAt
 	}
 	if edge.CreatedAt.IsZero() {
 		edge.CreatedAt = now
@@ -168,10 +189,27 @@ func (s *bboltGraphStore) UpsertEdge(ctx context.Context, edge Edge) (string, er
 	if edge.ValidFrom.IsZero() {
 		edge.ValidFrom = edge.CreatedAt
 	}
+	if s.ps != nil {
+		if err := s.ps.Put(EdgesBucket, edge.ID, edge); err != nil {
+			return "", fmt.Errorf("graphrag: persist edge: %w", err)
+		}
+	}
+	s.mu.Lock()
+	s.putEdgeLocked(edge)
+	s.mu.Unlock()
+	return edge.ID, nil
+}
+
+// putEdgeLocked stores edge and keeps the endpoint indexes exact (an
+// existing edge with the same ID is moved).
+func (s *bboltGraphStore) putEdgeLocked(edge Edge) {
+	if old, ok := s.edges[edge.ID]; ok {
+		removeIdx(s.sourceIdx, old.Source, old.ID)
+		removeIdx(s.targetIdx, old.Target, old.ID)
+	}
 	s.edges[edge.ID] = edge
 	addIdx(s.sourceIdx, edge.Source, edge.ID)
 	addIdx(s.targetIdx, edge.Target, edge.ID)
-	return edge.ID, nil
 }
 
 func addIdx(idx map[string]map[string]struct{}, key, id string) {

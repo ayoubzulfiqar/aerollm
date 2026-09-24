@@ -62,6 +62,9 @@ providers:
 router:
   strategy: "round_robin"
   max_attempts: 3
+  # Wait out an upstream Retry-After (up to this long) when no other provider
+  # is left to fall back to. 0 disables.
+  max_retry_wait: 0s
   circuit_break:
     max_failures: 5
     reset_timeout: 60s
@@ -81,6 +84,9 @@ cache:
   semantic_enabled: false
   # Keep false so one API key can never be served another key's response.
   shared_across_keys: false
+  # Embed prompts for the semantic cache with this model (via the gateway's
+  # embeddings route); empty uses a local lexical embedder.
+  semantic_embedding_model: ""
 
 telemetry:
   enabled: false
@@ -104,7 +110,16 @@ guardrails:
 
 finops:
   enabled: true
+  # Budget applied to every non-admin key without an explicit budget (0 = none).
   default_max_usd: 0
+  # lifetime | daily | monthly (UTC)
+  budget_period: lifetime
+
+# Durable state (virtual keys, budgets, secrets, batches, control-plane
+# stores) in a single-process bbolt file. Use one file per gateway instance.
+persistence:
+  enabled: true
+  path: ""   # default: $AEROLLM_STATE_DIR/gateway.db
 
 webhooks:
   enabled: true

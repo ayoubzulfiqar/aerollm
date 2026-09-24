@@ -36,6 +36,9 @@ const TenantAPIKeyPrefix = "sk-tenant-"
 // store for testing and small deployments. It stores and returns copies, so
 // callers cannot mutate stored state, and keeps only SHA-256 hashes of keys.
 // It implements Resolver.
+//
+// With persistence enabled (NewPersistentStore / EnablePersistence) every
+// change is written to a persist.Store before it becomes visible.
 type InMemoryStore struct {
 	mu      sync.RWMutex
 	apiKeys map[string]*APIKey // by ID
@@ -43,6 +46,8 @@ type InMemoryStore struct {
 	orgs    map[TenantID]*Organization
 	teams   map[TenantID]*Team
 	users   map[TenantID]*User
+
+	disk *storeDisk // non-nil when persistence is enabled
 }
 
 // NewInMemoryStore creates a new in-memory store.
@@ -114,6 +119,9 @@ func (s *InMemoryStore) insertAPIKey(entry *APIKey) (*APIKey, error) {
 		return nil, &APIKeyAlreadyExistsError{APIKeyID: entry.ID}
 	}
 	entry.CreatedAt = time.Now().Unix()
+	if err := s.disk.putAPIKey(entry); err != nil {
+		return nil, err
+	}
 	s.apiKeys[entry.ID] = entry
 	s.byHash[entry.HashedKey] = entry.ID
 	return entry.clone(), nil
@@ -138,12 +146,21 @@ func (s *InMemoryStore) SetAPIKeyActive(ctx context.Context, id string, active b
 	if !ok {
 		return &APIKeyNotFoundError{APIKeyID: id}
 	}
-	key.Active = active
+	next := key.clone()
+	next.Active = active
+	if err := s.disk.putAPIKey(next); err != nil {
+		return err
+	}
+	s.apiKeys[id] = next
 	return nil
 }
 
 // ResolveByAPIKey resolves a plaintext key (optionally "Bearer "-prefixed)
-// to a copy of its active API key record and records its last use.
+// to a copy of its active API key record and records its last use. With
+// persistence enabled the last-use time is persisted at most once per
+// LastUsedPersistInterval per key; a failure to persist it does not fail
+// the resolution but is reported through PersistErrors and the error
+// handler.
 func (s *InMemoryStore) ResolveByAPIKey(ctx context.Context, apiKey string) (*APIKey, error) {
 	raw := normalizeAPIKey(apiKey)
 	if raw == "" {
@@ -151,17 +168,24 @@ func (s *InMemoryStore) ResolveByAPIKey(ctx context.Context, apiKey string) (*AP
 	}
 	h := HashAPIKey(raw)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	id, ok := s.byHash[h]
 	if !ok {
+		s.mu.Unlock()
 		return nil, ErrAPIKeyNotFound
 	}
 	key := s.apiKeys[id]
 	if key == nil || !key.Active {
+		s.mu.Unlock()
 		return nil, ErrAPIKeyNotFound
 	}
 	key.LastUsedAt = time.Now().Unix()
-	return key.clone(), nil
+	handler, err := s.disk.touchAPIKey(key)
+	out := key.clone()
+	s.mu.Unlock()
+	if handler != nil {
+		handler(err)
+	}
+	return out, nil
 }
 
 // ListAPIKeys returns copies of all API keys.
@@ -202,6 +226,9 @@ func (s *InMemoryStore) CreateOrganization(ctx context.Context, org *Organizatio
 		return nil, &TenantAlreadyExistsError{TenantID: org.ID}
 	}
 	org.CreatedAt = time.Now().Unix()
+	if err := s.disk.put(BucketOrganizations, string(org.ID), org); err != nil {
+		return nil, err
+	}
 	s.orgs[org.ID] = cloneOrg(org)
 	return cloneOrg(org), nil
 }
@@ -241,6 +268,9 @@ func (s *InMemoryStore) CreateTeam(ctx context.Context, team *Team) (*Team, erro
 		}
 	}
 	team.CreatedAt = time.Now().Unix()
+	if err := s.disk.put(BucketTeams, string(team.ID), team); err != nil {
+		return nil, err
+	}
 	s.teams[team.ID] = cloneTeam(team)
 	return cloneTeam(team), nil
 }
@@ -271,6 +301,9 @@ func (s *InMemoryStore) CreateUser(ctx context.Context, user *User) (*User, erro
 	}
 	user.CreatedAt = time.Now().Unix()
 	c := *user
+	if err := s.disk.put(BucketUsers, string(c.ID), &c); err != nil {
+		return nil, err
+	}
 	s.users[user.ID] = &c
 	out := c
 	return &out, nil

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // HTTPPolicyRule describes a web-exposed compliance rule.
@@ -35,10 +37,12 @@ type HTTPPolicyRule struct {
 }
 
 // HTTPPolicyStore stores rules for HTTP evaluation. It is safe for
-// concurrent use.
+// concurrent use. Rules live in memory unless persistence is enabled (see
+// NewPersistentHTTPPolicyStore).
 type HTTPPolicyStore struct {
 	mu    sync.RWMutex
 	rules map[string]HTTPPolicyRule
+	disk  persist.Store // non-nil when persistence is enabled
 }
 
 // PolicyDecision describes evaluation result.
@@ -115,26 +119,47 @@ func normalizeRule(rule *HTTPPolicyRule) error {
 	return nil
 }
 
-// UpsertRule validates and adds or updates a rule.
+// UpsertRule validates and adds or updates a rule. With persistence enabled
+// the rule is written durably first; a write failure (matching
+// ErrPersistence) leaves the store unchanged.
 func (s *HTTPPolicyStore) UpsertRule(rule HTTPPolicyRule) error {
 	if err := normalizeRule(&rule); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.disk != nil {
+		if err := s.disk.Put(BucketHTTPRules, rule.ID, rule); err != nil {
+			return fmt.Errorf("%w: %v", ErrPersistence, err)
+		}
+	}
 	s.rules[rule.ID] = rule
 	return nil
 }
 
-// DeleteRule removes a rule by id.
+// DeleteRule removes a rule by id and reports whether it existed. With
+// persistence enabled a failed write keeps the rule and returns false; use
+// RemoveRule to obtain the error.
 func (s *HTTPPolicyStore) DeleteRule(id string) bool {
+	ok, err := s.RemoveRule(id)
+	return ok && err == nil
+}
+
+// RemoveRule removes a rule by id. It reports whether the rule existed and
+// any persistence error (matching ErrPersistence; the rule is then kept).
+func (s *HTTPPolicyStore) RemoveRule(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.rules[id]; !ok {
-		return false
+		return false, nil
+	}
+	if s.disk != nil {
+		if err := s.disk.Delete(BucketHTTPRules, id); err != nil {
+			return true, fmt.Errorf("%w: %v", ErrPersistence, err)
+		}
 	}
 	delete(s.rules, id)
-	return true
+	return true, nil
 }
 
 // GetRule returns a rule by id.
@@ -220,6 +245,10 @@ func HTTPPolicyHandler(store *HTTPPolicyStore) http.HandlerFunc {
 				return
 			}
 			if err := store.UpsertRule(rule); err != nil {
+				if errors.Is(err, ErrPersistence) {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy store unavailable"})
+					return
+				}
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
@@ -242,7 +271,12 @@ func HTTPPolicyHandler(store *HTTPPolicyStore) http.HandlerFunc {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing id"})
 				return
 			}
-			if !store.DeleteRule(id) {
+			ok, err := store.RemoveRule(id)
+			if err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy store unavailable"})
+				return
+			}
+			if !ok {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 				return
 			}

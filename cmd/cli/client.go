@@ -316,6 +316,12 @@ func (c *apiClient) call(ctx context.Context, method, path string, query url.Val
 	if err != nil {
 		return nil, err
 	}
+	return c.send(req)
+}
+
+// send executes a prepared request and returns the (bounded) body of a 2xx
+// response; other statuses become an *apiError.
+func (c *apiClient) send(req *http.Request) ([]byte, error) {
 	resp, err := c.do(req)
 	if err != nil {
 		return nil, err
@@ -323,10 +329,10 @@ func (c *apiClient) call(ctx context.Context, method, path string, query url.Val
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: reading response: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: reading response: %w", req.Method, req.URL.Path, err)
 	}
 	if len(data) > maxResponseBytes {
-		return nil, fmt.Errorf("%s %s: response larger than %d bytes", method, path, maxResponseBytes)
+		return nil, fmt.Errorf("%s %s: response larger than %d bytes", req.Method, req.URL.Path, maxResponseBytes)
 	}
 	return data, nil
 }
@@ -474,43 +480,9 @@ func renderResult(cmd *cobra.Command, raw []byte, defFormat string, columns []st
 	}
 	switch t := v.(type) {
 	case []any:
-		if len(t) == 0 {
-			_, err := fmt.Fprintln(w, "(none)")
-			return err
-		}
-		cols := columns
-		if len(cols) == 0 {
-			cols = collectKeys(t)
-		}
-		rows := make([][]string, 0, len(t))
-		for _, item := range t {
-			m, ok := item.(map[string]any)
-			if !ok {
-				rows = append(rows, []string{formatCell(item)})
-				continue
-			}
-			row := make([]string, len(cols))
-			for i, c := range cols {
-				row[i] = formatCell(lookupField(m, c))
-			}
-			rows = append(rows, row)
-		}
-		headers := make([]string, len(cols))
-		for i, c := range cols {
-			headers[i] = strings.ToUpper(c)
-		}
-		return writeTable(w, headers, rows)
+		return writeItemsTable(w, t, columns)
 	case map[string]any:
-		keys := make([]string, 0, len(t))
-		for k := range t {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		rows := make([][]string, 0, len(keys))
-		for _, k := range keys {
-			rows = append(rows, []string{k, formatCell(t[k])})
-		}
-		return writeTable(w, []string{"FIELD", "VALUE"}, rows)
+		return writeFieldTable(w, t)
 	case nil:
 		_, err := fmt.Fprintln(w, "(none)")
 		return err
@@ -518,6 +490,51 @@ func renderResult(cmd *cobra.Command, raw []byte, defFormat string, columns []st
 		_, err := fmt.Fprintln(w, formatCell(t))
 		return err
 	}
+}
+
+// writeItemsTable renders a list of JSON objects as a table with the given
+// columns (all keys when columns is empty).
+func writeItemsTable(w io.Writer, items []any, columns []string) error {
+	if len(items) == 0 {
+		_, err := fmt.Fprintln(w, "(none)")
+		return err
+	}
+	cols := columns
+	if len(cols) == 0 {
+		cols = collectKeys(items)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			rows = append(rows, []string{formatCell(item)})
+			continue
+		}
+		row := make([]string, len(cols))
+		for i, c := range cols {
+			row[i] = formatCell(lookupField(m, c))
+		}
+		rows = append(rows, row)
+	}
+	headers := make([]string, len(cols))
+	for i, c := range cols {
+		headers[i] = strings.ToUpper(c)
+	}
+	return writeTable(w, headers, rows)
+}
+
+// writeFieldTable renders one JSON object as a sorted FIELD/VALUE table.
+func writeFieldTable(w io.Writer, m map[string]any) error {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	rows := make([][]string, 0, len(keys))
+	for _, k := range keys {
+		rows = append(rows, []string{k, formatCell(m[k])})
+	}
+	return writeTable(w, []string{"FIELD", "VALUE"}, rows)
 }
 
 // lookupField finds a key case-insensitively (some server structs lack JSON
@@ -603,6 +620,11 @@ func maskSecret(s string) string {
 // symlink at the destination, and writes via a temp file + rename so a
 // partially written file is never left behind.
 func writeFileSafely(path string, data []byte, perm os.FileMode, force bool) error {
+	return writeStreamSafely(path, bytes.NewReader(data), perm, force)
+}
+
+// writeStreamSafely is writeFileSafely for a stream of unknown size.
+func writeStreamSafely(path string, src io.Reader, perm os.FileMode, force bool) error {
 	path = filepath.Clean(path)
 	if fi, err := os.Lstat(path); err == nil {
 		if !force {
@@ -629,7 +651,7 @@ func writeFileSafely(path string, data []byte, perm os.FileMode, force bool) err
 		cleanup()
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := io.Copy(tmp, src); err != nil {
 		tmp.Close()
 		cleanup()
 		return err

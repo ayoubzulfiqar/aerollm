@@ -19,7 +19,7 @@ import (
 type anthropicRequest struct {
 	Model         string             `json:"model"`
 	MaxTokens     int                `json:"max_tokens"`
-	System        json.RawMessage    `json:"system,omitempty"`
+	System        json.RawMessage    `json:"system,omitempty" swaggertype:"string"`
 	Messages      []anthropicMessage `json:"messages"`
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
@@ -38,7 +38,7 @@ type anthropicRequest struct {
 
 type anthropicMessage struct {
 	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Content json.RawMessage `json:"content" swaggertype:"string"`
 }
 
 type anthropicBlock struct {
@@ -47,9 +47,9 @@ type anthropicBlock struct {
 	Source       *anthropicSource     `json:"source,omitempty"`
 	ID           string               `json:"id,omitempty"`
 	Name         string               `json:"name,omitempty"`
-	Input        json.RawMessage      `json:"input,omitempty"`
+	Input        json.RawMessage      `json:"input,omitempty" swaggertype:"object"`
 	ToolUseID    string               `json:"tool_use_id,omitempty"`
-	Content      json.RawMessage      `json:"content,omitempty"`
+	Content      json.RawMessage      `json:"content,omitempty" swaggertype:"string"`
 	IsError      bool                 `json:"is_error,omitempty"`
 	CacheControl *models.CacheControl `json:"cache_control,omitempty"`
 }

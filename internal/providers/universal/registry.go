@@ -190,13 +190,20 @@ func NewAdapterFromConfig(cfg config.ProviderConfig) (ProviderAdapter, error) {
 		client = &http.Client{Timeout: cfg.Timeout}
 	}
 	switch cfg.Type {
-	case "openai", "openai-compatible", "local", "vllm", "ollama", "groq", "cohere", "deepseek", "gemini", "azure":
+	case "azure":
+		if strings.TrimSpace(cfg.BaseURL) == "" {
+			return nil, fmt.Errorf("provider %q: azure requires base_url (https://<resource>.openai.azure.com with api_version for deployment URLs, or https://<resource>.openai.azure.com/openai/v1)", name)
+		}
+		a := NewAzureAdapter(name, cfg.APIKey, cfg.BaseURL, cfg.APIVersion)
+		if a.baseErr != nil {
+			return nil, a.baseErr
+		}
+		a.SetHTTPClient(client)
+		return a, nil
+	case "openai", "openai-compatible", "local", "vllm", "ollama", "groq", "cohere", "deepseek", "gemini":
 		typ := cfg.Type
 		if typ == "gemini" {
 			typ = "google"
-		}
-		if typ == "azure" && strings.TrimSpace(cfg.BaseURL) == "" {
-			return nil, fmt.Errorf("provider %q: azure requires base_url (https://<resource>.openai.azure.com/openai/v1)", name)
 		}
 		base := cfg.Endpoint()
 		if typ == "local" || typ == "vllm" || typ == "ollama" {
@@ -318,6 +325,40 @@ func (r *ProviderRegistry) All() []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// ProbeAll runs the active health probe (providers.Prober) of every
+// registered adapter that supports one, concurrently, and returns each
+// probed adapter's result by name (nil = healthy). Adapters without a probe
+// are omitted. Results are also reflected in each adapter's Health(). Each
+// probe is bounded by providers.DefaultProbeTimeout and by ctx.
+func (r *ProviderRegistry) ProbeAll(ctx context.Context) map[string]error {
+	r.mu.RLock()
+	probers := make(map[string]providers.Prober, len(r.adapters))
+	for name, a := range r.adapters {
+		if p, ok := a.(providers.Prober); ok {
+			probers[name] = p
+		}
+	}
+	r.mu.RUnlock()
+	out := make(map[string]error, len(probers))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, p := range probers {
+		wg.Add(1)
+		go func(name string, p providers.Prober) {
+			defer wg.Done()
+			err := p.Probe(ctx)
+			if errors.Is(err, providers.ErrProbeNotSupported) {
+				return
+			}
+			mu.Lock()
+			out[name] = err
+			mu.Unlock()
+		}(name, p)
+	}
+	wg.Wait()
 	return out
 }
 
@@ -475,6 +516,14 @@ func (m *modelRewriteAdapter) StreamChatCompletions(ctx context.Context, req *mo
 		return sp.StreamChatCompletions(ctx, m.withModel(req))
 	}
 	return nil, providers.ErrStreamingNotSupported
+}
+
+// Probe forwards to the underlying adapter's active health probe.
+func (m *modelRewriteAdapter) Probe(ctx context.Context) error {
+	if p, ok := m.ProviderAdapter.(providers.Prober); ok {
+		return p.Probe(ctx)
+	}
+	return providers.ErrProbeNotSupported
 }
 
 func (m *modelRewriteAdapter) unsupported(what string) error {

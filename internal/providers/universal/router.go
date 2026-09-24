@@ -25,7 +25,7 @@ func (a *LegacyProviderAdapter) Type() string { return string(a.inner.Type()) }
 // Health reports the wrapped provider's health.
 func (a *LegacyProviderAdapter) Health() map[string]interface{} {
 	h := a.inner.Health()
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"name":         a.inner.Name(),
 		"type":         string(a.inner.Type()),
 		"healthy":      h.Healthy && !h.CircuitOpen,
@@ -33,9 +33,25 @@ func (a *LegacyProviderAdapter) Health() map[string]interface{} {
 		"failures":     h.Failures,
 		"last_checked": h.LastChecked,
 	}
+	if h.LastProbe != 0 {
+		m["last_probe"] = h.LastProbe
+	}
+	if h.ProbeError != "" {
+		m["probe_error"] = h.ProbeError
+	}
+	return m
 }
 
 func (a *LegacyProviderAdapter) Close() error { return a.inner.Close() }
+
+// Probe runs the wrapped provider's active health probe (see
+// providers.Prober), or returns providers.ErrProbeNotSupported.
+func (a *LegacyProviderAdapter) Probe(ctx context.Context) error {
+	if p, ok := a.inner.(providers.Prober); ok {
+		return p.Probe(ctx)
+	}
+	return providers.ErrProbeNotSupported
+}
 
 func (a *LegacyProviderAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
 	return a.inner.ChatCompletions(ctx, req)

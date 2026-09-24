@@ -303,60 +303,6 @@ func (p *GCPProvisioner) SetMaxNodes(n int) error {
 	return p.sim.setMaxNodes(n)
 }
 
-// shellSafe reports whether s can be emitted unquoted in a shell script.
-func shellSafe(s string) bool {
-	return s != "" && validIdent(s, len(s), "._:/@,=+-")
-}
-
-// shellValue returns s as a single shell word. Control characters (including
-// newlines) are stripped; values containing anything outside a conservative
-// safe charset are single-quoted with embedded quotes escaped.
-func shellValue(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
-	if shellSafe(s) {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// BootstrapScript generates a cloud-init script that installs the AeroLLM Edge
-// Companion. nodeID and meshPeers are shell-escaped so they cannot inject
-// commands; use BootstrapScriptE to reject malformed values instead.
-func BootstrapScript(meshPeers []string, nodeID string) string {
-	peers := strings.Join(meshPeers, ",")
-	return fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-export AEROLLM_MESH_ENABLED=true
-export AEROLLM_MESH_NODE_ID=%s
-export AEROLLM_MESH_PEERS=%s
-curl -fsSL https://install.aerollm.io/edge.sh | bash
-systemctl enable --now aerollm-edge
-`, shellValue(nodeID), shellValue(peers))
-}
-
-// BootstrapScriptE validates nodeID ([A-Za-z0-9._-], 1-128 chars) and each
-// peer (host[:port] or URL charset, 1-253 chars, at most 64 peers) and returns
-// the bootstrap script, or ErrInvalidSpec.
-func BootstrapScriptE(meshPeers []string, nodeID string) (string, error) {
-	if !validIdent(nodeID, 128, "._-") {
-		return "", fmt.Errorf("%w: node id must be 1-128 chars of [A-Za-z0-9._-]", ErrInvalidSpec)
-	}
-	if len(meshPeers) > 64 {
-		return "", fmt.Errorf("%w: at most 64 mesh peers", ErrInvalidSpec)
-	}
-	for _, p := range meshPeers {
-		if !validIdent(p, 253, "._:/@[]-") {
-			return "", fmt.Errorf("%w: invalid mesh peer %q", ErrInvalidSpec, p)
-		}
-	}
-	return BootstrapScript(meshPeers, nodeID), nil
-}
-
 // MetaAgentInfraLoop polls mesh compute deficit and triggers provisioning.
 // It is safe for concurrent use: at most one provision is in flight, and
 // provisions are separated by a cooldown and bounded by a node limit.

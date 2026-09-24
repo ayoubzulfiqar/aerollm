@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -123,8 +124,14 @@ func NewDiscovery(cfg DiscoveryConfig) *Discovery {
 	return d
 }
 
-// Self returns the descriptor this node announces.
-func (d *Discovery) Self() PeerDescriptor { return d.self }
+// Self returns the descriptor this node announces. When the bind address
+// used port 0, the address reports the port actually bound once Start has
+// run (for listeners that expose it, such as TLSTransport's).
+func (d *Discovery) Self() PeerDescriptor {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return copyPeer(d.self)
+}
 
 // Handle registers h for inbound envelopes of stateType, replacing any previous
 // handler. The reserved AnnounceStateType cannot be overridden.
@@ -155,11 +162,20 @@ func (d *Discovery) Start(ctx context.Context) {
 	d.cancel = cancel
 
 	if d.cfg.Transport != nil && d.self.ID != "" {
-		l, err := d.cfg.Transport.Listen(runCtx, d.self.Address)
+		// Listen on the bind address; the advertised address may differ
+		// (NAT, load balancer, public name).
+		listenAddr := d.cfg.BindAddress
+		if listenAddr == "" {
+			listenAddr = d.self.Address
+		}
+		l, err := d.cfg.Transport.Listen(runCtx, listenAddr)
 		if err != nil {
 			d.stats.otherError(fmt.Errorf("mesh: listen: %w", err))
 		} else {
 			d.listener = l
+			if d.self.Address == listenAddr {
+				d.self.Address = resolveBoundAddress(d.self.Address, l)
+			}
 			d.wg.Add(1)
 			go d.acceptLoop(runCtx, l)
 		}
@@ -169,6 +185,32 @@ func (d *Discovery) Start(ctx context.Context) {
 	// Registered last: if ctx is already done, Stop runs in its own goroutine
 	// and blocks on d.mu until Start returns.
 	d.stopAfter = context.AfterFunc(ctx, d.Stop)
+}
+
+// resolveBoundAddress replaces port 0 in a configured address with the port
+// the listener actually bound, keeping the configured host (or the bound one
+// when none was configured). Other addresses are returned unchanged.
+func resolveBoundAddress(configured string, l PeerListener) string {
+	al, ok := l.(interface{ Addr() net.Addr })
+	if !ok {
+		return configured
+	}
+	hostport, err := ParseTCPAddress(configured)
+	if err != nil {
+		return configured
+	}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil || port != "0" {
+		return configured
+	}
+	boundHost, boundPort, err := net.SplitHostPort(al.Addr().String())
+	if err != nil {
+		return configured
+	}
+	if host == "" {
+		host = boundHost
+	}
+	return net.JoinHostPort(host, boundPort)
 }
 
 // Stop halts discovery and closes the listener. It is idempotent, does not
@@ -348,7 +390,7 @@ func (d *Discovery) serveConn(ctx context.Context, conn PeerConn) {
 }
 
 func (d *Discovery) dispatch(ctx context.Context, env Envelope) {
-	if env.From == "" || env.From == d.self.ID {
+	if env.From == "" || env.From == d.cfg.LocalID || env.From == d.self.ID {
 		return
 	}
 	d.stats.received()
@@ -400,10 +442,11 @@ func (d *Discovery) refreshLoop(ctx context.Context) {
 
 func (d *Discovery) announce(ctx context.Context) {
 	d.stats.round()
-	if d.cfg.Transport == nil || d.self.ID == "" || d.self.Address == "" {
+	self := d.Self()
+	if d.cfg.Transport == nil || self.ID == "" || self.Address == "" {
 		return
 	}
-	payload, err := json.Marshal(d.self)
+	payload, err := json.Marshal(self)
 	if err != nil {
 		d.stats.otherError(err)
 		return
@@ -413,12 +456,49 @@ func (d *Discovery) announce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := sendTo(ctx, d.cfg.Transport, peer, env, d.cfg.DialTimeout); err != nil {
+		remote, err := sendToPeer(ctx, d.cfg.Transport, peer, env, d.cfg.DialTimeout)
+		if err != nil {
 			d.stats.sendError(err)
 			continue
 		}
 		d.stats.sent()
+		if remote != "" && remote != peer.ID {
+			d.rekeyPeer(peer, remote)
+		}
 	}
+}
+
+// rekeyPeer replaces a bare-address seed (id == address, see
+// MeshConfig.PeerDescriptors) with the authenticated id the transport
+// reported for it, so the peer is tracked (and synced) once under its real
+// id. Entries with a real id are never re-keyed.
+func (d *Discovery) rekeyPeer(old PeerDescriptor, remote PeerID) {
+	if !identityUnknown(old) {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	e, ok := d.peers[old.ID]
+	if !ok || e.desc.Address != old.Address {
+		return
+	}
+	delete(d.peers, old.ID)
+	if remote == d.cfg.LocalID || remote == d.self.ID {
+		return // the seed was this node itself
+	}
+	if cur, ok := d.peers[remote]; ok {
+		cur.seed = cur.seed || e.seed
+		cur.lastSeen = time.Now()
+		return
+	}
+	desc := e.desc
+	desc.ID = remote
+	clean, err := sanitizePeer(desc)
+	if err != nil {
+		return
+	}
+	d.peers[remote] = &peerEntry{desc: clean, seed: e.seed, lastSeen: time.Now()}
+	d.notifyLocked(clean)
 }
 
 // SyncWorker periodically pushes the local state snapshot to every discovered

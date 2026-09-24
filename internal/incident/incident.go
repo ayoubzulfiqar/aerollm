@@ -19,12 +19,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // Severity levels for incidents.
@@ -133,13 +136,15 @@ type Event struct {
 	Incident Incident `json:"incident"`
 }
 
-// Store manages incidents in memory.
+// Store manages incidents in memory, optionally writing through to a
+// durable persist.Store (see EnablePersistence).
 type Store struct {
 	mu        sync.RWMutex
 	incidents map[string]Incident
 	max       int
 	now       func() time.Time
 	hook      func(Event)
+	ps        persist.Store // nil unless persistence is enabled
 }
 
 // NewStore creates an incident store holding at most DefaultMaxIncidents.
@@ -252,22 +257,34 @@ func (s *Store) Create(incident Incident) (Incident, error) {
 		s.mu.Unlock()
 		return Incident{}, ErrConflict
 	}
-	if len(s.incidents) >= s.max && !s.evictLocked() {
-		s.mu.Unlock()
-		return Incident{}, ErrStoreFull
+	victim := ""
+	if len(s.incidents) >= s.max {
+		var ok bool
+		if victim, ok = s.victimLocked(); !ok {
+			s.mu.Unlock()
+			return Incident{}, ErrStoreFull
+		}
 	}
 	incident.CreatedAt = now
 	incident.UpdatedAt = now
 	incident.AcknowledgedAt, incident.ResolvedAt, incident.ClosedAt = time.Time{}, time.Time{}, time.Time{}
 	stampStatus(&incident, status, now)
+	if err := s.persistCreateLocked(incident, victim); err != nil {
+		s.mu.Unlock()
+		return Incident{}, err
+	}
+	if victim != "" {
+		delete(s.incidents, victim)
+	}
 	s.incidents[incident.ID] = incident
 	s.mu.Unlock()
 	s.emit(Event{Type: "created", Incident: incident})
 	return incident, nil
 }
 
-// evictLocked removes the least recently updated closed/resolved incident.
-func (s *Store) evictLocked() bool {
+// victimLocked returns the least recently updated closed/resolved incident,
+// the one evicted when the store is full.
+func (s *Store) victimLocked() (string, bool) {
 	var victim string
 	var oldest time.Time
 	for id, inc := range s.incidents {
@@ -278,11 +295,7 @@ func (s *Store) evictLocked() bool {
 			victim, oldest = id, inc.UpdatedAt
 		}
 	}
-	if victim == "" {
-		return false
-	}
-	delete(s.incidents, victim)
-	return true
+	return victim, victim != ""
 }
 
 // Get retrieves an incident by id.
@@ -385,6 +398,10 @@ func (s *Store) Patch(id string, p Patch) (Incident, error) {
 		stampStatus(&next, next.Status, now)
 	}
 	next.UpdatedAt = now
+	if err := s.putLocked(next); err != nil {
+		s.mu.Unlock()
+		return Incident{}, err
+	}
 	s.incidents[id] = next
 	s.mu.Unlock()
 	ev := Event{Type: "updated", Incident: next}
@@ -410,16 +427,35 @@ func (s *Store) Resolve(id string) bool {
 	return err == nil
 }
 
-// Delete removes an incident and reports whether it existed.
+// Delete removes an incident and reports whether it existed and was
+// removed; a persistence failure is logged and reported as false. Use
+// DeleteIncident to observe the error.
 func (s *Store) Delete(id string) bool {
+	ok, err := s.DeleteIncident(id)
+	if err != nil {
+		slog.Warn("incident: delete not persisted", "id", id, "error", err)
+		return false
+	}
+	return ok
+}
+
+// DeleteIncident removes an incident and reports whether it existed. On a
+// persistence error (wrapping ErrPersistence) the incident is kept.
+func (s *Store) DeleteIncident(id string) (bool, error) {
 	s.mu.Lock()
 	inc, ok := s.incidents[id]
-	delete(s.incidents, id)
+	if ok {
+		if err := s.deleteLocked(id); err != nil {
+			s.mu.Unlock()
+			return false, err
+		}
+		delete(s.incidents, id)
+	}
 	s.mu.Unlock()
 	if ok {
 		s.emit(Event{Type: "deleted", Incident: inc})
 	}
-	return ok
+	return ok, nil
 }
 
 func newID(prefix string) string {
@@ -556,7 +592,12 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "missing id")
 				return
 			}
-			if !store.Delete(id) {
+			deleted, err := store.DeleteIncident(id)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			if !deleted {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
@@ -603,6 +644,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrStoreFull):
 		writeError(w, http.StatusInsufficientStorage, err.Error())
+	case errors.Is(err, ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "persistence failure")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

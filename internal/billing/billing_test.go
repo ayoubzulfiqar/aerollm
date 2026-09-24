@@ -6,10 +6,12 @@ import (
 	"errors"
 	"math"
 	"net/url"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 	"github.com/stripe/stripe-go/v80"
 	"github.com/stripe/stripe-go/v80/form"
 )
@@ -217,46 +219,180 @@ func (f *fakeStripeBackend) CallMultipart(string, string, string, string, *bytes
 }
 func (f *fakeStripeBackend) SetMaxNetworkRetries(int64) {}
 
-func TestStripeProviderSendsIdempotentMeterEvents(t *testing.T) {
+func TestStripeProviderAggregatesIntegerMeterEvents(t *testing.T) {
 	fb := &fakeStripeBackend{}
 	p := NewStripeProvider("sk_test_123").WithBackend(fb)
 	ts := time.Unix(1_790_000_000, 0)
 	err := p.SyncMeter(context.Background(), []MeterEntry{
 		{CustomerID: "cus_1", EventName: "tokens", Value: 1.5, Timestamp: ts},
 		{CustomerID: "cus_1", EventName: "tokens", Value: 0, Timestamp: ts},
-		{CustomerID: "cus_1", EventName: "tokens", Value: 7, ID: "fixed-id"},
+		{CustomerID: "cus_2", EventName: "tokens", Value: 3, Timestamp: ts},
+		{CustomerID: "cus_1", EventName: "tokens", Value: 7, ID: "fixed-id", Timestamp: ts.Add(time.Second)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(fb.calls) != 2 {
-		t.Fatalf("expected 2 calls (zero value skipped), got %d", len(fb.calls))
+		t.Fatalf("expected one event per customer/event pair, got %d", len(fb.calls))
 	}
 	c := fb.calls[0]
 	if c.path != "/v1/billing/meter_events" || c.key != "sk_test_123" {
 		t.Fatalf("unexpected call %+v", c)
 	}
-	if c.form.Get("payload[value]") != "1.5" || c.form.Get("payload[stripe_customer_id]") != "cus_1" || c.form.Get("timestamp") != "1790000000" {
+	// 1.5 + 7 = 8.5 -> 8 whole units now, 0.5 carried.
+	if c.form.Get("payload[value]") != "8" || c.form.Get("payload[stripe_customer_id]") != "cus_1" || c.form.Get("timestamp") != "1790000001" {
 		t.Fatalf("unexpected form %v", c.form)
 	}
-	if c.form.Get("identifier") == "" || c.idem == "" {
-		t.Fatal("identifier and idempotency key are required")
+	if c.form.Get("identifier") == "" || c.idem != "meter-"+c.form.Get("identifier") {
+		t.Fatal("identifier and matching idempotency key are required")
 	}
-	if fb.calls[1].form.Get("identifier") != "fixed-id" {
-		t.Fatalf("explicit ID must be used as identifier: %v", fb.calls[1].form)
+	if fb.calls[1].form.Get("payload[value]") != "3" || fb.calls[1].form.Get("payload[stripe_customer_id]") != "cus_2" {
+		t.Fatalf("second pair: %v", fb.calls[1].form)
+	}
+	if rem := p.CarriedRemainders(); len(rem) != 1 || rem["cus_1/tokens"] != 0.5 {
+		t.Fatalf("fraction must be carried: %v", rem)
 	}
 	if stripe.Key == "sk_test_123" {
 		t.Fatal("provider must not mutate the global stripe.Key")
 	}
 
-	// Retry of the same timestamped entry reuses the identifier.
+	// The carried half unit completes with the next half.
+	if err := p.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus_1", EventName: "tokens", Value: 0.5, Timestamp: ts.Add(time.Minute)}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.calls) != 3 || fb.calls[2].form.Get("payload[value]") != "1" {
+		t.Fatalf("carried remainder must be billed: %+v", fb.calls[2:])
+	}
+	if rem := p.CarriedRemainders(); len(rem) != 0 {
+		t.Fatalf("no remainder expected, got %v", rem)
+	}
+}
+
+func TestStripeProviderRetriesAreIdempotent(t *testing.T) {
+	fb := &fakeStripeBackend{}
+	p := NewStripeProvider("sk_test_123").WithBackend(fb)
+	ts := time.Unix(1_790_000_000, 0)
+	batch := []MeterEntry{
+		{CustomerID: "cus_1", EventName: "tokens", Value: 1, Timestamp: ts},
+		{CustomerID: "cus_1", EventName: "tokens", Value: 2, Timestamp: ts},
+	}
+	_ = p.SyncMeter(context.Background(), batch)
+	_ = p.SyncMeter(context.Background(), batch)
+	if len(fb.calls) != 1 {
+		t.Fatalf("a retried batch must not be billed twice, got %d calls", len(fb.calls))
+	}
+	// Explicit IDs are billed at most once, even in another batch.
+	_ = p.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus_1", EventName: "tokens", Value: 5, ID: "evt-1"}, {CustomerID: "cus_1", EventName: "tokens", Value: 5, ID: "evt-1"}})
+	_ = p.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus_1", EventName: "tokens", Value: 5, ID: "evt-1"}})
+	if len(fb.calls) != 2 || fb.calls[1].form.Get("payload[value]") != "5" || fb.calls[1].form.Get("identifier") != "evt-1" {
+		t.Fatalf("explicit IDs must be de-duplicated: %+v", fb.calls)
+	}
+
+	// A failed send is retried with identical parameters even when other
+	// usage of the same pair was synced in between.
+	fb2 := &fakeStripeBackend{fail: true}
+	p2 := NewStripeProvider("sk").WithBackend(fb2)
+	first := []MeterEntry{{CustomerID: "c", EventName: "e", Value: 2.5, Timestamp: ts}}
+	if err := p2.SyncMeter(context.Background(), first); err == nil {
+		t.Fatal("stripe error must propagate")
+	}
+	fb2.fail = false
+	if err := p2.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "c", EventName: "e", Value: 1.75, Timestamp: ts.Add(time.Second)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p2.SyncMeter(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb2.calls) != 3 {
+		t.Fatalf("expected 3 calls, got %d", len(fb2.calls))
+	}
+	if a, b := fb2.calls[0], fb2.calls[2]; a.idem != b.idem || a.form.Get("payload[value]") != b.form.Get("payload[value]") || a.form.Get("payload[value]") != "2" {
+		t.Fatalf("retry must reuse the value and idempotency key: %v / %v", a.form, b.form)
+	}
+	// Units sent plus the carried remainder always equal the usage
+	// (2.5 + 1.75): the retry sent 2, the other sync 1, 1.25 is carried.
+	var sent int64
+	for _, c := range fb2.calls[1:] {
+		v, _ := strconv.ParseInt(c.form.Get("payload[value]"), 10, 64)
+		sent += v
+	}
+	if rem := p2.CarriedRemainders()["c/e"]; float64(sent)+rem != 4.25 {
+		t.Fatalf("units sent (%d) + carried (%v) must equal usage 4.25", sent, rem)
+	}
+}
+
+func TestStripeProviderUnitScales(t *testing.T) {
+	fb := &fakeStripeBackend{}
+	p := NewStripeProvider("sk").WithBackend(fb).WithUnitScale("cost_usd", MicroUSDPerUSD)
+	ts := time.Unix(1_790_000_000, 0)
+	var entries []MeterEntry
+	for i := 0; i < 3; i++ {
+		entries = append(entries, MeterEntry{CustomerID: "cus", EventName: "cost_usd", Value: 0.0000015, Timestamp: ts.Add(time.Duration(i) * time.Second)})
+	}
+	if err := p.SyncMeter(context.Background(), entries); err != nil {
+		t.Fatal(err)
+	}
+	// 3 x $0.0000015 = 4.5 micro-dollars -> 4 sent, 0.5 carried.
+	if len(fb.calls) != 1 || fb.calls[0].form.Get("payload[value]") != "4" {
+		t.Fatalf("unexpected calls %+v", fb.calls)
+	}
+	if rem := p.CarriedRemainders()["cus/cost_usd"]; rem < 0.4999 || rem > 0.5001 {
+		t.Fatalf("expected 0.5 micro-dollar carried, got %v", rem)
+	}
+	// Below one unit nothing is sent but the fraction accumulates.
+	_ = p.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus", EventName: "cost_usd", Value: 0.0000002, Timestamp: ts.Add(time.Hour)}})
+	if len(fb.calls) != 1 {
+		t.Fatal("sub-unit usage must be carried, not sent")
+	}
+	if rem := p.CarriedRemainders()["cus/cost_usd"]; rem < 0.6999 || rem > 0.7001 {
+		t.Fatalf("expected 0.7 carried, got %v", rem)
+	}
+	if err := NewStripeProvider("sk").WithBackend(fb).WithUnitScale("e", -1).SyncMeter(context.Background(), []MeterEntry{{CustomerID: "c", EventName: "e", Value: 1}}); !errors.Is(err, ErrInvalidMeterEntry) {
+		t.Fatalf("invalid scale must be rejected: %v", err)
+	}
+	if err := NewStripeProvider("sk").WithBackend(fb).WithUnitScale("e", 1e9).SyncMeter(context.Background(), []MeterEntry{{CustomerID: "c", EventName: "e", Value: 1e9}}); !errors.Is(err, ErrInvalidMeterEntry) {
+		t.Fatalf("values beyond exact integer range must be rejected: %v", err)
+	}
+}
+
+func TestStripeProviderPersistsRemaindersAndSentIDs(t *testing.T) {
+	ps := persist.NewMemory()
+	fb := &fakeStripeBackend{}
+	p := NewStripeProvider("sk").WithBackend(fb)
+	ts := time.Unix(1_790_000_000, 0)
+	// State accumulated before persistence is enabled is kept.
+	_ = p.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus", EventName: "tokens", Value: 0.25, Timestamp: ts}})
+	if err := p.EnablePersistence(ps); err != nil {
+		t.Fatal(err)
+	}
+	batch := []MeterEntry{{CustomerID: "cus", EventName: "tokens", Value: 1.5, ID: "u-1", Timestamp: ts}}
+	if err := p.SyncMeter(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.calls) != 1 || fb.calls[0].form.Get("payload[value]") != "1" {
+		t.Fatalf("unexpected calls %+v", fb.calls)
+	}
+
+	// Restart: a new provider over the same store keeps the 0.75 carried
+	// and does not bill the retried batch again.
 	fb2 := &fakeStripeBackend{}
-	p2 := NewStripeProvider("sk_test_123").WithBackend(fb2)
-	e := []MeterEntry{{CustomerID: "cus_1", EventName: "tokens", Value: 1, Timestamp: ts}}
-	_ = p2.SyncMeter(context.Background(), e)
-	_ = p2.SyncMeter(context.Background(), e)
-	if fb2.calls[0].form.Get("identifier") != fb2.calls[1].form.Get("identifier") {
-		t.Fatal("identifier must be stable across retries")
+	p2 := NewStripeProvider("sk").WithBackend(fb2)
+	if err := p2.EnablePersistence(ps); err != nil {
+		t.Fatal(err)
+	}
+	if rem := p2.CarriedRemainders()["cus/tokens"]; rem != 0.75 {
+		t.Fatalf("remainder not restored: %v", rem)
+	}
+	_ = p2.SyncMeter(context.Background(), batch)
+	if len(fb2.calls) != 0 {
+		t.Fatalf("retry after restart must be de-duplicated, got %d calls", len(fb2.calls))
+	}
+	_ = p2.SyncMeter(context.Background(), []MeterEntry{{CustomerID: "cus", EventName: "tokens", Value: 0.25, Timestamp: ts.Add(time.Hour)}})
+	if len(fb2.calls) != 1 || fb2.calls[0].form.Get("payload[value]") != "1" {
+		t.Fatalf("carried 0.75 + 0.25 must bill one unit: %+v", fb2.calls)
+	}
+	if err := p2.EnablePersistence(nil); err == nil {
+		t.Fatal("nil store must be rejected")
 	}
 }
 

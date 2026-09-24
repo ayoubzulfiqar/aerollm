@@ -9,9 +9,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/agent"
@@ -27,6 +29,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/ledger"
 	"github.com/ayoubzulfiqar/aerollm/internal/meter"
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 	"github.com/ayoubzulfiqar/aerollm/internal/providers/universal"
 	"github.com/ayoubzulfiqar/aerollm/internal/ratelimit"
@@ -76,6 +79,13 @@ type app struct {
 	callbacks   *callbacks.CallbackManager
 	webhooks    *webhooks.WebhookDispatcher
 	readiness   *health.Registry
+	persist     persist.Store // nil when persistence is disabled
+	registry2   atomic.Pointer[universal.ProviderRegistry]
+	hookRunner  *wasmHooks
+
+	budgetPeriod   finops.BudgetPeriod
+	defaultBudgets sync.Map // key IDs that already received the default budget
+	virtualByID    sync.Map // key ID -> virtual key hash, for async (batch) spend
 
 	generatedAdminKey string
 
@@ -185,6 +195,7 @@ func (a *app) connectRedis(ctx context.Context, opts appOptions) error {
 	if opts.skipRedis || a.cfg.Redis.Addr == "" {
 		return nil
 	}
+	redis.SetLogger(&redisLogger{l: a.logger})
 	client := redis.NewClient(&redis.Options{
 		Addr:         a.cfg.Redis.Addr,
 		Password:     a.cfg.Redis.Password,
@@ -208,6 +219,36 @@ func (a *app) connectRedis(ctx context.Context, opts appOptions) error {
 	a.redis = client
 	a.onClose(func(context.Context) { _ = client.Close() })
 	a.logger.Info("redis connected", "addr", a.cfg.Redis.Addr)
+	return nil
+}
+
+// stateDir is where local state (bbolt databases, batch files) lives.
+func stateDir() string {
+	if d := os.Getenv("AEROLLM_STATE_DIR"); d != "" {
+		return d
+	}
+	return "./aerollm-state"
+}
+
+// openPersistence opens the durable store used by keys, budgets, secrets,
+// batches and the control-plane stores. With persistence disabled every
+// store stays in memory.
+func (a *app) openPersistence() error {
+	if !a.cfg.Persistence.Enabled {
+		a.logger.Warn("persistence disabled: keys, budgets, secrets and control-plane state are lost on restart")
+		return nil
+	}
+	path := a.cfg.Persistence.Path
+	if path == "" {
+		path = filepath.Join(stateDir(), "gateway.db")
+	}
+	ps, err := persist.OpenBolt(path)
+	if err != nil {
+		return fmt.Errorf("persistence: %w (is another gateway instance using %s? set persistence.path or disable persistence)", err, path)
+	}
+	a.persist = ps
+	a.onClose(func(context.Context) { _ = ps.Close() })
+	a.logger.Info("persistence enabled", "path", path)
 	return nil
 }
 
@@ -235,6 +276,9 @@ func newApp(parent context.Context, cfg *config.Config, logger *LoggerAdapter, o
 	a.trace = trace.NewProvider(trace.Config{ServiceName: cfg.Telemetry.ServiceName})
 
 	if err = a.connectRedis(ctx, opts); err != nil {
+		return nil, err
+	}
+	if err = a.openPersistence(); err != nil {
 		return nil, err
 	}
 
@@ -272,8 +316,12 @@ func (a *app) buildAuth(opts appOptions) error {
 
 	// The key manager's master key is an admin credential for the key API
 	// (virtual keys are stored as SHA-256 hashes, not derived from it).
-	a.keyManager = keymanager.NewManager(keymanager.NewInMemoryKeyStore(), adminKeys[0])
-	a.keyHandler = keymanager.NewKeyHandler(a.keyManager, nil, nil, a.logger.Func())
+	keys, users, teams, err := a.keyStores()
+	if err != nil {
+		return err
+	}
+	a.keyManager = keymanager.NewManager(keys, adminKeys[0])
+	a.keyHandler = keymanager.NewKeyHandler(a.keyManager, users, teams, a.logger.Func())
 	for _, k := range adminKeys {
 		a.keyHandler.AddAdminKey(k)
 	}
@@ -282,6 +330,32 @@ func (a *app) buildAuth(opts appOptions) error {
 	clientKeys = append(clientKeys, splitList(os.Getenv("AEROLLM_CLIENT_KEYS"))...)
 	a.auth = middleware.NewAuthenticator(adminKeys, clientKeys, a.keyManager)
 	return nil
+}
+
+// keyStores selects durable storage for virtual keys, users and teams:
+// Redis when available (shared by all replicas), else the local bbolt
+// store, else memory.
+func (a *app) keyStores() (keymanager.KeyStore, keymanager.UserStore, keymanager.TeamStore, error) {
+	switch {
+	case a.redis != nil:
+		return keymanager.NewRedisKeyStore(a.redis, "aerollm:"), keymanager.NewRedisUserStore(a.redis, "aerollm:"), keymanager.NewRedisTeamStore(a.redis, "aerollm:"), nil
+	case a.persist != nil:
+		ks, err := keymanager.NewPersistentKeyStore(a.persist)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("key store: %w", err)
+		}
+		us, err := keymanager.NewPersistentUserStore(a.persist)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("user store: %w", err)
+		}
+		ts, err := keymanager.NewPersistentTeamStore(a.persist)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("team store: %w", err)
+		}
+		return ks, us, ts, nil
+	default:
+		return keymanager.NewInMemoryKeyStore(), keymanager.NewInMemoryUserStore(), keymanager.NewInMemoryTeamStore(), nil
+	}
 }
 
 // registerEnvProviders registers providers configured through environment
@@ -315,6 +389,13 @@ func (a *app) registerEnvProviders() {
 // Providers without credentials (e.g. an unset ${OPENAI_API_KEY}) are
 // skipped so they cannot capture models and fail every request.
 func buildResolver(cfgs []config.ProviderConfig) (api.ModelResolverFunc, []string, error) {
+	res, _, skipped, err := buildRegistry(cfgs)
+	return res, skipped, err
+}
+
+// buildRegistry is buildResolver that also returns the registry (for health
+// probes).
+func buildRegistry(cfgs []config.ProviderConfig) (api.ModelResolverFunc, *universal.ProviderRegistry, []string, error) {
 	var usable []config.ProviderConfig
 	var skipped []string
 	for _, c := range cfgs {
@@ -326,7 +407,7 @@ func buildResolver(cfgs []config.ProviderConfig) (api.ModelResolverFunc, []strin
 	}
 	reg := universal.NewProviderRegistry()
 	if err := reg.RegisterFromConfig(usable); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	return func(model string) (providers.Provider, bool) {
 		adapter, err := reg.ResolveProviderByModel(model)
@@ -334,7 +415,7 @@ func buildResolver(cfgs []config.ProviderConfig) (api.ModelResolverFunc, []strin
 			return nil, false
 		}
 		return &universalAdapterBridge{inner: adapter}, true
-	}, skipped, nil
+	}, reg, skipped, nil
 }
 
 // buildGateway wires routing, caching, accounting and the API handler.
@@ -353,8 +434,9 @@ func (a *app) buildGateway() error {
 			ResetTimeout:     cfg.Router.CircuitBreak.ResetTimeout,
 			HalfOpenMaxCalls: cfg.Router.CircuitBreak.HalfOpenMaxCalls,
 		},
-		CostMap:     a.costMap,
-		MaxAttempts: cfg.Router.MaxAttempts,
+		CostMap:      a.costMap,
+		MaxAttempts:  cfg.Router.MaxAttempts,
+		MaxRetryWait: cfg.Router.MaxRetryWait,
 	})
 	a.registerEnvProviders()
 
@@ -364,6 +446,9 @@ func (a *app) buildGateway() error {
 		if err := a.registry.Register(tool); err != nil {
 			a.logger.Error("tool registration failed", "tool", tool.Name(), "error", err)
 		}
+	}
+	if err := a.loadWasmTools(); err != nil {
+		return err
 	}
 	engine := agent.NewAgentEngine(nil, a.registry)
 	if cfg.Agent.MaxIterations > 0 {
@@ -395,14 +480,20 @@ func (a *app) buildGateway() error {
 	h.CacheSharedAcrossKeys = cfg.Cache.SharedAcrossKeys
 	h.CacheTTL = cfg.Cache.TTL
 	if cfg.Cache.Enabled && cfg.Cache.SemanticEnabled {
-		// Local deterministic embedder (lexical similarity); plug a real
-		// embedding provider in with SetEmbedder for semantic matching.
-		sc := cache.NewVectorSemanticCache(cfg.Cache.SemanticPrefix, cfg.Cache.TTL, cfg.Cache.SemanticThreshold, cache.NewHashingEmbedder(0))
+		// A configured embedding model gives true semantic matching; the
+		// local hashing embedder only matches similar wording.
+		var embedder cache.EmbeddingProvider = cache.NewHashingEmbedder(0)
+		if model := cfg.Cache.SemanticEmbeddingModel; model != "" {
+			embedder = cache.NewEmbeddingAdapter(func(ctx context.Context, text string) ([]float64, error) {
+				return h.Embed(ctx, model, text)
+			}, cache.EmbeddingAdapterOptions{})
+		}
+		sc := cache.NewVectorSemanticCache(cfg.Cache.SemanticPrefix, cfg.Cache.TTL, cfg.Cache.SemanticThreshold, embedder)
 		h.SemanticCache = sc
 		a.goWorker("semantic-cache-janitor", func(ctx context.Context) { sc.StartJanitor(ctx, time.Minute) })
 	}
 
-	resolver, skipped, err := buildResolver(cfg.Providers)
+	resolver, reg, skipped, err := buildRegistry(cfg.Providers)
 	if err != nil {
 		return fmt.Errorf("providers: %w", err)
 	}
@@ -410,12 +501,16 @@ func (a *app) buildGateway() error {
 		a.logger.Warn("providers skipped: missing API key", "providers", strings.Join(skipped, ","))
 	}
 	h.SetModelResolver(resolver)
+	a.registry2.Store(reg)
 	a.reloader.SetReloadCallback(func(ctx context.Context, next *config.Config) error {
-		res, _, err := buildResolver(next.Providers)
+		res, nextReg, _, err := buildRegistry(next.Providers)
 		if err != nil {
 			return err
 		}
 		h.SetModelResolver(res)
+		a.registry2.Store(nextReg)
+		a.router.SetStrategy(next.Router.Strategy)
+		a.router.SetMaxRetryWait(next.Router.MaxRetryWait)
 		a.logger.Info("provider registry hot-reloaded", "providers", len(next.Providers))
 		return nil
 	})
@@ -429,7 +524,24 @@ func (a *app) buildGateway() error {
 	}
 
 	// Spend accounting.
-	a.costTracker = finops.NewCostTracker(a.redis, a.pricing, a.costMap)
+	if a.redis == nil && a.persist != nil {
+		ct, err := finops.NewCostTrackerWithPersistence(a.persist, a.pricing, a.costMap)
+		if err != nil {
+			return fmt.Errorf("budgets: %w", err)
+		}
+		a.costTracker = ct
+	} else {
+		a.costTracker = finops.NewCostTracker(a.redis, a.pricing, a.costMap)
+	}
+	switch cfg.Finops.BudgetPeriod {
+	case "daily":
+		a.budgetPeriod = finops.PeriodDaily
+	case "monthly":
+		a.budgetPeriod = finops.PeriodMonthly
+	default:
+		a.budgetPeriod = finops.PeriodLifetime
+	}
+	a.costTracker.SetBudgetPeriod(a.budgetPeriod)
 	if cfg.Finops.Enabled {
 		h.UsageRecorder = a.costTracker
 		h.BudgetChecker = a.costTracker
@@ -438,10 +550,34 @@ func (a *app) buildGateway() error {
 	a.analytics = analytics.NewAnalyticsEngine()
 	h.Analytics = a.analytics
 	a.meter = meter.NewRecorder()
-	a.ledger = ledger.NewInMemoryLedgerStore()
+	if a.persist != nil {
+		if err := a.analytics.EnablePersistence(a.persist, analytics.PersistenceOptions{}); err != nil {
+			a.logger.Warn("spend analytics partially restored", "error", err)
+		}
+		if err := a.meter.EnablePersistence(a.persist, meter.PersistenceOptions{}); err != nil {
+			a.logger.Warn("usage meter partially restored", "error", err)
+		}
+		a.onClose(func(context.Context) {
+			_ = a.analytics.Close()
+			_ = a.meter.Close()
+		})
+	}
+	if a.persist != nil {
+		led, err := ledger.NewPersistentLedgerStore(a.persist, ledger.DefaultMaxRecords)
+		if err != nil {
+			return fmt.Errorf("ledger: %w", err)
+		}
+		a.ledger = led
+	} else {
+		a.ledger = ledger.NewInMemoryLedgerStore()
+	}
 	h.Ledger = a.ledger
 	h.Authorize = a.authorizeKey
 	h.OnUsage = a.recordUsage
+	if a.hookRunner != nil {
+		h.RequestHook = a.hookRunner.onRequest
+		h.ResponseHook = a.hookRunner.onResponse
+	}
 
 	a.buildCallbacks()
 	h.CallbackMgr = a.callbacks
@@ -449,14 +585,51 @@ func (a *app) buildGateway() error {
 
 	a.gateway = h
 	a.registerReadiness()
+	if iv := cfg.Router.HealthCheckInterval; iv > 0 {
+		a.goWorker("provider-probes", func(ctx context.Context) { a.probeLoop(ctx, iv) })
+	}
 	return nil
 }
 
-// authorizeKey enforces virtual key budgets and model allow-lists.
+// probeLoop actively checks upstream providers so readiness and routing see
+// failures before user traffic does.
+func (a *app) probeLoop(ctx context.Context, interval time.Duration) {
+	probe := func() {
+		pctx, cancel := context.WithTimeout(ctx, interval)
+		defer cancel()
+		results := a.router.ProbeAll(pctx)
+		if reg := a.registry2.Load(); reg != nil {
+			for name, err := range reg.ProbeAll(pctx) {
+				results[name] = err
+			}
+		}
+		for name, err := range results {
+			if err != nil && !errors.Is(err, providers.ErrProbeNotSupported) {
+				a.logger.Warn("provider health probe failed", "provider", name, "error", err)
+			}
+		}
+	}
+	probe()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			probe()
+		}
+	}
+}
+
+// authorizeKey enforces virtual key budgets and model allow-lists, and
+// applies finops.default_max_usd to keys that have no explicit budget.
 func (a *app) authorizeKey(ctx context.Context, p *middleware.Principal, model string) error {
+	a.ensureDefaultBudget(ctx, p)
 	if p == nil || p.Virtual == nil {
 		return nil
 	}
+	a.virtualByID.Store(p.KeyID, p.Virtual.KeyHash)
 	if !p.Virtual.AllowsModel(model) {
 		return fmt.Errorf("key is not allowed to use model %q", model)
 	}
@@ -464,6 +637,29 @@ func (a *app) authorizeKey(ctx context.Context, p *middleware.Principal, model s
 		return errors.New("key budget exceeded")
 	}
 	return nil
+}
+
+// ensureDefaultBudget gives a non-admin key the configured default budget
+// the first time it is seen, unless an explicit budget already exists.
+func (a *app) ensureDefaultBudget(ctx context.Context, p *middleware.Principal) {
+	limit := a.cfg.Finops.DefaultMaxUSD
+	if limit <= 0 || !a.cfg.Finops.Enabled || p == nil || p.Admin || p.KeyID == "" {
+		return
+	}
+	if _, done := a.defaultBudgets.Load(p.KeyID); done {
+		return
+	}
+	st, err := a.costTracker.GetBudget(ctx, p.KeyID)
+	if err != nil {
+		return // retry on the next request
+	}
+	if !st.HasLimit {
+		if err := a.costTracker.SetBudget(ctx, p.KeyID, limit); err != nil {
+			a.logger.Error("default budget not applied", "key_id", p.KeyID, "error", err)
+			return
+		}
+	}
+	a.defaultBudgets.Store(p.KeyID, true)
 }
 
 // recordUsage fans a completed request out to per-key spend and metering.
@@ -532,17 +728,27 @@ func (a *app) buildWebhooks() {
 			RetryDelay: 200 * time.Millisecond,
 		})
 	}
-	if url := os.Getenv("AEROLLM_BUDGET_WEBHOOK_URL"); url != "" {
-		a.costTracker.SetBudgetWebhookConfig(a.webhooks, webhooks.BudgetWebhookConfig{
-			URL:        url,
-			Secret:     os.Getenv("AEROLLM_BUDGET_WEBHOOK_SECRET"),
-			Timeout:    2 * time.Second,
-			Retries:    3,
-			RetryDelay: 200 * time.Millisecond,
-		})
+	budgetURL := os.Getenv("AEROLLM_BUDGET_WEBHOOK_URL")
+	budgetCfg := webhooks.BudgetWebhookConfig{
+		URL:        budgetURL,
+		Secret:     os.Getenv("AEROLLM_BUDGET_WEBHOOK_SECRET"),
+		Timeout:    2 * time.Second,
+		Retries:    3,
+		RetryDelay: 200 * time.Millisecond,
+	}
+	if budgetURL != "" && a.redis == nil {
+		a.costTracker.SetBudgetWebhookConfig(a.webhooks, budgetCfg)
 	}
 	if a.redis != nil {
 		queue := webhooks.NewRedisWebhookQueue(a.redis, "webhook:queue")
+		if budgetURL != "" {
+			// Budget events go through the reliable Redis queue (retried,
+			// dead-lettered, survive restarts) to the registered target.
+			hook := webhooks.WebhookConfig{URL: budgetURL, Secret: budgetCfg.Secret, Timeout: budgetCfg.Timeout, Retries: budgetCfg.Retries, RetryDelay: budgetCfg.RetryDelay}
+			a.webhooks.Register(webhooks.EventBudgetExceeded, hook)
+			a.webhooks.Register(webhooks.EventBudgetThreshold, hook)
+			a.costTracker.SetBudgetWebhookConfig(&webhooks.QueueDispatcher{Queue: queue, Fallback: a.webhooks}, webhooks.BudgetWebhookConfig{})
+		}
 		a.goWorker("webhook-queue", func(ctx context.Context) {
 			var wg sync.WaitGroup
 			a.webhooks.StartWorkerWithWaitGroup(ctx, queue, &wg)
@@ -574,14 +780,14 @@ type providerChecker struct{ a *app }
 func (c providerChecker) Name() string { return "providers" }
 func (c providerChecker) Check(ctx context.Context) health.Check {
 	routed := c.a.gateway.HealthProviders()
-	open := 0
+	usable := 0
 	for _, p := range routed {
-		if p.CircuitOpen {
-			open++
+		if p.Healthy && !p.CircuitOpen {
+			usable++
 		}
 	}
 	configured := len(c.a.reloader.GetModels())
-	healthy := configured > 0 || (len(routed) > 0 && open < len(routed))
+	healthy := configured > 0 || usable > 0
 	chk := health.Check{Name: "providers", Healthy: healthy, CheckedAt: time.Now()}
 	if !healthy {
 		chk.Error = "no usable upstream provider configured"

@@ -1,0 +1,49 @@
+# ServiceAccount and RBAC for aero-operator.
+#
+#   kubectl apply -f cmd/operator/deploy/rbac.yaml
+#
+# The operator only reads the AeroLLM custom resources, writes their status
+# subresource, and reads Secrets referenced by AeroBudget.spec.api_key_secret_ref.
+# To watch a single namespace, run with --namespace and replace the
+# ClusterRole/ClusterRoleBinding with a Role/RoleBinding in that namespace.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aerollm-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aero-operator
+  namespace: aerollm-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aero-operator
+rules:
+  - apiGroups: ["aerollm.io"]
+    resources: ["aeroroutes", "aerobudgets", "aeroagentpipelines"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["aerollm.io"]
+    resources: ["aeroroutes/status", "aerobudgets/status", "aeroagentpipelines/status"]
+    verbs: ["get", "patch", "update"]
+  # Needed only for AeroBudget.spec.api_key_secret_ref. Tighten with
+  # resourceNames, or drop the rule if you never use secret references.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aero-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aero-operator
+subjects:
+  - kind: ServiceAccount
+    name: aero-operator
+    namespace: aerollm-system

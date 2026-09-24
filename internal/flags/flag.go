@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // RolloutStrategy defines how a feature flag is rolled out.
@@ -96,11 +99,13 @@ var (
 // used for percentage bucketing and allow/deny lists.
 var identityAttributes = []string{"id", "user_id", "user", "key", "tenant_id", "tenant"}
 
-// Store stores feature flags with thread-safe access.
+// Store stores feature flags with thread-safe access. It is in-memory by
+// default; EnablePersistence adds write-through durability.
 type Store struct {
 	mu       sync.RWMutex
 	flags    map[string]FeatureFlag
 	rollouts map[string]RolloutPolicy
+	ps       persist.Store // nil unless persistence is enabled
 }
 
 // NewStore initializes a feature flag store.
@@ -205,6 +210,9 @@ func (s *Store) Upsert(flag FeatureFlag) error {
 	if _, exists := s.flags[flag.Key]; !exists && len(s.flags) >= MaxFlags {
 		return ErrStoreFull
 	}
+	if err := s.putLocked(BucketFlags, flag.Key, flag); err != nil {
+		return err
+	}
 	s.flags[flag.Key] = flag
 	return nil
 }
@@ -221,14 +229,35 @@ func (s *Store) Get(key string) (FeatureFlag, bool) {
 }
 
 // Delete removes a flag and any rollout policy for it. It reports whether the
-// flag existed.
+// flag existed and was removed; a persistence failure is logged and reported
+// as false. Use DeleteFlag to observe the error.
 func (s *Store) Delete(key string) bool {
+	ok, err := s.DeleteFlag(key)
+	if err != nil {
+		slog.Warn("flags: delete not persisted", "key", key, "error", err)
+		return false
+	}
+	return ok
+}
+
+// DeleteFlag removes a flag and any rollout policy for it, reporting whether
+// the flag existed. On a persistence error (wrapping ErrPersistence) nothing
+// is removed from memory.
+func (s *Store) DeleteFlag(key string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.flags[key]
+	if _, hasRollout := s.rollouts[key]; ok || hasRollout {
+		if err := s.deleteLocked(BucketFlags, key); err != nil {
+			return false, err
+		}
+		if err := s.deleteLocked(BucketRollouts, key); err != nil {
+			return false, err
+		}
+	}
 	delete(s.flags, key)
 	delete(s.rollouts, key)
-	return ok
+	return ok, nil
 }
 
 // List returns copies of all feature flags sorted by key.
@@ -245,13 +274,28 @@ func (s *Store) List() []FeatureFlag {
 
 // SetRollout stores rollout policy metadata for a key. The policy is
 // informational; evaluation is driven by the flag's Strategy/Percentage.
+// It is a no-op when the store is full; persistence failures are logged.
+// Use PutRollout to observe errors.
 func (s *Store) SetRollout(key string, policy RolloutPolicy) {
+	if err := s.PutRollout(key, policy); err != nil && !errors.Is(err, ErrStoreFull) {
+		slog.Warn("flags: rollout not persisted", "key", key, "error", err)
+	}
+}
+
+// PutRollout is SetRollout with error reporting: ErrStoreFull when the store
+// already holds MaxFlags policies, or an error wrapping ErrPersistence when
+// the write-through failed (memory is then unchanged).
+func (s *Store) PutRollout(key string, policy RolloutPolicy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.rollouts[key]; !exists && len(s.rollouts) >= MaxFlags {
-		return
+		return ErrStoreFull
+	}
+	if err := s.putLocked(BucketRollouts, key, policy); err != nil {
+		return err
 	}
 	s.rollouts[key] = policy
+	return nil
 }
 
 // GetRollout retrieves rollout policy for a key.
@@ -565,6 +609,11 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 				writeStoreError(w, err)
 				return
 			}
+			if err := store.putLocked(BucketFlags, key, updated); err != nil {
+				store.mu.Unlock()
+				writeStoreError(w, err)
+				return
+			}
 			store.flags[key] = cloneFlag(updated)
 			store.mu.Unlock()
 			writeJSON(w, http.StatusOK, updated)
@@ -573,7 +622,12 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "missing key")
 				return
 			}
-			if !store.Delete(key) {
+			ok, err := store.DeleteFlag(key)
+			if err != nil {
+				writeStoreError(w, err)
+				return
+			}
+			if !ok {
 				writeError(w, http.StatusNotFound, "not found")
 				return
 			}
@@ -644,6 +698,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusInsufficientStorage, err.Error())
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "persistence failure")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

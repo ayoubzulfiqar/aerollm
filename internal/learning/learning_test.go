@@ -33,6 +33,7 @@ func newRatedExporter(t *testing.T) (*flywheel.DatasetExporter, ledger.LedgerSto
 func TestEnqueueAndStatus(t *testing.T) {
 	exporter, store := newRatedExporter(t)
 	trainer := NewTrainer(exporter, store, t.TempDir())
+	trainer.EnableManualQueue()
 	job, err := trainer.Enqueue(context.Background(), "model-a", "up")
 	if err != nil {
 		t.Fatalf("enqueue failed: %v", err)
@@ -64,6 +65,7 @@ func TestEnqueueAndStatus(t *testing.T) {
 func TestEnqueueNoMatchingRatings(t *testing.T) {
 	exporter, store := newRatedExporter(t)
 	trainer := NewTrainer(exporter, store, t.TempDir())
+	trainer.EnableManualQueue()
 	if _, err := trainer.Enqueue(context.Background(), "m", "down"); err == nil {
 		t.Fatal("expected error when no records have the requested rating")
 	}
@@ -73,6 +75,7 @@ func TestEnqueueWithoutFeedbackSourceFails(t *testing.T) {
 	store := ledger.NewInMemoryLedgerStore()
 	_ = store.Append(context.Background(), ledger.LedgerRecord{RequestPayload: "a", ResponsePayload: "b"})
 	trainer := NewTrainer(&flywheel.DatasetExporter{Ledger: store}, store, t.TempDir())
+	trainer.EnableManualQueue()
 	if _, err := trainer.Enqueue(context.Background(), "m", "up"); !errors.Is(err, flywheel.ErrNoFeedbackSource) {
 		t.Fatalf("expected ErrNoFeedbackSource, got %v", err)
 	}
@@ -98,6 +101,7 @@ func TestNilGuards(t *testing.T) {
 func TestEnqueueUniqueIDsAndBoundedJobs(t *testing.T) {
 	exporter, store := newRatedExporter(t)
 	trainer := NewTrainer(exporter, store, t.TempDir())
+	trainer.EnableManualQueue()
 	var wg sync.WaitGroup
 	ids := make(chan string, 200)
 	for i := 0; i < 200; i++ {

@@ -1,0 +1,98 @@
+// Command __PLUGIN_NAME__ is an AeroLLM hook plugin: a WASI preview1 program the
+// gateway runs in a sandbox (no filesystem, network, environment variables or
+// real clock) once per hook invocation.
+//
+// Build:
+//
+//	GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm
+//	# or: aerollm plugin build . -o plugin.wasm
+//
+// Protocol (version 1). The gateway writes one JSON object to stdin:
+//
+//	{"version":1,"plugin_id":"...","hook":"OnRequest","payload":{...}}
+//
+// and the plugin must write exactly one JSON object to stdout:
+//
+//	{"payload":{...}}   replace the payload
+//	{}                  leave the payload unchanged
+//	{"error":"reason"}  fail the hook
+//
+// Hooks: OnRequest, OnResponse, OnToolCall, OnToolResult. Write diagnostics to
+// stderr only; a non-zero exit code also fails the hook.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+)
+
+const protocolVersion = 1
+
+// maxInput bounds how much of stdin is read.
+const maxInput = 16 << 20
+
+// request is the envelope the gateway writes to stdin.
+type request struct {
+	Version  int            `json:"version"`
+	PluginID string         `json:"plugin_id"`
+	Hook     string         `json:"hook"`
+	Payload  map[string]any `json:"payload"`
+}
+
+func main() {
+	os.Stdout.Write(respond(os.Stdin))
+}
+
+// respond reads one request and returns the JSON response line.
+func respond(r io.Reader) []byte {
+	var resp any = struct{}{} // {}: payload unchanged
+	payload, err := process(r)
+	switch {
+	case err != nil:
+		resp = map[string]string{"error": err.Error()}
+	case payload != nil:
+		resp = map[string]any{"payload": payload}
+	}
+	out, err := json.Marshal(resp)
+	if err != nil {
+		out, _ = json.Marshal(map[string]string{"error": "encoding response: " + err.Error()})
+	}
+	return append(out, '\n')
+}
+
+func process(r io.Reader) (map[string]any, error) {
+	var req request
+	if err := json.NewDecoder(io.LimitReader(r, maxInput)).Decode(&req); err != nil {
+		return nil, fmt.Errorf("invalid hook input: %v", err)
+	}
+	if req.Version != protocolVersion {
+		return nil, fmt.Errorf("unsupported hook protocol version %d (want %d)", req.Version, protocolVersion)
+	}
+	if req.Payload == nil {
+		req.Payload = map[string]any{}
+	}
+	return handle(req.PluginID, req.Hook, req.Payload)
+}
+
+// handle implements the plugin. Return the (modified) payload to replace it,
+// nil to leave it unchanged, or an error to fail the hook.
+func handle(pluginID, hook string, payload map[string]any) (map[string]any, error) {
+	switch hook {
+	case "OnRequest":
+		// Example: record in the request metadata that this plugin saw it.
+		md, _ := payload["metadata"].(map[string]any)
+		if md == nil {
+			md = map[string]any{}
+		}
+		md[pluginID] = "seen"
+		payload["metadata"] = md
+		return payload, nil
+	case "OnResponse", "OnToolCall", "OnToolResult":
+		return nil, nil
+	default:
+		// Unknown (future) hooks: leave the payload unchanged.
+		return nil, nil
+	}
+}

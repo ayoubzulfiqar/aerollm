@@ -136,18 +136,70 @@ func (c *Client) checkScheme(u *url.URL) error {
 	}
 }
 
+// checkRedirect follows a redirect only within the registry origin: the
+// target must be on the registry's host and port and use https. The single
+// exception is an upgrade from a plain-http registry (WithInsecureHTTP) to
+// https on the same hostname with default ports; plain http is otherwise only
+// followed when the registry itself is plain http. A redirect never
+// downgrades https to http. This keeps a compromised or misconfigured
+// registry (or a path on it that echoes user input into Location) from
+// steering manifest and WASM fetches to arbitrary hosts, including internal
+// addresses.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("marketplace: too many redirects")
 	}
-	// Never follow a redirect that downgrades to plain http.
-	if err := c.checkScheme(req.URL); err != nil {
-		return err
+	if c.base == nil {
+		return errors.New("marketplace: refusing redirect: registry URL not configured")
 	}
-	if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
-		return errors.New("marketplace: refusing https→http redirect")
+	target := req.URL
+	if target.User != nil {
+		return errors.New("marketplace: refusing redirect with embedded credentials")
 	}
-	return nil
+	targetScheme := strings.ToLower(target.Scheme)
+	baseScheme := strings.ToLower(c.base.Scheme)
+	for _, prev := range via {
+		if strings.EqualFold(prev.URL.Scheme, "https") && targetScheme != "https" {
+			return errors.New("marketplace: refusing https→http redirect")
+		}
+	}
+	switch {
+	case targetScheme == "https":
+	case targetScheme == "http" && baseScheme == "http" && c.allowInsecure:
+	default:
+		return fmt.Errorf("marketplace: refusing redirect to scheme %q (https required)", target.Scheme)
+	}
+	if !sameHostName(target, c.base) {
+		return fmt.Errorf("marketplace: refusing redirect to another host %q", target.Host)
+	}
+	if effectivePort(target) == effectivePort(c.base) {
+		return nil
+	}
+	// http://host → https://host (both on default ports) is an upgrade of
+	// the same origin, not a different one.
+	if baseScheme == "http" && targetScheme == "https" && effectivePort(c.base) == "80" && effectivePort(target) == "443" {
+		return nil
+	}
+	return fmt.Errorf("marketplace: refusing redirect to another port on %q", target.Host)
+}
+
+func sameHostName(a, b *url.URL) bool {
+	norm := func(u *url.URL) string { return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".") }
+	return norm(a) != "" && norm(a) == norm(b)
+}
+
+// effectivePort returns the URL's port, defaulting by scheme.
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	}
+	return ""
 }
 
 // Err reports a configuration error (for example an invalid or insecure base URL).

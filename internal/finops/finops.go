@@ -413,9 +413,11 @@ func (c *CostTracker) recordCost(ctx context.Context, apiKey, model string, cost
 		return res, nil
 	}
 	newSpend, limit, hasLimit, err := c.store.AddSpend(ctx, id, pk, nanos, retain)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNotDurable) {
 		return res, err
 	}
+	// A spend that is applied but not yet durable (ErrNotDurable) is still
+	// enforced, so its threshold crossings fire; the error is returned.
 	res.Budget = statusFrom(id, p, pk, newSpend, limit, hasLimit)
 	if hasLimit {
 		res.Crossings = c.crossings(id, KeyHint(apiKey), model, p, pk, newSpend-nanos, newSpend, limit)
@@ -423,7 +425,7 @@ func (c *CostTracker) recordCost(ctx context.Context, apiKey, model string, cost
 			c.emit(ctx, ev)
 		}
 	}
-	return res, nil
+	return res, err
 }
 
 // crossings returns the thresholds crossed by moving spend from prev to cur.

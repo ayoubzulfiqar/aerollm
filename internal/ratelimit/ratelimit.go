@@ -102,6 +102,34 @@ func NewTokenBucketLimiter(defaultRPS float64, burstMultiplier int) *TokenBucket
 	}
 }
 
+// DefaultRPS returns the default per-key rate.
+func (t *TokenBucketLimiter) DefaultRPS() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.defaultRPS
+}
+
+// SetDefaultRPS changes the default per-key rate at runtime (e.g. from an
+// AIOps action). Buckets of keys without an override are re-created lazily
+// with the new rate; tokens already granted are kept up to the new capacity.
+func (t *TokenBucketLimiter) SetDefaultRPS(rps float64) {
+	if rps < 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.defaultRPS = rps
+	for k, b := range t.buckets {
+		apiKey, _, _ := strings.Cut(k, "\x00")
+		if _, overridden := t.overrides[apiKey]; overridden {
+			continue
+		}
+		r, capacity := t.rateFor(apiKey)
+		b.rps, b.capacity = r, capacity
+		b.tokens = math.Min(b.tokens, capacity)
+	}
+}
+
 // SetLimit overrides the rate for a single API key. A zero RPS removes the
 // override. Existing buckets for the key are reset to the new capacity.
 func (t *TokenBucketLimiter) SetLimit(apiKey string, l Limit) {

@@ -12,13 +12,21 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Static, reproducible build (all dependencies are pure Go).
+# Static, reproducible builds (all dependencies are pure Go).
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X github.com/ayoubzulfiqar/aerollm/internal/config.buildVersion=${VERSION}" \
-    -o /bin/aerollm ./cmd/server
+    -o /bin/aerollm ./cmd/server \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /bin/aero-operator ./cmd/operator
 
-# ---- Final stage ----
-FROM alpine:3.20
+# ---- Kubernetes operator image: docker build --target operator ----
+FROM alpine:3.20 AS operator
+RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S app -G app
+COPY --from=builder /bin/aero-operator /usr/local/bin/aero-operator
+USER app
+ENTRYPOINT ["aero-operator"]
+
+# ---- Gateway image (default target) ----
+FROM alpine:3.20 AS gateway
 
 RUN apk add --no-cache ca-certificates wget \
     && addgroup -S app && adduser -S app -G app \

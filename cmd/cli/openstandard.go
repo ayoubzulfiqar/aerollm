@@ -13,7 +13,7 @@ import (
 func newOpenStandardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "openstandard",
-		Short: "Publish Open Standard capability manifests and receipts to a registry",
+		Short: "Publish Open Standard capability manifests and receipts to the gateway (/v1/marketplace/openstandard)",
 	}
 	cmd.AddCommand(newOpenStandardCapabilityCmd())
 	cmd.AddCommand(newOpenStandardReceiptCmd())

@@ -50,6 +50,10 @@ type Recorder struct {
 	size    int
 	max     int
 	dropped int64
+	plog    *chunkLog[UsageRecord] // nil unless EnablePersistence was called
+	// persistUsed forbids re-enabling persistence after Close, which would
+	// persist the retained records a second time.
+	persistUsed bool
 }
 
 // NewRecorder creates a usage recorder retaining DefaultMaxRecords records.
@@ -87,6 +91,14 @@ func (r *Recorder) Record(record UsageRecord) {
 	record = sanitize(record)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.insertLocked(record)
+	if r.plog != nil {
+		r.plog.add(record)
+	}
+}
+
+// insertLocked appends record to the ring buffer; callers hold r.mu.
+func (r *Recorder) insertLocked(record UsageRecord) {
 	if r.max <= 0 {
 		r.max = DefaultMaxRecords
 	}
@@ -134,7 +146,7 @@ func (r *Recorder) Dropped() int64 {
 	return r.dropped
 }
 
-// Clear removes all recorded usage.
+// Clear removes all recorded usage, including persisted records.
 func (r *Recorder) Clear() {
 	if r == nil {
 		return
@@ -143,6 +155,9 @@ func (r *Recorder) Clear() {
 	defer r.mu.Unlock()
 	r.records = r.records[:0]
 	r.head, r.size = 0, 0
+	if r.plog != nil {
+		r.plog.clear()
+	}
 }
 
 // Aggregate groups retained records at or after since (zero = all) by

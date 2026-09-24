@@ -26,17 +26,18 @@ func TestInitCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "created config.yaml, docker-compose.yml, and plugin.go") {
+	if !strings.Contains(out, "created config.yaml, docker-compose.yml, and plugin/ (hook plugin") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	for name, perm := range map[string]os.FileMode{"config.yaml": 0o600, "docker-compose.yml": 0o644, "plugin.go": 0o644} {
-		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("%s missing: %v", name, err)
-		}
-		if fi.Mode().Perm() != perm {
-			t.Errorf("%s mode = %v, want %v", name, fi.Mode().Perm(), perm)
-		}
+	for name, perm := range map[string]os.FileMode{
+		"config.yaml": 0o600, "docker-compose.yml": 0o644,
+		filepath.Join("plugin", "go.mod"): 0o644, filepath.Join("plugin", "main.go"): 0o644,
+	} {
+		assertPerm(t, filepath.Join(dir, name), perm)
+	}
+	src, _ := os.ReadFile(filepath.Join(dir, "plugin", "main.go"))
+	if strings.Contains(string(src), "aerollm/internal") || !strings.Contains(string(src), `"plugin_id"`) {
+		t.Fatalf("plugin template must be standalone and speak the hook protocol:\n%s", src)
 	}
 	// Existing files are not clobbered.
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -49,8 +50,17 @@ func TestInitCmd(t *testing.T) {
 	if b, _ := os.ReadFile(cfgPath); string(b) != "custom: true\n" {
 		t.Fatal("init overwrote an existing config without --force")
 	}
-	if _, _, err := runCLI(t, "", "init", "--dir", dir, "--force"); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "plugin", "go.mod")); err != nil {
+		t.Fatal("refused init must leave the existing scaffold intact")
+	}
+	if _, _, err := runCLI(t, "", "init", "--dir", dir, "--force", "--plugin-kind", "tool"); err != nil {
 		t.Fatal(err)
+	}
+	if src, _ := os.ReadFile(filepath.Join(dir, "plugin", "main.go")); !strings.Contains(string(src), "AeroLLM WASM tool") {
+		t.Fatalf("--plugin-kind tool not applied:\n%s", src)
+	}
+	if _, _, err := runCLI(t, "", "init", "--dir", t.TempDir(), "--plugin-kind", "daemon"); err == nil {
+		t.Fatal("expected --plugin-kind validation error")
 	}
 }
 
@@ -194,10 +204,7 @@ func TestPqcKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(privPath)
-	if err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("private key file: %v %v", fi, err)
-	}
+	assertPerm(t, privPath, 0o600)
 	priv, _ := os.ReadFile(privPath)
 	if strings.Contains(out, strings.TrimSpace(string(priv))) || strings.Contains(out, "private=") {
 		t.Fatal("private key printed to stdout")
@@ -267,9 +274,7 @@ func TestBillingGenerate(t *testing.T) {
 	if !strings.Contains(string(data), `'=HYPERLINK`) {
 		t.Fatalf("formula not neutralised:\n%s", data)
 	}
-	if fi, _ := os.Stat(csvPath); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("invoice mode = %v", fi.Mode().Perm())
-	}
+	assertPerm(t, csvPath, 0o600)
 	if _, _, err := runCLI(t, "", "billing", "generate", "--input", input, "--output", csvPath); err == nil {
 		t.Fatal("expected overwrite refusal")
 	}

@@ -57,6 +57,10 @@ type AeroBudgetStatus struct {
 	SpentUSD     float64 `json:"spent_usd,omitempty"`
 	RemainingUSD float64 `json:"remaining_usd,omitempty"`
 	AlertSent    bool    `json:"alert_sent,omitempty"`
+	// ObservedGeneration is the metadata.generation last reconciled by the
+	// operator; Conditions describe the outcome.
+	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 }
 
 // AeroBudget represents a budget policy tied to an API key or service account.

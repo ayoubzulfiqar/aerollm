@@ -12,18 +12,31 @@
 //     missed slots are skipped);
 //   - onetime: an RFC 3339 timestamp in schedule, or run_at when schedule is
 //     empty; it must be in the future when created or rescheduled.
+//
+// A Store is in-memory by default. EnablePersistence (or
+// NewStoreWithPersistence) makes it durable: every task, including its
+// runtime state (next_run, last_run_at, runs, status, last_error), is written
+// through to a persist.Store, so after a restart tasks resume from their
+// persisted next_run: nothing is skipped, and a run that was due while the
+// process was down runs once (then the schedule continues). A run interrupted
+// by a crash is retried once, because next_run only advances when a run
+// finishes (at-least-once execution).
 package schedule
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // TaskType defines scheduled task types.
@@ -92,7 +105,17 @@ var (
 	ErrNotFound  = errors.New("schedule: task not found")
 	ErrConflict  = errors.New("schedule: task already exists")
 	ErrStoreFull = errors.New("schedule: task limit reached")
+	// ErrPersistence wraps failures of the durable store. When a mutation
+	// fails with it, the in-memory state is unchanged.
+	ErrPersistence = errors.New("schedule: persistence failed")
+	// ErrInvalidDocuments is returned by EnablePersistence when some persisted
+	// tasks could not be decoded or validated. Persistence is enabled anyway;
+	// the offending documents are skipped (and left untouched in the store).
+	ErrInvalidDocuments = errors.New("schedule: skipped invalid persisted tasks")
 )
+
+// BucketTasks is the persist.Store bucket holding tasks, keyed by task ID.
+const BucketTasks = "schedule.tasks"
 
 // ValidationError reports an invalid task definition.
 type ValidationError struct {
@@ -157,17 +180,158 @@ type entry struct {
 	inflight bool
 }
 
-// Store manages scheduled tasks in memory. It is safe for concurrent use.
+// Store manages scheduled tasks in memory, optionally writing through to a
+// persist.Store. It is safe for concurrent use.
 type Store struct {
 	mu       sync.RWMutex
 	tasks    map[string]*entry
 	now      func() time.Time
 	maxTasks int
+	ps       persist.Store // nil unless persistence is enabled
 }
 
 // NewStore creates a task store.
 func NewStore() *Store {
 	return &Store{tasks: make(map[string]*entry), now: time.Now, maxTasks: MaxTasks}
+}
+
+// NewStoreWithPersistence creates a task store backed by ps: existing tasks
+// are loaded and every change is written through. The returned store is
+// non-nil whenever persistence was enabled; a non-nil error together with a
+// non-nil store wraps ErrInvalidDocuments (some documents were skipped).
+func NewStoreWithPersistence(ps persist.Store) (*Store, error) {
+	s := NewStore()
+	if err := s.EnablePersistence(ps); err != nil {
+		if errors.Is(err, ErrInvalidDocuments) {
+			return s, err
+		}
+		return nil, err
+	}
+	return s, nil
+}
+
+// EnablePersistence loads the tasks stored in ps (bucket BucketTasks) and
+// writes every later change through to it. Persisted tasks replace in-memory
+// tasks with the same ID; in-memory tasks missing from ps are written to it.
+// Persisted runtime state is trusted as is (a one-time task whose run time
+// has passed is not rejected), except that a "running" status is reset to
+// "pending" because no run survives a restart.
+//
+// It must be called at most once, before the Runner starts. On a load or
+// write failure it returns an error wrapping ErrPersistence and leaves the
+// store unchanged and non-persistent. Invalid documents are skipped and
+// reported with an error wrapping ErrInvalidDocuments after persistence has
+// been enabled.
+func (s *Store) EnablePersistence(ps persist.Store) error {
+	if ps == nil {
+		return errors.New("schedule: nil persistence store")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ps != nil {
+		return errors.New("schedule: persistence already enabled")
+	}
+
+	loaded := make(map[string]*entry)
+	var skipped []error
+	err := ps.ForEach(BucketTasks, func(key string, raw json.RawMessage) error {
+		var t ScheduledTask
+		if err := json.Unmarshal(raw, &t); err != nil {
+			skipped = append(skipped, fmt.Errorf("task %q: undecodable document", key))
+			return nil
+		}
+		if t.ID != key {
+			skipped = append(skipped, fmt.Errorf("task %q: id mismatch (%q)", key, t.ID))
+			return nil
+		}
+		p, err := validate(&t)
+		if err != nil {
+			skipped = append(skipped, fmt.Errorf("task %q: %v", key, err))
+			return nil
+		}
+		if len(loaded) >= s.maxTasks {
+			skipped = append(skipped, fmt.Errorf("task %q: task limit %d reached", key, s.maxTasks))
+			return nil
+		}
+		if t.Status == "" || t.Status == TaskRunning {
+			t.Status = TaskPending
+		}
+		loaded[key] = &entry{task: t, plan: p}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("%w: load %s: %w", ErrPersistence, BucketTasks, err)
+	}
+
+	// Write in-memory tasks that ps does not know yet, oldest first, and
+	// only keep as many as the limit allows.
+	var extra []*entry
+	for id, e := range s.tasks {
+		if _, ok := loaded[id]; !ok {
+			extra = append(extra, e)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i].task.ID < extra[j].task.ID })
+	for _, e := range extra {
+		if len(loaded) >= s.maxTasks {
+			skipped = append(skipped, fmt.Errorf("in-memory task %q: task limit %d reached", e.task.ID, s.maxTasks))
+			continue
+		}
+		t := e.task
+		if t.Status == TaskRunning && !e.inflight {
+			t.Status = TaskPending
+		}
+		if err := ps.Put(BucketTasks, t.ID, persistedTask(t)); err != nil {
+			return fmt.Errorf("%w: write %s/%s: %w", ErrPersistence, BucketTasks, t.ID, err)
+		}
+		loaded[t.ID] = e
+	}
+
+	s.tasks = loaded
+	s.ps = ps
+	if len(skipped) > 0 {
+		return fmt.Errorf("%w: %w", ErrInvalidDocuments, errors.Join(skipped...))
+	}
+	return nil
+}
+
+// PersistenceEnabled reports whether the store writes through to a
+// persist.Store.
+func (s *Store) PersistenceEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ps != nil
+}
+
+// persistedTask is the document written for t: a transient "running" status
+// is stored as pending since no run survives a restart.
+func persistedTask(t ScheduledTask) ScheduledTask {
+	if t.Status == TaskRunning {
+		t.Status = TaskPending
+	}
+	return t
+}
+
+// saveLocked writes t through to the durable store. Callers hold s.mu.
+func (s *Store) saveLocked(t ScheduledTask) error {
+	if s.ps == nil {
+		return nil
+	}
+	if err := s.ps.Put(BucketTasks, t.ID, persistedTask(t)); err != nil {
+		return fmt.Errorf("%w: write task %s: %w", ErrPersistence, t.ID, err)
+	}
+	return nil
+}
+
+// deleteLocked removes id from the durable store. Callers hold s.mu.
+func (s *Store) deleteLocked(id string) error {
+	if s.ps == nil {
+		return nil
+	}
+	if err := s.ps.Delete(BucketTasks, id); err != nil {
+		return fmt.Errorf("%w: delete task %s: %w", ErrPersistence, id, err)
+	}
+	return nil
 }
 
 func validStatus(s TaskStatus) bool {
@@ -199,6 +363,9 @@ func validate(t *ScheduledTask) (plan, error) {
 	}
 	if len(t.Payload) > maxPayloadBytes {
 		return plan{}, invalid("payload must be at most %d bytes", maxPayloadBytes)
+	}
+	if err := validatePayload(t.Payload); err != nil {
+		return plan{}, err
 	}
 	if t.Status != "" && !validStatus(t.Status) {
 		return plan{}, invalid("invalid status %q: must be one of pending, running, completed, failed", t.Status)
@@ -333,6 +500,9 @@ func (s *Store) put(task ScheduledTask, replace bool) (ScheduledTask, error) {
 			}
 			task.NextRun = next
 		}
+		if err := s.saveLocked(task); err != nil {
+			return ScheduledTask{}, err
+		}
 		existing.task = task
 		existing.plan = p
 		existing.rev++
@@ -357,6 +527,9 @@ func (s *Store) put(task ScheduledTask, replace bool) (ScheduledTask, error) {
 	}
 	if task.Status == "" {
 		task.Status = TaskPending
+	}
+	if err := s.saveLocked(task); err != nil {
+		return ScheduledTask{}, err
 	}
 	s.tasks[task.ID] = &entry{task: task, plan: p}
 	return task, nil
@@ -432,6 +605,9 @@ func (s *Store) Update(id string, u TaskUpdate) (ScheduledTask, error) {
 			}
 		}
 	}
+	if err := s.saveLocked(t); err != nil {
+		return ScheduledTask{}, err
+	}
 	e.task = t
 	e.plan = p
 	e.rev++
@@ -466,26 +642,45 @@ func (s *Store) List() []ScheduledTask {
 	return out
 }
 
-// Delete removes a task. It reports whether the task existed. A run that is
-// in flight finishes, but its result is discarded.
+// Delete removes a task. It reports whether the task was removed. A run
+// that is in flight finishes, but its result is discarded. When persistence
+// fails the task is kept, the failure is logged and Delete reports false;
+// use Remove to observe the error.
 func (s *Store) Delete(id string) bool {
+	err := s.Remove(id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		slog.Warn("schedule: delete failed", "task_id", id, "error", err)
+	}
+	return err == nil
+}
+
+// Remove deletes a task, returning ErrNotFound for unknown ids and an error
+// wrapping ErrPersistence (task kept) when the durable store fails.
+func (s *Store) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.tasks[id]; !ok {
-		return false
+		return ErrNotFound
+	}
+	if err := s.deleteLocked(id); err != nil {
+		return err
 	}
 	delete(s.tasks, id)
-	return true
+	return nil
 }
 
 // UpdateStatus updates task status. Unknown ids and invalid statuses are
-// ignored; use SetStatus to observe errors.
+// ignored and persistence failures are logged; use SetStatus to observe
+// errors.
 func (s *Store) UpdateStatus(id string, status TaskStatus) {
-	_ = s.SetStatus(id, status)
+	if err := s.SetStatus(id, status); errors.Is(err, ErrPersistence) {
+		slog.Warn("schedule: status update failed", "task_id", id, "error", err)
+	}
 }
 
-// SetStatus updates task status, returning ErrNotFound for unknown ids and a
-// ValidationError for unknown statuses.
+// SetStatus updates task status, returning ErrNotFound for unknown ids, a
+// ValidationError for unknown statuses and an error wrapping ErrPersistence
+// (status unchanged) when the durable store fails.
 func (s *Store) SetStatus(id string, status TaskStatus) error {
 	if !validStatus(status) {
 		return invalid("invalid status %q", status)
@@ -496,7 +691,12 @@ func (s *Store) SetStatus(id string, status TaskStatus) error {
 	if !ok {
 		return ErrNotFound
 	}
-	e.task.Status = status
+	t := e.task
+	t.Status = status
+	if err := s.saveLocked(t); err != nil {
+		return err
+	}
+	e.task = t
 	return nil
 }
 
@@ -542,6 +742,10 @@ func (s *Store) claimDue(now time.Time, max int) []claim {
 }
 
 // finishRun records the outcome of a claimed run and schedules the next one.
+//
+// The run has already happened, so the in-memory state is always updated. A
+// persistence failure is logged: after a restart the task would then resume
+// from its previously persisted next_run and run once more (at-least-once).
 func (s *Store) finishRun(c claim, started, completed time.Time, runErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -564,6 +768,9 @@ func (s *Store) finishRun(c claim, started, completed time.Time, runErr error) {
 	}
 	// Otherwise the task was rescheduled during the run and NextRun already
 	// reflects the new schedule.
+	if err := s.saveLocked(e.task); err != nil {
+		slog.Warn("schedule: failed to persist run result", "task_id", e.task.ID, "error", err)
+	}
 }
 
 // nextDue returns the earliest NextRun among tasks not in flight, and

@@ -3,6 +3,8 @@ package universal
 import (
 	"fmt"
 	"strings"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/providers"
 )
 
 // NewGeminiAdapter returns a Gemini adapter using Google's OpenAI-compatible
@@ -22,6 +24,73 @@ func NewAzureOpenAIAdapter(apiKey, baseURL, azureResource string) *OpenAICompati
 	}
 	return NewOpenAICompatibleAdapter(fmt.Sprintf("azure/%s", azureResource), "azure", apiKey, baseURL)
 }
+
+// NewAzureAdapter returns an Azure OpenAI adapter named name (api-key
+// header auth). The URL scheme follows baseURL and apiVersion:
+//
+//   - baseURL ending in "/openai/v1" (the v1 API): requests go to
+//     {base}/chat/completions etc., with ?api-version= only when apiVersion is
+//     set (e.g. "preview");
+//   - baseURL containing "/openai/deployments/{name}": that deployment serves
+//     every request; apiVersion is required;
+//   - any other baseURL (typically https://<resource>.openai.azure.com) with
+//     an apiVersion: deployment URLs
+//     {root}/openai/deployments/{deployment}/chat/completions?api-version=...
+//     where the deployment is the request's (upstream) model name, so a model
+//     entry "gpt-4o=my-gpt4o-deployment" maps a public name to a deployment;
+//   - otherwise (no apiVersion): the v1 API at {base}/openai/v1, as before.
+//
+// An "api-version" query parameter in baseURL is used when apiVersion is
+// empty. Embeddings, image generation and audio transcription use the same
+// deployment scheme; the Responses API and probes use
+// {root}/openai/{responses|models}?api-version=... in deployment mode.
+func NewAzureAdapter(name, apiKey, baseURL, apiVersion string) *OpenAICompatibleAdapter {
+	a := NewOpenAICompatibleAdapter(name, "azure", apiKey, baseURL)
+	if a.baseErr != nil {
+		return a
+	}
+	raw, err := providers.NormalizeBaseURL(baseURL, "")
+	if err != nil {
+		a.baseErr = fmt.Errorf("invalid base URL for provider %s: %w", name, err)
+		return a
+	}
+	apiVersion = strings.TrimSpace(apiVersion)
+	q := raw.Query()
+	if apiVersion == "" {
+		apiVersion = strings.TrimSpace(q.Get("api-version"))
+	}
+	q.Del("api-version")
+	raw.RawQuery = q.Encode()
+	lower := strings.ToLower(raw.Path)
+	const depMarker = "/openai/deployments/"
+	switch {
+	case strings.HasSuffix(lower, "/openai/v1"):
+		a.base, a.apiVersion = raw, apiVersion
+	case strings.Contains(lower, depMarker):
+		i := strings.Index(lower, depMarker)
+		dep, _, _ := strings.Cut(raw.Path[i+len(depMarker):], "/")
+		if err := validAzureDeployment(dep); err != nil {
+			a.baseErr = fmt.Errorf("provider %s: base URL: %w", name, err)
+			return a
+		}
+		if apiVersion == "" {
+			a.baseErr = fmt.Errorf("provider %s: azure deployment URLs require api_version", name)
+			return a
+		}
+		raw.Path = raw.Path[:i]
+		a.base, a.apiVersion, a.azureDeployments, a.azureDeployment = raw, apiVersion, true, dep
+	case apiVersion != "":
+		if strings.HasSuffix(lower, "/openai") {
+			raw.Path = raw.Path[:len(raw.Path)-len("/openai")]
+		}
+		a.base, a.apiVersion, a.azureDeployments = raw, apiVersion, true
+	}
+	return a
+}
+
+// AzureDeploymentMode reports whether the adapter uses Azure OpenAI
+// deployment URLs (see NewAzureAdapter).
+func (a *OpenAICompatibleAdapter) AzureDeploymentMode() bool { return a.azureDeployments }
 
 // NewGroqAdapter returns a Groq provider adapter.
 func NewGroqAdapter(apiKey, baseURL string) *OpenAICompatibleAdapter {

@@ -1,7 +1,7 @@
 {
     "swagger": "2.0",
     "info": {
-        "description": "AeroLLM is a high-performance, multi-provider LLM gateway that serves as a drop-in replacement for the LiteLLM proxy. It supports 100+ LLM providers with advanced routing, virtual keys, semantic caching, spend analytics, and async observability callbacks.",
+        "description": "AeroLLM is a high-performance, multi-provider LLM gateway that serves as a drop-in replacement for the LiteLLM proxy. It supports OpenAI- and Anthropic-compatible APIs with streaming, advanced routing and fallback, virtual keys, caching, spend analytics, and async observability callbacks.",
         "title": "AeroLLM API",
         "termsOfService": "http://swagger.io/terms/",
         "contact": {
@@ -20,7 +20,7 @@
     "paths": {
         "/config/update": {
             "post": {
-                "description": "Accepts a partial or full config (JSON), validates it, and hot-reloads the provider registry without dropping active connections.",
+                "description": "Merges a partial JSON config onto the active one (arrays such as providers are replaced), validates it, and hot-reloads the provider registry without dropping connections. Secrets echoed back as \"***REDACTED***\" keep their current value. Durations are nanoseconds.",
                 "consumes": [
                     "application/json"
                 ],
@@ -33,7 +33,7 @@
                 "summary": "Update config",
                 "parameters": [
                     {
-                        "description": "Updated configuration",
+                        "description": "Partial or full configuration",
                         "name": "req",
                         "in": "body",
                         "required": true,
@@ -55,16 +55,16 @@
         },
         "/config/yaml": {
             "get": {
-                "description": "Returns the current active configuration with all secrets masked.",
+                "description": "Returns the active configuration (as JSON) with every secret redacted.",
                 "tags": [
                     "config"
                 ],
-                "summary": "Get config YAML",
+                "summary": "Get active config",
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/config.Config"
                         }
                     }
                 }
@@ -309,6 +309,26 @@
                 }
             }
         },
+        "/team/info": {
+            "get": {
+                "description": "Get a team's budget, spend and key count.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "teams"
+                ],
+                "summary": "Get team info",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/keymanager.TeamInfoResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/team/update": {
             "post": {
                 "description": "Update an existing team's details.",
@@ -409,9 +429,161 @@
                 }
             }
         },
+        "/v1/batches": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "batches"
+                ],
+                "summary": "List batches",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Cursor: last batch ID of the previous page",
+                        "name": "after",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size (1-100, default 20)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {}
+            },
+            "post": {
+                "description": "Create a batch job from JSONL input (multipart field \"file\", or JSON {\"input\": \"\u003cjsonl\u003e\", \"metadata\": {}, \"completion_window\": \"24h\"}). Each line is {\"custom_id\",\"method\":\"POST\",\"url\":\"/v1/chat/completions\",\"body\":{...}}.",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "batches"
+                ],
+                "summary": "Create batch",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "JSONL file containing batch requests",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.BatchObject"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/batches/{batch_id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "batches"
+                ],
+                "summary": "Get batch status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Batch ID",
+                        "name": "batch_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.BatchObject"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/batches/{batch_id}/cancel": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "batches"
+                ],
+                "summary": "Cancel batch",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Batch ID",
+                        "name": "batch_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.BatchObject"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/batches/{batch_id}/results": {
+            "get": {
+                "description": "Returns the output JSONL (available for completed, cancelled and expired batches).",
+                "produces": [
+                    "application/jsonl"
+                ],
+                "tags": [
+                    "batches"
+                ],
+                "summary": "Get batch results",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Batch ID",
+                        "name": "batch_id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {}
+            }
+        },
         "/v1/cache": {
             "delete": {
-                "description": "Clears the entire cache. Optionally target a specific type via ?type=semantic or ?type=exact.",
+                "description": "Clears the cache. Target a type via ?type=semantic|exact|all (default all).",
                 "tags": [
                     "cache"
                 ],
@@ -437,7 +609,7 @@
         },
         "/v1/cache/inspect": {
             "get": {
-                "description": "Returns a paginated list of cached keys/hashes (does not return full payloads for security).",
+                "description": "Returns a paginated list of cached keys (never payloads).",
                 "tags": [
                     "cache"
                 ],
@@ -445,7 +617,7 @@
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Cache type: 'exact' (default), 'semantic', or 'all'",
+                        "description": "Cache type: 'exact' (default) or 'semantic'",
                         "name": "type",
                         "in": "query"
                     },
@@ -474,7 +646,7 @@
         },
         "/v1/cache/stats": {
             "get": {
-                "description": "Returns statistics about the exact-match and semantic caches (total entries, hit/miss rates).",
+                "description": "Returns statistics about the exact-match and semantic caches (entries, hit/miss rates).",
                 "produces": [
                     "application/json"
                 ],
@@ -494,7 +666,7 @@
         },
         "/v1/chat/completions": {
             "post": {
-                "description": "Send a chat completion request to an LLM provider.",
+                "description": "Send a chat completion request to an LLM provider. Set stream=true for Server-Sent Events.",
                 "consumes": [
                     "application/json"
                 ],
@@ -613,7 +785,7 @@
         },
         "/v1/messages": {
             "post": {
-                "description": "Anthropic-compatible /v1/messages endpoint (routes to chat completions).",
+                "description": "Anthropic Messages API compatible endpoint, served through the gateway's routing, caching and accounting. Supports stream=true.",
                 "consumes": [
                     "application/json"
                 ],
@@ -624,22 +796,31 @@
                     "chat"
                 ],
                 "summary": "Anthropic-style messages",
-                "parameters": [
-                    {
-                        "description": "Messages request",
-                        "name": "req",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/models.LLMRequest"
-                        }
-                    }
-                ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/models.LLMResponse"
+                            "$ref": "#/definitions/api.anthropicResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/models": {
+            "get": {
+                "description": "Lists the models the gateway can route to (OpenAI-compatible).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "models"
+                ],
+                "summary": "List models",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.ModelList"
                         }
                     }
                 }
@@ -784,11 +965,21 @@
                         "$ref": "#/definitions/analytics.SpendBucket"
                     }
                 },
+                "by_provider": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/analytics.SpendBucket"
+                    }
+                },
                 "by_team": {
                     "type": "object",
                     "additionalProperties": {
                         "$ref": "#/definitions/analytics.SpendBucket"
                     }
+                },
+                "data_since": {
+                    "description": "DataSince is the timestamp of the oldest retained entry; spend before\nit has been evicted from the in-memory window.",
+                    "type": "string"
                 },
                 "generated_at": {
                     "type": "string"
@@ -832,6 +1023,90 @@
                 }
             }
         },
+        "api.BatchObject": {
+            "type": "object",
+            "properties": {
+                "cancelled_at": {
+                    "type": "integer"
+                },
+                "cancelling_at": {
+                    "type": "integer"
+                },
+                "completed_at": {
+                    "type": "integer"
+                },
+                "completed_requests": {
+                    "type": "integer"
+                },
+                "completion_window": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "integer"
+                },
+                "endpoint": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "error_file_id": {
+                    "type": "string"
+                },
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/batch.BatchError"
+                    }
+                },
+                "expired_at": {
+                    "type": "integer"
+                },
+                "expires_at": {
+                    "type": "integer"
+                },
+                "failed_at": {
+                    "type": "integer"
+                },
+                "failed_requests": {
+                    "type": "integer"
+                },
+                "finalizing_at": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "in_progress_at": {
+                    "type": "integer"
+                },
+                "input_file_id": {
+                    "type": "string"
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "object": {
+                    "type": "string"
+                },
+                "output_file_id": {
+                    "type": "string"
+                },
+                "request_counts": {
+                    "$ref": "#/definitions/batch.RequestCounts"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "total_requests": {
+                    "description": "Flat counters kept for backward compatibility.",
+                    "type": "integer"
+                }
+            }
+        },
         "api.CacheInspectEntry": {
             "type": "object",
             "properties": {
@@ -872,8 +1147,23 @@
                 "exact": {
                     "type": "object",
                     "properties": {
+                        "error": {
+                            "type": "string"
+                        },
+                        "hit_rate": {
+                            "type": "number"
+                        },
+                        "hits": {
+                            "type": "integer"
+                        },
+                        "misses": {
+                            "type": "integer"
+                        },
                         "total_entries": {
                             "type": "integer"
+                        },
+                        "truncated": {
+                            "type": "boolean"
                         }
                     }
                 },
@@ -883,10 +1173,190 @@
                         "active_entries": {
                             "type": "integer"
                         },
+                        "enabled": {
+                            "type": "boolean"
+                        },
                         "total_entries": {
                             "type": "integer"
                         }
                     }
+                }
+            }
+        },
+        "api.ModelEntry": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "object": {
+                    "type": "string"
+                },
+                "owned_by": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.ModelList": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.ModelEntry"
+                    }
+                },
+                "object": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.anthropicBlock": {
+            "type": "object",
+            "properties": {
+                "cache_control": {
+                    "$ref": "#/definitions/models.CacheControl"
+                },
+                "content": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "input": {
+                    "type": "object"
+                },
+                "is_error": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "source": {
+                    "$ref": "#/definitions/api.anthropicSource"
+                },
+                "text": {
+                    "type": "string"
+                },
+                "tool_use_id": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.anthropicResponse": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.anthropicBlock"
+                    }
+                },
+                "id": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "stop_reason": {
+                    "type": "string"
+                },
+                "stop_sequence": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "usage": {
+                    "$ref": "#/definitions/api.anthropicUsage"
+                }
+            }
+        },
+        "api.anthropicSource": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "string"
+                },
+                "media_type": {
+                    "type": "string"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.anthropicUsage": {
+            "type": "object",
+            "properties": {
+                "input_tokens": {
+                    "type": "integer"
+                },
+                "output_tokens": {
+                    "type": "integer"
+                }
+            }
+        },
+        "batch.BatchError": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "line": {
+                    "type": "integer"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "param": {
+                    "type": "string"
+                }
+            }
+        },
+        "batch.RequestCounts": {
+            "type": "object",
+            "properties": {
+                "completed": {
+                    "type": "integer"
+                },
+                "failed": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "config.AgentConfig": {
+            "type": "object",
+            "properties": {
+                "cache_tool_results": {
+                    "type": "boolean"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "max_concurrent": {
+                    "type": "integer"
+                },
+                "max_iterations": {
+                    "type": "integer"
+                },
+                "tool_timeout": {
+                    "$ref": "#/definitions/time.Duration"
                 }
             }
         },
@@ -904,8 +1374,524 @@
                 }
             }
         },
+        "config.AuthConfig": {
+            "type": "object",
+            "properties": {
+                "admin_keys": {
+                    "description": "AdminKeys are additional keys with admin access.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "api_keys": {
+                    "description": "APIKeys are static client keys allowed to call the inference endpoints.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "master_key": {
+                    "description": "MasterKey grants admin access (key management, config, control plane).\nWhen empty a random key is generated at startup and printed once.",
+                    "type": "string"
+                }
+            }
+        },
+        "config.CacheConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "exact_prefix": {
+                    "type": "string"
+                },
+                "semantic_embedding_model": {
+                    "description": "SemanticEmbeddingModel, when set, embeds prompts for the semantic\ncache through the gateway's embeddings route (otherwise a local\nlexical embedder is used).",
+                    "type": "string"
+                },
+                "semantic_enabled": {
+                    "description": "SemanticEnabled turns on similarity-based caching.",
+                    "type": "boolean"
+                },
+                "semantic_prefix": {
+                    "type": "string"
+                },
+                "semantic_threshold": {
+                    "type": "number"
+                },
+                "shared_across_keys": {
+                    "description": "SharedAcrossKeys lets different API keys share cache entries. Off by\ndefault so one tenant can never be served another tenant's response.",
+                    "type": "boolean"
+                },
+                "ttl": {
+                    "$ref": "#/definitions/time.Duration"
+                }
+            }
+        },
+        "config.CallbackDatadogConfig": {
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "type": "string"
+                },
+                "base_url": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "site": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.CallbackLangfuseConfig": {
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "description": "APIKey is the legacy single-key form (\"pk:sk\" or the secret key).",
+                    "type": "string"
+                },
+                "base_url": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "project_id": {
+                    "type": "string"
+                },
+                "public_key": {
+                    "description": "PublicKey/SecretKey are the Langfuse project key pair (preferred).",
+                    "type": "string"
+                },
+                "secret_key": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.CallbackWebhookConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "retries": {
+                    "type": "integer"
+                },
+                "retry_delay": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "secret": {
+                    "type": "string"
+                },
+                "timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.CallbacksConfig": {
+            "type": "object",
+            "properties": {
+                "datadog": {
+                    "$ref": "#/definitions/config.CallbackDatadogConfig"
+                },
+                "langfuse": {
+                    "$ref": "#/definitions/config.CallbackLangfuseConfig"
+                },
+                "webhook": {
+                    "$ref": "#/definitions/config.CallbackWebhookConfig"
+                }
+            }
+        },
+        "config.CircuitBreakConfig": {
+            "type": "object",
+            "properties": {
+                "half_open_max_calls": {
+                    "type": "integer"
+                },
+                "max_failures": {
+                    "type": "integer"
+                },
+                "reset_timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                }
+            }
+        },
         "config.Config": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "$ref": "#/definitions/config.AgentConfig"
+                },
+                "app": {
+                    "$ref": "#/definitions/config.AppConfig"
+                },
+                "auth": {
+                    "$ref": "#/definitions/config.AuthConfig"
+                },
+                "cache": {
+                    "$ref": "#/definitions/config.CacheConfig"
+                },
+                "callbacks": {
+                    "$ref": "#/definitions/config.CallbacksConfig"
+                },
+                "finops": {
+                    "$ref": "#/definitions/config.FinopsConfig"
+                },
+                "guardrails": {
+                    "$ref": "#/definitions/config.GuardrailsConfig"
+                },
+                "logging": {
+                    "$ref": "#/definitions/config.LoggingConfig"
+                },
+                "persistence": {
+                    "$ref": "#/definitions/config.PersistenceConfig"
+                },
+                "plugins": {
+                    "$ref": "#/definitions/config.PluginsConfig"
+                },
+                "providers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.ProviderConfig"
+                    }
+                },
+                "rate_limit": {
+                    "$ref": "#/definitions/config.RateLimitConfig"
+                },
+                "redis": {
+                    "$ref": "#/definitions/config.RedisConfig"
+                },
+                "router": {
+                    "$ref": "#/definitions/config.RouterConfig"
+                },
+                "security": {
+                    "$ref": "#/definitions/config.SecurityConfig"
+                },
+                "server": {
+                    "$ref": "#/definitions/config.ServerConfig"
+                },
+                "telemetry": {
+                    "$ref": "#/definitions/config.TelemetryConfig"
+                },
+                "webhooks": {
+                    "$ref": "#/definitions/config.WebhooksConfig"
+                }
+            }
+        },
+        "config.FinopsConfig": {
+            "type": "object",
+            "properties": {
+                "budget_period": {
+                    "description": "BudgetPeriod resets per-key spend: \"lifetime\" (default), \"daily\" or\n\"monthly\" (UTC).",
+                    "type": "string"
+                },
+                "default_max_usd": {
+                    "type": "number"
+                },
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.GuardrailsConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.LoggingConfig": {
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string"
+                },
+                "level": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.PersistenceConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "path": {
+                    "description": "Path of the database file (default \u003cAEROLLM_STATE_DIR\u003e/gateway.db).",
+                    "type": "string"
+                }
+            }
+        },
+        "config.PluginHookConfig": {
+            "type": "object",
+            "properties": {
+                "file": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.PluginToolConfig": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "file": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
+        "config.PluginsConfig": {
+            "type": "object",
+            "properties": {
+                "allow_clock": {
+                    "description": "AllowClock / AllowRandom expose real clocks / crypto randomness to\nguests (deterministic fakes otherwise).",
+                    "type": "boolean"
+                },
+                "allow_random": {
+                    "type": "boolean"
+                },
+                "dir": {
+                    "description": "Dir holds the .wasm files; tool files are resolved inside it only.",
+                    "type": "string"
+                },
+                "hooks": {
+                    "description": "Hooks run, in order, on every chat request (OnRequest) and\nnon-streaming response (OnResponse).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.PluginHookConfig"
+                    }
+                },
+                "max_concurrent": {
+                    "description": "MaxConcurrent bounds simultaneous runs (0 = runtime default).",
+                    "type": "integer"
+                },
+                "memory_mib": {
+                    "description": "MemoryMiB caps each module's linear memory.",
+                    "type": "integer"
+                },
+                "timeout": {
+                    "description": "Timeout bounds one tool invocation.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.PluginToolConfig"
+                    }
+                }
+            }
+        },
+        "config.ProviderConfig": {
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "type": "string"
+                },
+                "api_version": {
+                    "description": "APIVersion is sent as ?api-version= for Azure OpenAI deployment URLs.",
+                    "type": "string"
+                },
+                "base_url": {
+                    "type": "string"
+                },
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "rate_limit_rps": {
+                    "type": "number"
+                },
+                "timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "type": {
+                    "type": "string"
+                },
+                "weight": {
+                    "type": "integer"
+                }
+            }
+        },
+        "config.RateLimitConfig": {
+            "type": "object",
+            "properties": {
+                "burst_multiplier": {
+                    "type": "integer"
+                },
+                "default_rps": {
+                    "type": "number"
+                },
+                "default_tpm": {
+                    "description": "DefaultTPM is the advertised tokens-per-minute limit.",
+                    "type": "integer"
+                },
+                "strategy": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.RedisConfig": {
+            "type": "object",
+            "properties": {
+                "addr": {
+                    "type": "string"
+                },
+                "db": {
+                    "type": "integer"
+                },
+                "min_idle_conns": {
+                    "type": "integer"
+                },
+                "password": {
+                    "type": "string"
+                },
+                "pool_size": {
+                    "type": "integer"
+                },
+                "required": {
+                    "description": "Required makes startup fail when Redis is unreachable. When false the\ngateway starts in degraded mode (in-memory limiter, no exact cache).",
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.RouterConfig": {
+            "type": "object",
+            "properties": {
+                "circuit_break": {
+                    "$ref": "#/definitions/config.CircuitBreakConfig"
+                },
+                "health_check_interval": {
+                    "description": "HealthCheckInterval actively probes providers (cheap model-list GETs)\nso readiness and routing reflect upstream health. 0 disables.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                },
+                "max_attempts": {
+                    "description": "MaxAttempts bounds how many providers are tried for one request when\nearlier attempts fail with retryable errors.",
+                    "type": "integer"
+                },
+                "max_retry_wait": {
+                    "description": "MaxRetryWait is the longest upstream Retry-After the router will wait\nout before retrying when no other provider is left (0 disables).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                },
+                "strategy": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.SecurityConfig": {
+            "type": "object",
+            "properties": {
+                "cors_allowed_origins": {
+                    "description": "CORSAllowedOrigins lists origins allowed to call the API from browsers.\nEmpty disables CORS; \"*\" allows any origin (credentials never allowed).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "enable_pprof": {
+                    "description": "EnablePprof exposes net/http/pprof on localhost:6060.",
+                    "type": "boolean"
+                },
+                "public_metrics": {
+                    "description": "PublicMetrics serves /metrics without authentication.",
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.ServerConfig": {
+            "type": "object",
+            "properties": {
+                "idle_timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "max_body_bytes": {
+                    "description": "MaxBodyBytes caps request bodies on JSON endpoints.",
+                    "type": "integer"
+                },
+                "port": {
+                    "type": "integer"
+                },
+                "read_header_timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "read_timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "shutdown_timeout": {
+                    "$ref": "#/definitions/time.Duration"
+                },
+                "write_timeout": {
+                    "description": "WriteTimeout bounds non-streaming responses. Streaming (SSE) responses\nlift the deadline per request so long generations are not cut off.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/time.Duration"
+                        }
+                    ]
+                }
+            }
+        },
+        "config.TelemetryConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "exporter": {
+                    "type": "string"
+                },
+                "otlp_addr": {
+                    "type": "string"
+                },
+                "sample_rate": {
+                    "type": "number"
+                },
+                "service_name": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.WebhooksConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
         },
         "keymanager.DeleteRequest": {
             "type": "object",
@@ -930,6 +1916,12 @@
                         "type": "string"
                     }
                 },
+                "blocked": {
+                    "type": "boolean"
+                },
+                "budget_duration": {
+                    "type": "string"
+                },
                 "duration": {
                     "type": "string"
                 },
@@ -946,7 +1938,19 @@
                         "type": "string"
                     }
                 },
+                "rate_limit_rps": {
+                    "type": "number"
+                },
+                "rate_limit_tpm": {
+                    "type": "integer"
+                },
+                "role": {
+                    "$ref": "#/definitions/keymanager.KeyRole"
+                },
                 "team_id": {
+                    "type": "string"
+                },
+                "tenant_id": {
                     "type": "string"
                 },
                 "user_id": {
@@ -958,12 +1962,16 @@
             "type": "object",
             "properties": {
                 "expires": {
+                    "description": "Expires is RFC 3339, or \"\" when the key never expires.",
                     "type": "string"
                 },
                 "key": {
                     "type": "string"
                 },
                 "key_hash": {
+                    "type": "string"
+                },
+                "prefix": {
                     "type": "string"
                 },
                 "token": {
@@ -994,6 +2002,15 @@
                         "type": "string"
                     }
                 },
+                "blocked": {
+                    "type": "boolean"
+                },
+                "budget_duration": {
+                    "type": "string"
+                },
+                "budget_reset_at": {
+                    "type": "string"
+                },
                 "created_at": {
                     "type": "string"
                 },
@@ -1016,10 +2033,45 @@
                         "type": "string"
                     }
                 },
+                "prefix": {
+                    "type": "string"
+                },
+                "rate_limit_rps": {
+                    "type": "number"
+                },
+                "rate_limit_tpm": {
+                    "type": "integer"
+                },
+                "role": {
+                    "$ref": "#/definitions/keymanager.KeyRole"
+                },
+                "spend": {
+                    "type": "number"
+                },
                 "status": {
                     "$ref": "#/definitions/keymanager.KeyStatus"
+                },
+                "team_id": {
+                    "type": "string"
+                },
+                "tenant_id": {
+                    "type": "string"
+                },
+                "user_id": {
+                    "type": "string"
                 }
             }
+        },
+        "keymanager.KeyRole": {
+            "type": "string",
+            "enum": [
+                "",
+                "team_admin"
+            ],
+            "x-enum-varnames": [
+                "RoleMember",
+                "RoleTeamAdmin"
+            ]
         },
         "keymanager.KeyStatus": {
             "type": "string",
@@ -1040,6 +2092,14 @@
                 "budget": {
                     "type": "number"
                 },
+                "budget_duration": {
+                    "description": "BudgetDuration, if set (e.g. \"30d\"), resets Spend periodically.",
+                    "type": "string"
+                },
+                "budget_reset_at": {
+                    "description": "BudgetResetAt is when Spend is next reset (zero if no BudgetDuration).",
+                    "type": "string"
+                },
                 "created_at": {
                     "type": "string"
                 },
@@ -1058,6 +2118,61 @@
                 },
                 "name": {
                     "type": "string"
+                },
+                "spend": {
+                    "description": "Spend is the accumulated spend in USD of all keys of the team in the\ncurrent budget period.",
+                    "type": "number"
+                }
+            }
+        },
+        "keymanager.TeamInfoResponse": {
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "number"
+                },
+                "budget_duration": {
+                    "description": "BudgetDuration, if set (e.g. \"30d\"), resets Spend periodically.",
+                    "type": "string"
+                },
+                "budget_exceeded": {
+                    "description": "BudgetExceeded reports whether keys of the team are currently\nrejected because of the team budget.",
+                    "type": "boolean"
+                },
+                "budget_reset_at": {
+                    "description": "BudgetResetAt is when Spend is next reset (zero if no BudgetDuration).",
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "keys": {
+                    "description": "Keys is the number of non-revoked keys assigned to the team.",
+                    "type": "integer"
+                },
+                "members": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "name": {
+                    "type": "string"
+                },
+                "remaining_budget": {
+                    "description": "RemainingBudget is Budget - Spend (never negative); absent when the\nteam has no budget.",
+                    "type": "number"
+                },
+                "spend": {
+                    "description": "Spend is the accumulated spend in USD of all keys of the team in the\ncurrent budget period.",
+                    "type": "number"
                 }
             }
         },
@@ -1123,6 +2238,10 @@
                 "index": {
                     "type": "integer"
                 },
+                "logprobs": {
+                    "description": "Logprobs is passed through verbatim when the upstream returns it.",
+                    "type": "object"
+                },
                 "message": {
                     "$ref": "#/definitions/models.Message"
                 }
@@ -1148,10 +2267,19 @@
         "models.EmbeddingRequest": {
             "type": "object",
             "properties": {
+                "dimensions": {
+                    "type": "integer"
+                },
+                "encoding_format": {
+                    "type": "string"
+                },
                 "input": {
                     "type": "string"
                 },
                 "model": {
+                    "type": "string"
+                },
+                "user": {
                     "type": "string"
                 }
             }
@@ -1221,6 +2349,9 @@
         "models.JSONSchema": {
             "type": "object",
             "properties": {
+                "description": {
+                    "type": "string"
+                },
                 "name": {
                     "type": "string"
                 },
@@ -1240,6 +2371,22 @@
                 "frequency_penalty": {
                     "type": "number"
                 },
+                "logit_bias": {
+                    "description": "LogitBias maps token IDs to bias values (-100..100).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float64"
+                    }
+                },
+                "logprobs": {
+                    "description": "Logprobs requests log probabilities of output tokens.",
+                    "type": "boolean"
+                },
+                "max_completion_tokens": {
+                    "description": "MaxCompletionTokens is the newer OpenAI name for MaxTokens.",
+                    "type": "integer"
+                },
                 "max_tokens": {
                     "description": "Maximum tokens to generate.",
                     "type": "integer",
@@ -1257,6 +2404,14 @@
                     "type": "string",
                     "example": "gpt-4o"
                 },
+                "n": {
+                    "description": "N is the number of choices to generate.",
+                    "type": "integer"
+                },
+                "parallel_tool_calls": {
+                    "description": "ParallelToolCalls enables parallel function calling.",
+                    "type": "boolean"
+                },
                 "presence_penalty": {
                     "type": "number"
                 },
@@ -1271,6 +2426,10 @@
                         }
                     ]
                 },
+                "seed": {
+                    "description": "Seed requests deterministic sampling.",
+                    "type": "integer"
+                },
                 "stop": {
                     "description": "Stop sequences.",
                     "type": "array",
@@ -1282,10 +2441,26 @@
                     "type": "boolean",
                     "example": false
                 },
+                "stream_options": {
+                    "description": "StreamOptions configures streaming (e.g. include_usage).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.StreamOptions"
+                        }
+                    ]
+                },
                 "temperature": {
                     "description": "Sampling temperature (0-2).",
                     "type": "number",
                     "example": 0.7
+                },
+                "tool_choice": {
+                    "description": "ToolChoice controls which (if any) tool is called.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.ToolChoice"
+                        }
+                    ]
                 },
                 "tools": {
                     "type": "array",
@@ -1293,10 +2468,18 @@
                         "$ref": "#/definitions/models.ToolDefinition"
                     }
                 },
+                "top_logprobs": {
+                    "description": "TopLogprobs is the number of most likely tokens to return (0-20).",
+                    "type": "integer"
+                },
                 "top_p": {
                     "description": "Nucleus sampling (0-1).",
                     "type": "number",
                     "example": 1
+                },
+                "user": {
+                    "description": "User is an end-user identifier for abuse monitoring.",
+                    "type": "string"
                 }
             }
         },
@@ -1325,6 +2508,9 @@
                 "object": {
                     "type": "string",
                     "example": "chat.completion"
+                },
+                "system_fingerprint": {
+                    "type": "string"
                 },
                 "usage": {
                     "$ref": "#/definitions/models.Usage"
@@ -1371,14 +2557,24 @@
                 "system",
                 "user",
                 "assistant",
-                "tool"
+                "tool",
+                "developer"
             ],
             "x-enum-varnames": [
                 "RoleSystem",
                 "RoleUser",
                 "RoleAssistant",
-                "RoleTool"
+                "RoleTool",
+                "RoleDeveloper"
             ]
+        },
+        "models.PromptTokensDetails": {
+            "type": "object",
+            "properties": {
+                "cached_tokens": {
+                    "type": "integer"
+                }
+            }
         },
         "models.ResponseFormat": {
             "type": "object",
@@ -1438,6 +2634,14 @@
                 }
             }
         },
+        "models.StreamOptions": {
+            "type": "object",
+            "properties": {
+                "include_usage": {
+                    "type": "boolean"
+                }
+            }
+        },
         "models.ToolCall": {
             "type": "object",
             "properties": {
@@ -1448,6 +2652,19 @@
                     "type": "string"
                 },
                 "type": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.ToolChoice": {
+            "type": "object",
+            "properties": {
+                "function": {
+                    "description": "Function forces a specific function tool by name.",
+                    "type": "string"
+                },
+                "mode": {
+                    "description": "Mode is \"none\", \"auto\" or \"required\" when Function is empty.",
                     "type": "string"
                 }
             }
@@ -1464,6 +2681,10 @@
                 "parameters": {
                     "type": "object",
                     "additionalProperties": true
+                },
+                "strict": {
+                    "description": "Strict enables OpenAI strict schema adherence.",
+                    "type": "boolean"
                 }
             }
         },
@@ -1490,11 +2711,43 @@
                     "type": "integer",
                     "example": 100
                 },
+                "prompt_tokens_details": {
+                    "description": "PromptTokensDetails reports cached prompt tokens when known.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.PromptTokensDetails"
+                        }
+                    ]
+                },
                 "total_tokens": {
                     "type": "integer",
                     "example": 150
                 }
             }
+        },
+        "time.Duration": {
+            "type": "integer",
+            "format": "int64",
+            "enum": [
+                -9223372036854775808,
+                9223372036854775807,
+                1,
+                1000,
+                1000000,
+                1000000000,
+                60000000000,
+                3600000000000
+            ],
+            "x-enum-varnames": [
+                "minDuration",
+                "maxDuration",
+                "Nanosecond",
+                "Microsecond",
+                "Millisecond",
+                "Second",
+                "Minute",
+                "Hour"
+            ]
         }
     },
     "securityDefinitions": {

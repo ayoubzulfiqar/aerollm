@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -253,12 +254,18 @@ func TestBatchProcessingEndToEnd(t *testing.T) {
 	// reads WorkDir()/output_<id>.jsonl).
 	outPath := filepath.Join(proc.WorkDir(), "output_"+b.ID+".jsonl")
 	st, err := os.Stat(outPath)
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("output file missing or not private: %v %v", st, err)
+	if err != nil {
+		t.Fatalf("output file missing: %v", err)
 	}
-	dst, _ := os.Stat(proc.WorkDir())
-	if dst.Mode().Perm() != 0o700 {
-		t.Fatalf("work dir not private: %v", dst.Mode())
+	// Unix permission bits are not meaningful on Windows.
+	if runtime.GOOS != "windows" {
+		if st.Mode().Perm() != 0o600 {
+			t.Fatalf("output file not private: %v", st.Mode())
+		}
+		dst, _ := os.Stat(proc.WorkDir())
+		if dst.Mode().Perm() != 0o700 {
+			t.Fatalf("work dir not private: %v", dst.Mode())
+		}
 	}
 }
 

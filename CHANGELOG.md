@@ -2,7 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-09-24 — Security & correctness audit
+## [Unreleased] - 2026-09-24 — Durability, WASM runtime and platform completion
+
+### Added
+- Durable state (`persistence.enabled`, bbolt) for virtual keys, users/teams, budgets and spend, secrets, batches (crash-resumable), spend analytics, meter, the audit ledger (v2 hash covering timestamps/metadata), compliance/tenant stores, RAG and graph documents, HITL approvals and all control-plane stores; Redis-backed key/user/team stores for multi-instance deployments.
+- Real WebAssembly runtime (wazero): sandboxed WASI plugins as agent/MCP tools and request/response hooks; `aerollm plugin init` scaffolding.
+- Team budgets, `/v1/budgets`, `finops.budget_period`, working `finops.default_max_usd`.
+- Bedrock streaming (AWS event-stream), Anthropic structured output via forced tools, Azure deployment URLs, active provider health probes, Retry-After aware retries, operator circuit controls.
+- Reliable Redis webhook queue (at-least-once, visibility timeout, dead letters); integer Stripe metering; real-embedding semantic cache.
+- MCP sessions, resources, prompts and tool billing; stateless mode.
+- SMTP email and Twilio SMS senders, `/v1/notification/send`, `/v1/shadow/results`, DST-correct scheduler runner with webhook executor.
+- Kubernetes operator with a stdlib client (list/watch CRDs, status updates) and deploy manifests; operator image target.
+- mTLS mesh transport with certificate-bound peer identities; Redis publish lock for the marketplace; open-standard receipt/capability endpoints.
+- Federated learning with signed, replay-protected rounds and authenticated registration; OpenAI-compatible fine-tuning backend; AIOps actions (strategy switch, rate-limit tightening, circuit opening; dry-run by default); broader red-team library with live probing.
+- CLI: keys, batches, budgets, RAG, cache, spend, config, RSI, notify and shadow commands.
+- CI workflow for pushes/PRs: gofmt/vet, race tests on Linux, tests on macOS/Windows, Redis integration job, Docker builds.
+
+### Changed
+- Build artifacts and runtime state are no longer tracked in git; `.dockerignore` added.
+- Swagger docs regenerated from the current annotations.
+
+## 2026-09-24 — Security & correctness audit
 
 ### Security
 - All control-plane endpoints (secrets, config, keys, policy, flags, chaos, RSI, cache, spend, incidents, …) now require an admin key; inference endpoints require a client, admin or virtual key. Previously most were unauthenticated and the `NewAuthMiddleware(h).Next` pattern bypassed auth entirely.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,9 +69,12 @@ func TestRunCycleDedupesAndBoundsFindings(t *testing.T) {
 	if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".go") {
 		t.Fatalf("findings must be JSON, got %q", name)
 	}
-	info, _ := entries[0].Info()
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
+	// Windows does not implement Unix permission bits.
+	if runtime.GOOS != "windows" {
+		info, _ := entries[0].Info()
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
+		}
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, name))

@@ -25,8 +25,9 @@ type modelList struct {
 func newModelsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "models",
-		Short: "List the models served by the gateway",
+		Short: "List the models served by the gateway and show loaded model info",
 	}
+	cmd.AddCommand(newModelsInfoCmd("info"))
 	cmd.AddCommand(&cobra.Command{
 		Use:     "list",
 		Short:   "List available models (GET /v1/models)",

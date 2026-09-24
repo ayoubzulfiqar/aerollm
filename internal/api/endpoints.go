@@ -329,3 +329,24 @@ func (h *Handler) resolveProvider(ctx context.Context, model string) (providers.
 	}
 	return p, true
 }
+
+// Embed returns the embedding of text using model through the gateway's
+// provider resolution (used by the semantic cache).
+func (h *Handler) Embed(ctx context.Context, model, text string) ([]float64, error) {
+	p, ok := h.resolveProvider(ctx, model)
+	if !ok {
+		return nil, errors.New("no provider configured for embedding model")
+	}
+	mp, ok := asMultiEndpoint(p)
+	if !ok {
+		return nil, errors.New("embedding model provider does not support embeddings")
+	}
+	resp, err := mp.Embeddings(ctx, &models.EmbeddingRequest{Model: model, Input: text})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || len(resp.Data) == 0 || len(resp.Data[0].Embedding) == 0 {
+		return nil, errors.New("empty embedding response")
+	}
+	return resp.Data[0].Embedding, nil
+}

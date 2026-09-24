@@ -10,19 +10,34 @@ import (
 	"time"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/wasmrt"
+	"github.com/ayoubzulfiqar/aerollm/internal/wasmrt/wasmrttest"
 )
 
-func TestWasmExecutorFailsHonestly(t *testing.T) {
+func TestWasmExecutorRejectsBadCalls(t *testing.T) {
 	e := NewWasmExecutor()
+	defer e.Close()
 	out, err := e.Execute(context.Background(), "echo", map[string]interface{}{"text": "hi"})
-	if !errors.Is(err, ErrWasmRuntimeUnavailable) || out != nil {
-		t.Fatalf("expected ErrWasmRuntimeUnavailable, got %v %v", out, err)
+	if !errors.Is(err, ErrUnknownTool) || out != nil {
+		t.Fatalf("expected ErrUnknownTool for an unregistered tool, got %v %v", out, err)
 	}
 	if _, err := e.Execute(context.Background(), "", nil); err == nil {
 		t.Fatal("empty tool name must fail")
 	}
 	if _, err := e.Execute(context.Background(), "../../bin/sh", nil); !errors.Is(err, ErrInvalidToolName) {
 		t.Fatalf("path-like tool name must be rejected, got %v", err)
+	}
+	if err := e.Register("bad name", wasmrttest.Nop()); !errors.Is(err, ErrInvalidToolName) {
+		t.Fatalf("expected ErrInvalidToolName, got %v", err)
+	}
+	if err := e.Register("evil", wasmrttest.Import("env", "system")); !errors.Is(err, wasmrt.ErrInvalidModule) {
+		t.Fatalf("expected ErrInvalidModule, got %v", err)
+	}
+	if err := e.Register("junk", []byte("\x00asm\x01\x00\x00\x00garbage")); !errors.Is(err, wasmrt.ErrInvalidModule) {
+		t.Fatalf("expected ErrInvalidModule, got %v", err)
+	}
+	if got := e.Tools(); len(got) != 0 {
+		t.Fatalf("no tools expected, got %v", got)
 	}
 }
 
@@ -33,6 +48,7 @@ func TestWasmPayloadValidate(t *testing.T) {
 	}
 	for _, bad := range []WasmToolPayload{
 		{Module: []byte("#!/bin/sh")},
+		{Module: []byte("\x00asm\x0d\x00\x01\x00")}, // component-model binary
 		{Module: good.Module, MaxMemory: MaxWasmMemory + 1},
 		{Module: good.Module, Timeout: -1},
 	} {

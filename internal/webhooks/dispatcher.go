@@ -93,6 +93,9 @@ type DispatcherOptions struct {
 	// HTTPClient overrides the HTTP client. Redirects are never followed by
 	// the default client.
 	HTTPClient *http.Client
+	// QueueConsumers is the number of goroutines StartWorker runs against a
+	// reliable (AckQueue) queue (default 4).
+	QueueConsumers int
 }
 
 // DispatcherStats is a snapshot of delivery counters.
@@ -109,8 +112,9 @@ var (
 	// ErrQueueEmpty is returned by WebhookQueue.Dequeue when no event arrived
 	// within the blocking timeout.
 	ErrQueueEmpty = errors.New("webhooks: queue empty")
-	// ErrMalformedEvent is returned by Dequeue when a queued payload could
-	// not be decoded; the message has been consumed and is dropped.
+	// ErrMalformedEvent is returned by Dequeue/Receive when a queued payload
+	// could not be decoded; the message has been consumed (the reliable
+	// queue keeps it in its dead-letter list).
 	ErrMalformedEvent = errors.New("webhooks: malformed queued event")
 	// ErrNoRedisClient is returned by RedisWebhookQueue without a client.
 	ErrNoRedisClient = errors.New("webhooks: redis client not configured")
@@ -161,6 +165,9 @@ func NewWebhookDispatcherWithOptions(opts DispatcherOptions) *WebhookDispatcher 
 	}
 	if opts.MaxRetryDelay <= 0 {
 		opts.MaxRetryDelay = 30 * time.Second
+	}
+	if opts.QueueConsumers <= 0 {
+		opts.QueueConsumers = 4
 	}
 	client := opts.HTTPClient
 	if client == nil {
@@ -522,24 +529,33 @@ type RedisListClient interface {
 	BRPop(ctx context.Context, timeout time.Duration, keys ...string) *redis.StringSliceCmd
 }
 
-// RedisWebhookQueue implements WebhookQueue using a Redis list.
+// RedisWebhookQueue implements WebhookQueue (and, when built over a full
+// Redis client, the at-least-once AckQueue) using Redis lists. See
+// NewReliableRedisQueue for the delivery guarantees.
 type RedisWebhookQueue struct {
 	client       RedisListClient
 	key          string
 	blockTimeout time.Duration
+	rel          *reliableState
 }
 
-// NewRedisWebhookQueue creates a new Redis-backed webhook queue. A nil client
-// yields a queue whose operations return ErrNoRedisClient.
+// NewRedisWebhookQueue creates a reliable (at-least-once) Redis-backed
+// webhook queue with default ReliableQueueOptions. A nil client yields a
+// queue whose operations return ErrNoRedisClient.
 func NewRedisWebhookQueue(client *redis.Client, key string) *RedisWebhookQueue {
 	if client == nil {
 		return NewRedisWebhookQueueWithClient(nil, key)
 	}
-	return NewRedisWebhookQueueWithClient(client, key)
+	return NewReliableRedisQueue(client, key, ReliableQueueOptions{})
 }
 
 // NewRedisWebhookQueueWithClient creates a queue over any RedisListClient.
+// Clients that also implement RedisQueueClient get the reliable queue;
+// minimal clients keep the legacy pop-then-deliver semantics (at most once).
 func NewRedisWebhookQueueWithClient(client RedisListClient, key string) *RedisWebhookQueue {
+	if rc, ok := client.(RedisQueueClient); ok && rc != nil {
+		return NewReliableRedisQueue(rc, key, ReliableQueueOptions{})
+	}
 	if key == "" {
 		key = "webhook:queue"
 	}
@@ -551,7 +567,15 @@ func (q *RedisWebhookQueue) Enqueue(ctx context.Context, event Event) error {
 	if q == nil || q.client == nil {
 		return ErrNoRedisClient
 	}
-	data, err := json.Marshal(normalizeEvent(event))
+	var (
+		data []byte
+		err  error
+	)
+	if q.rel != nil {
+		data, err = json.Marshal(newEnvelope(event))
+	} else {
+		data, err = json.Marshal(normalizeEvent(event))
+	}
 	if err != nil {
 		return err
 	}
@@ -559,10 +583,24 @@ func (q *RedisWebhookQueue) Enqueue(ctx context.Context, event Event) error {
 }
 
 // Dequeue pops an event, blocking for at most the queue's block timeout.
-// It returns ErrQueueEmpty when nothing arrived in time.
+// It returns ErrQueueEmpty when nothing arrived in time. Dequeue removes
+// the event before the caller processes it (at most once); use
+// Receive/Ack for at-least-once processing.
 func (q *RedisWebhookQueue) Dequeue(ctx context.Context) (Event, error) {
 	if q == nil || q.client == nil {
 		return Event{}, ErrNoRedisClient
+	}
+	if q.rel != nil {
+		m, err := q.Receive(ctx)
+		if err != nil {
+			return Event{}, err
+		}
+		bctx, cancel := bookkeeping(ctx)
+		defer cancel()
+		if err := q.Ack(bctx, m); err != nil && !errors.Is(err, ErrLeaseExpired) {
+			return Event{}, err
+		}
+		return m.Event, nil
 	}
 	result, err := q.client.BRPop(ctx, q.blockTimeout, q.key).Result()
 	if errors.Is(err, redis.Nil) {
@@ -609,28 +647,32 @@ func (d *WebhookDispatcher) StartWorker(ctx context.Context, queue WebhookQueue)
 }
 
 // StartWorkerWithWaitGroup begins a background worker and tracks it in the
-// provided WaitGroup. The worker exits promptly when ctx is cancelled, backs
-// off exponentially (100ms..5s) on queue errors and never busy-loops.
+// provided WaitGroup. The worker exits promptly when ctx is cancelled (or,
+// for reliable queues, when the dispatcher is shut down), backs off
+// exponentially (100ms..5s) on queue errors and never busy-loops.
+//
+// When queue is a reliable AckQueue (the Redis queue built over a full
+// client), DispatcherOptions.QueueConsumers goroutines lease messages,
+// deliver them synchronously to every registered target and only then
+// acknowledge them; failures are retried by the queue with backoff and
+// eventually dead-lettered, and deliveries interrupted by ctx cancellation
+// or Shutdown are released back to the queue. Otherwise events are popped
+// and handed to the in-process delivery pool (at most once).
 func (d *WebhookDispatcher) StartWorkerWithWaitGroup(ctx context.Context, queue WebhookQueue, wg *sync.WaitGroup) {
+	if aq, ok := reliableQueue(queue); ok {
+		for i := 0; i < d.opts.QueueConsumers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.consume(ctx, aq)
+			}()
+		}
+		return
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		const (
-			emptyWait  = 50 * time.Millisecond
-			minBackoff = 100 * time.Millisecond
-			maxBackoff = 5 * time.Second
-		)
-		backoff := minBackoff
-		wait := func(dur time.Duration) bool {
-			t := time.NewTimer(dur)
-			defer t.Stop()
-			select {
-			case <-ctx.Done():
-				return false
-			case <-t.C:
-				return true
-			}
-		}
+		backoff := minQueueBackoff
 		for {
 			if ctx.Err() != nil {
 				return
@@ -645,19 +687,19 @@ func (d *WebhookDispatcher) StartWorkerWithWaitGroup(ctx context.Context, queue 
 					telemetry.RecordError()
 					continue
 				case errors.Is(err, ErrQueueEmpty):
-					backoff = minBackoff
-					if !wait(emptyWait) {
+					backoff = minQueueBackoff
+					if !sleepCtx(ctx, queueEmptyWait) {
 						return
 					}
 				default:
-					if !wait(backoff) {
+					if !sleepCtx(ctx, backoff) {
 						return
 					}
-					backoff = min(backoff*2, maxBackoff)
+					backoff = min(backoff*2, maxQueueBackoff)
 				}
 				continue
 			}
-			backoff = minBackoff
+			backoff = minQueueBackoff
 			event = normalizeEvent(event)
 			for _, cfg := range d.targets(event.Type) {
 				// Block (bounded by ctx) rather than drop: the event came
@@ -666,4 +708,125 @@ func (d *WebhookDispatcher) StartWorkerWithWaitGroup(ctx context.Context, queue 
 			}
 		}
 	}()
+}
+
+const (
+	queueEmptyWait  = 50 * time.Millisecond
+	minQueueBackoff = 100 * time.Millisecond
+	maxQueueBackoff = 5 * time.Second
+)
+
+func sleepCtx(ctx context.Context, dur time.Duration) bool {
+	t := time.NewTimer(dur)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// reliableQueue reports whether queue supports at-least-once consumption.
+func reliableQueue(queue WebhookQueue) (AckQueue, bool) {
+	aq, ok := queue.(AckQueue)
+	if !ok {
+		return nil, false
+	}
+	if r, ok := queue.(interface{ Reliable() bool }); ok && !r.Reliable() {
+		return nil, false
+	}
+	return aq, true
+}
+
+// consume is the at-least-once consumer loop. It stops when ctx is done or
+// the dispatcher is shut down.
+func (d *WebhookDispatcher) consume(ctx context.Context, q AckQueue) {
+	backoff := minQueueBackoff
+	for ctx.Err() == nil && d.lifeCtx.Err() == nil {
+		m, err := q.Receive(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			switch {
+			case errors.Is(err, ErrMalformedEvent), errors.Is(err, ErrDeadLettered):
+				continue
+			case errors.Is(err, ErrQueueEmpty):
+				backoff = minQueueBackoff
+				if !sleepCtx(ctx, queueEmptyWait) {
+					return
+				}
+			default:
+				telemetry.RecordError()
+				if !sleepCtx(ctx, backoff) {
+					return
+				}
+				backoff = min(backoff*2, maxQueueBackoff)
+			}
+			continue
+		}
+		backoff = minQueueBackoff
+		d.deliverLeased(ctx, q, m)
+	}
+}
+
+// deliverLeased delivers one leased message to every target registered for
+// its type and settles it: Ack on success, Release when interrupted by
+// shutdown, Nack otherwise (permanent when every failure was permanent).
+func (d *WebhookDispatcher) deliverLeased(ctx context.Context, q AckQueue, m *QueueMessage) {
+	event := normalizeEvent(m.Event)
+	settle := func(fn func(context.Context) error) {
+		sctx, cancel := bookkeeping(ctx)
+		defer cancel()
+		if err := fn(sctx); err != nil && !errors.Is(err, ErrLeaseExpired) {
+			telemetry.RecordError()
+		}
+	}
+	targets := d.targets(event.Type)
+	if len(targets) == 0 {
+		settle(func(c context.Context) error { return q.Ack(c, m) })
+		return
+	}
+
+	dctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(d.lifeCtx, cancel)
+	defer stop()
+	if !m.Deadline.IsZero() {
+		var cancelDeadline context.CancelFunc
+		dctx, cancelDeadline = context.WithDeadline(dctx, m.Deadline)
+		defer cancelDeadline()
+	}
+	errs := make([]error, len(targets))
+	var wg sync.WaitGroup
+	for i, cfg := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = d.sendWithRetry(dctx, cfg, event)
+		}()
+	}
+	wg.Wait()
+
+	var failed []error
+	permanent := true
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err)
+			permanent = permanent && IsPermanent(err)
+		}
+	}
+	switch {
+	case len(failed) == 0:
+		settle(func(c context.Context) error { return q.Ack(c, m) })
+	case ctx.Err() != nil || d.lifeCtx.Err() != nil:
+		settle(func(c context.Context) error { return q.Release(c, m) })
+	default:
+		cause := errors.Join(failed...)
+		if permanent {
+			cause = MarkPermanent(cause)
+		}
+		settle(func(c context.Context) error { return q.Nack(c, m, cause) })
+	}
 }

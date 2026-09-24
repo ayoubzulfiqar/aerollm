@@ -32,6 +32,24 @@ type AnthropicRequest struct {
 	Tools         []AnthropicTool         `json:"tools,omitempty"`
 	ToolChoice    *AnthropicToolChoice    `json:"tool_choice,omitempty"`
 	Metadata      *AnthropicMetadata      `json:"metadata,omitempty"`
+
+	// jsonTool is the name of the forced tool that emulates OpenAI
+	// response_format (see BuildAnthropicRequest); "" when not in use.
+	jsonTool string
+}
+
+// AnthropicJSONToolName is the forced tool used to emulate OpenAI
+// response_format ("json_schema" / "json_object") on Anthropic.
+const AnthropicJSONToolName = "json_response"
+
+// JSONResponseTool reports the name of the forced tool that emulates
+// response_format for this request ("" when response_format is not used).
+// Its tool_use input is returned to the client as the message content.
+func (r *AnthropicRequest) JSONResponseTool() string {
+	if r == nil {
+		return ""
+	}
+	return r.jsonTool
 }
 
 // AnthropicMessage is a message in Anthropic's native format.
@@ -178,8 +196,57 @@ func anthropicPartBlocks(provider string, parts []models.ContentPart) ([]Anthrop
 	return blocks, nil
 }
 
+// anthropicJSONTool builds the forced tool that emulates OpenAI
+// response_format. It returns (nil, nil) when no emulation is needed.
+func anthropicJSONTool(provider string, rf *models.ResponseFormat) (*AnthropicTool, error) {
+	if rf == nil {
+		return nil, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(rf.Type)) {
+	case "", "text":
+		return nil, nil
+	case "json_object":
+		return &AnthropicTool{
+			Name:        AnthropicJSONToolName,
+			Description: "Respond with a single JSON object. Put the complete answer in this tool's input.",
+			InputSchema: map[string]interface{}{"type": "object"},
+		}, nil
+	case "json_schema":
+		js := rf.JSONSchema
+		if js == nil || js.Schema == nil {
+			return nil, invalidRequest(provider, "response_format json_schema requires json_schema.schema")
+		}
+		if t, ok := js.Schema["type"]; ok && t != "object" {
+			return nil, invalidRequest(provider, "response_format json_schema must describe a JSON object (root \"type\": \"object\") for this provider")
+		}
+		schema := make(map[string]interface{}, len(js.Schema)+1)
+		for k, v := range js.Schema {
+			schema[k] = v
+		}
+		schema["type"] = "object"
+		desc := "Respond with JSON that matches this tool's input schema. Put the complete answer in this tool's input."
+		if js.Name != "" {
+			desc += " Schema: " + js.Name + "."
+		}
+		if js.Description != "" {
+			desc += " " + js.Description
+		}
+		return &AnthropicTool{Name: AnthropicJSONToolName, Description: desc, InputSchema: schema}, nil
+	default:
+		return nil, invalidRequest(provider, "response_format type %q is not supported", rf.Type)
+	}
+}
+
 // BuildAnthropicRequest converts a gateway (OpenAI-style) request into
 // Anthropic's /v1/messages format. model overrides req.Model when non-empty.
+//
+// OpenAI response_format "json_object" / "json_schema" is emulated by forcing
+// a single tool (AnthropicJSONToolName) whose input schema is the requested
+// schema; responses convert that tool call back into JSON message content
+// with finish_reason "stop" (streams turn its input_json_delta events into
+// content deltas). Combining response_format with tools is rejected with a
+// 400. seed, logprobs/top_logprobs, logit_bias and presence/frequency
+// penalties have no Anthropic equivalent and are dropped.
 func BuildAnthropicRequest(provider string, req *models.LLMRequest, model string, stream bool) (*AnthropicRequest, error) {
 	if req == nil {
 		return nil, invalidRequest(provider, "request is nil")
@@ -289,6 +356,20 @@ func BuildAnthropicRequest(provider string, req *models.LLMRequest, model string
 		return nil, invalidRequest(provider, "at least one non-system message is required")
 	}
 
+	jsonTool, err := anthropicJSONTool(provider, req.ResponseFormat)
+	if err != nil {
+		return nil, err
+	}
+	if jsonTool != nil {
+		if len(req.Tools) > 0 {
+			return nil, invalidRequest(provider, "response_format %q cannot be combined with tools for this provider (it is emulated with a forced tool call)", req.ResponseFormat.Type)
+		}
+		out.Tools = []AnthropicTool{*jsonTool}
+		out.ToolChoice = &AnthropicToolChoice{Type: "tool", Name: jsonTool.Name}
+		out.jsonTool = jsonTool.Name
+		return out, nil
+	}
+
 	for _, t := range req.Tools {
 		if !t.IsFunction() {
 			return nil, invalidRequest(provider, "tool type %q is not supported by this provider", t.Type)
@@ -349,9 +430,19 @@ func AnthropicFinishReason(stop string) string {
 // AnthropicToLLMResponse converts an Anthropic response into the gateway's
 // OpenAI-style response (a single choice).
 func AnthropicToLLMResponse(resp *AnthropicResponse) *models.LLMResponse {
+	return AnthropicToLLMResponseJSON(resp, "")
+}
+
+// AnthropicToLLMResponseJSON is AnthropicToLLMResponse for requests that
+// emulate response_format with the forced tool jsonTool (see
+// AnthropicRequest.JSONResponseTool): that tool call's input becomes the
+// message content (a JSON string) and a "tool_use" stop maps to
+// finish_reason "stop". With jsonTool == "" it is AnthropicToLLMResponse.
+func AnthropicToLLMResponseJSON(resp *AnthropicResponse, jsonTool string) *models.LLMResponse {
 	msg := models.Message{Role: models.RoleAssistant}
 	var text strings.Builder
 	hasText := false
+	var jsonContent *string
 	for _, b := range resp.Content {
 		switch b.Type {
 		case "text":
@@ -362,10 +453,23 @@ func AnthropicToLLMResponse(resp *AnthropicResponse) *models.LLMResponse {
 			if args == "" || args == "null" {
 				args = "{}"
 			}
+			if jsonTool != "" && b.Name == jsonTool && jsonContent == nil {
+				jsonContent = &args
+				continue
+			}
 			msg.ToolCalls = append(msg.ToolCalls, models.ToolCall{ID: b.ID, Type: "function", Function: models.ToolFunction{Name: b.Name, Arguments: args}})
 		}
 	}
-	if hasText || len(msg.ToolCalls) == 0 {
+	finish := AnthropicFinishReason(resp.StopReason)
+	switch {
+	case jsonContent != nil:
+		// The JSON is the answer; any stray preamble text would make the
+		// content invalid JSON.
+		msg.Content = jsonContent
+		if finish == "tool_calls" && len(msg.ToolCalls) == 0 {
+			finish = "stop"
+		}
+	case hasText || len(msg.ToolCalls) == 0:
 		s := text.String()
 		msg.Content = &s
 	}
@@ -374,7 +478,7 @@ func AnthropicToLLMResponse(resp *AnthropicResponse) *models.LLMResponse {
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   resp.Model,
-		Choices: []models.Choice{{Index: 0, Message: msg, FinishReason: AnthropicFinishReason(resp.StopReason)}},
+		Choices: []models.Choice{{Index: 0, Message: msg, FinishReason: finish}},
 		Usage:   resp.Usage.ToUsage(),
 	}
 }
@@ -395,7 +499,7 @@ func AnthropicMessages(ctx context.Context, client *http.Client, provider, endpo
 	if err := DoJSON(ctx, client, provider, endpoint, header, body, &resp); err != nil {
 		return nil, err
 	}
-	return AnthropicToLLMResponse(&resp), nil
+	return AnthropicToLLMResponseJSON(&resp, body.JSONResponseTool()), nil
 }
 
 // AnthropicMessagesStream starts a streaming /v1/messages call and converts
@@ -435,10 +539,10 @@ func AnthropicMessagesStream(ctx context.Context, client *http.Client, provider,
 			if err := json.Unmarshal(b, &ar); err != nil {
 				return nil, err
 			}
-			return AnthropicToLLMResponse(&ar), nil
+			return AnthropicToLLMResponseJSON(&ar, body.JSONResponseTool()), nil
 		}, done), nil
 	}
-	st := &anthropicStreamState{provider: provider, model: body.Model, created: time.Now().Unix(), toolIndex: map[int]int{}}
+	st := &anthropicStreamState{provider: provider, model: body.Model, created: time.Now().Unix(), toolIndex: map[int]int{}, jsonTool: body.JSONResponseTool(), jsonBlock: -1}
 	return runSSE(ctx, provider, conn, st.decode, st.onEOF, done), nil
 }
 
@@ -452,6 +556,13 @@ type anthropicStreamState struct {
 	nextTool  int
 	finished  bool
 	stopped   bool
+
+	// jsonTool is the response_format emulation tool ("" when unused);
+	// jsonBlock is the content block index streaming its input (-1 before
+	// it starts) and jsonSent reports whether any of it was emitted.
+	jsonTool  string
+	jsonBlock int
+	jsonSent  bool
 }
 
 func (s *anthropicStreamState) chunk(choices []models.StreamChoice) models.StreamChunk {
@@ -525,6 +636,11 @@ func (s *anthropicStreamState) decode(ev SSEEvent) ([]models.StreamChunk, bool, 
 				return s.delta(models.MessageDelta{Content: e.Block.Text}), false, nil
 			}
 		case "tool_use":
+			if s.jsonTool != "" && e.Block.Name == s.jsonTool && s.jsonBlock < 0 {
+				// response_format emulation: the tool input is the content.
+				s.jsonBlock = e.Index
+				return nil, false, nil
+			}
 			idx := s.nextTool
 			s.nextTool++
 			s.toolIndex[e.Index] = idx
@@ -533,14 +649,28 @@ func (s *anthropicStreamState) decode(ev SSEEvent) ([]models.StreamChunk, bool, 
 			}}}), false, nil
 		}
 		return nil, false, nil
+	case "content_block_stop":
+		if s.jsonBlock >= 0 && e.Index == s.jsonBlock && !s.jsonSent {
+			s.jsonSent = true // the model produced an empty object
+			return s.delta(models.MessageDelta{Content: "{}"}), false, nil
+		}
+		return nil, false, nil
 	case "content_block_delta":
 		switch e.Delta.Type {
 		case "text_delta":
-			if e.Delta.Text == "" {
+			if e.Delta.Text == "" || s.jsonBlock >= 0 {
+				// Text after the JSON answer would make it invalid JSON.
 				return nil, false, nil
 			}
 			return s.delta(models.MessageDelta{Content: e.Delta.Text}), false, nil
 		case "input_json_delta":
+			if s.jsonBlock >= 0 && e.Index == s.jsonBlock {
+				if e.Delta.PartialJSON == "" {
+					return nil, false, nil
+				}
+				s.jsonSent = true
+				return s.delta(models.MessageDelta{Content: e.Delta.PartialJSON}), false, nil
+			}
 			idx, ok := s.toolIndex[e.Index]
 			if !ok || e.Delta.PartialJSON == "" {
 				return nil, false, nil
@@ -569,6 +699,9 @@ func (s *anthropicStreamState) decode(ev SSEEvent) ([]models.StreamChunk, bool, 
 			return nil, false, nil
 		}
 		finish := AnthropicFinishReason(e.Delta.StopReason)
+		if finish == "tool_calls" && s.jsonBlock >= 0 && s.nextTool == 0 {
+			finish = "stop"
+		}
 		s.finished = true
 		return []models.StreamChunk{s.chunk([]models.StreamChoice{{Index: 0, FinishReason: &finish}})}, false, nil
 	case "message_stop":
@@ -600,7 +733,7 @@ func (s *anthropicStreamState) decode(ev SSEEvent) ([]models.StreamChunk, bool, 
 			}
 		}
 		return nil, false, ue
-	default: // ping, content_block_stop, unknown future events
+	default: // ping, unknown future events
 		return nil, false, nil
 	}
 }

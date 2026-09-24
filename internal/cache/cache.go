@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,9 @@ type RedisCache struct {
 	client RedisClient
 	ttl    time.Duration
 	sem    *SemanticCache
+	// prefix is prepended to every physical Redis key (see
+	// RedisCacheOptions.KeyPrefix); API keys never include it.
+	prefix string
 
 	hits   atomic.Int64
 	misses atomic.Int64
@@ -57,6 +61,44 @@ func NewRedisCache(client RedisClient, ttl time.Duration) *RedisCache {
 		ttl:    ttl,
 		sem:    NewSemanticCache("sem"),
 	}
+}
+
+// RedisCacheOptions configures NewRedisCacheWithOptions.
+type RedisCacheOptions struct {
+	// TTL is the default entry lifetime (default 1h).
+	TTL time.Duration
+	// KeyPrefix is prepended to every Redis key the cache reads or writes
+	// (for example "prod:"), so several deployments — or test runs — can
+	// share one Redis without seeing or clearing each other's entries.
+	// Keys passed to and returned by the cache API never include it.
+	KeyPrefix string
+}
+
+// NewRedisCacheWithOptions creates a RedisCache with explicit options. A nil
+// client yields a cache that always misses.
+func NewRedisCacheWithOptions(client RedisClient, opts RedisCacheOptions) *RedisCache {
+	c := NewRedisCache(client, opts.TTL)
+	c.prefix = opts.KeyPrefix
+	return c
+}
+
+// physical maps a cache key to the Redis key that stores it.
+func (c *RedisCache) physical(key string) string { return c.prefix + key }
+
+// pattern returns a SCAN MATCH pattern for logical keys starting with p.
+func (c *RedisCache) pattern(p string) string { return escapeGlob(c.prefix+p) + "*" }
+
+// escapeGlob escapes Redis glob metacharacters.
+func escapeGlob(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '*', '?', '[', ']', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // CacheEntry represents a cached LLM response.
@@ -212,7 +254,7 @@ func (c *RedisCache) GetExactCtx(ctx context.Context, key string) (*CacheEntry, 
 	if c == nil || c.client == nil || key == "" {
 		return nil, nil
 	}
-	val, err := c.client.Get(ctx, key).Result()
+	val, err := c.client.Get(ctx, c.physical(key)).Result()
 	if errors.Is(err, redis.Nil) {
 		c.misses.Add(1)
 		return nil, nil
@@ -280,7 +322,7 @@ func (c *RedisCache) SetExactWithMeta(ctx context.Context, key string, resp []by
 	if meta.TTL > 0 {
 		ttl = meta.TTL
 	}
-	if err := c.client.Set(ctx, key, string(b), ttl).Err(); err != nil {
+	if err := c.client.Set(ctx, c.physical(key), string(b), ttl).Err(); err != nil {
 		c.errs.Add(1)
 		return err
 	}
@@ -293,7 +335,7 @@ func (c *RedisCache) DeleteExact(ctx context.Context, key string) error {
 	if c == nil || c.client == nil || key == "" {
 		return nil
 	}
-	return c.client.Del(ctx, key).Err()
+	return c.client.Del(ctx, c.physical(key)).Err()
 }
 
 // GetSemantic retrieves a semantically similar cached response.
@@ -355,7 +397,7 @@ func (c *RedisCache) ClearExact(ctx context.Context) error {
 	if c == nil || c.client == nil {
 		return nil
 	}
-	_, err := c.scanDelete(ctx, ExactKeyPrefix+"*")
+	_, err := c.scanDelete(ctx, c.pattern(ExactKeyPrefix))
 	return err
 }
 
@@ -368,7 +410,7 @@ func (c *RedisCache) ClearNamespace(ctx context.Context, ns string) (int, error)
 	if ns == "" {
 		return 0, errors.New("cache: empty namespace")
 	}
-	return c.scanDelete(ctx, ExactKeyPrefix+namespaceTag(ns)+":*")
+	return c.scanDelete(ctx, c.pattern(ExactKeyPrefix+namespaceTag(ns)+":"))
 }
 
 // ClearSemantic clears all entries from the (legacy) semantic cache.
@@ -406,7 +448,7 @@ func (c *RedisCache) ExactStats(ctx context.Context) (ExactStats, error) {
 	}
 	var cursor uint64
 	for {
-		keys, next, err := c.client.Scan(ctx, cursor, ExactKeyPrefix+"*", 1000).Result()
+		keys, next, err := c.client.Scan(ctx, cursor, c.pattern(ExactKeyPrefix), 1000).Result()
 		if err != nil {
 			return st, err
 		}
@@ -458,17 +500,18 @@ func (c *RedisCache) Inspect(ctx context.Context, cursor string, pageSize int) (
 	if pageSize > 500 {
 		pageSize = 500
 	}
-	keys, nextCursor, err := c.client.Scan(ctx, parseCursor(cursor), ExactKeyPrefix+"*", int64(pageSize)).Result()
+	keys, nextCursor, err := c.client.Scan(ctx, parseCursor(cursor), c.pattern(ExactKeyPrefix), int64(pageSize)).Result()
 	if err != nil {
 		return nil, "0", err
 	}
 
 	entries := make([]CacheInspectEntry, 0, len(keys))
-	for _, key := range keys {
-		val, err := c.client.Get(ctx, key).Result()
+	for _, pkey := range keys {
+		val, err := c.client.Get(ctx, pkey).Result()
 		if err != nil {
 			continue // expired between SCAN and GET
 		}
+		key := strings.TrimPrefix(pkey, c.prefix)
 		ce := decodeStored(key, []byte(val), c.ttl)
 		entry := CacheInspectEntry{
 			Key:        key,

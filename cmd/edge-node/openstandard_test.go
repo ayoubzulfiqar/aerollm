@@ -13,11 +13,19 @@ import (
 
 	"github.com/ayoubzulfiqar/aerollm/internal/hardware"
 	"github.com/ayoubzulfiqar/aerollm/internal/marketplace"
+	"github.com/ayoubzulfiqar/aerollm/internal/wasmrt"
 	"go.etcd.io/bbolt"
 )
 
-// newTestEdge builds the real edge route tree over a temp bbolt DB.
+// newTestEdge builds the real edge route tree over a temp bbolt DB, without
+// a WASM runtime.
 func newTestEdge(t *testing.T, mutate func(*edgeConfig)) (*edgeServer, *httptest.Server) {
+	t.Helper()
+	return newTestEdgeRT(t, mutate, nil)
+}
+
+// newTestEdgeRT is newTestEdge with an optional WASM runtime.
+func newTestEdgeRT(t *testing.T, mutate func(*edgeConfig), rt *wasmrt.Runtime) (*edgeServer, *httptest.Server) {
 	t.Helper()
 	cfg := edgeConfig{listenAddr: "127.0.0.1:0", maxStreamBytes: 1 << 20, shutdownTimeout: time.Second}
 	if mutate != nil {
@@ -28,7 +36,7 @@ func newTestEdge(t *testing.T, mutate func(*edgeConfig)) (*edgeServer, *httptest
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := newEdgeServer(context.Background(), cfg, db, peerID, []hardware.Capability{{Name: "cpu", Available: true}}, nil)
+	s, err := newEdgeServer(context.Background(), cfg, db, peerID, []hardware.Capability{{Name: "cpu", Available: true}}, nil, rt)
 	if err != nil {
 		t.Fatal(err)
 	}

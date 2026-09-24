@@ -197,13 +197,7 @@ func TestWriteFileSafely(t *testing.T) {
 	if err := writeFileSafely(p, []byte("one"), 0o600, false); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
-	}
+	assertPerm(t, p, 0o600)
 	if err := writeFileSafely(p, []byte("two"), 0o600, false); err == nil {
 		t.Fatal("expected refusal to overwrite without force")
 	}
@@ -223,14 +217,13 @@ func TestWriteFileSafely(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skip("symlinks unsupported")
-	}
-	if err := writeFileSafely(link, []byte("evil"), 0o600, true); err == nil {
-		t.Fatal("expected refusal to overwrite a symlink")
-	}
-	if b, _ := os.ReadFile(target); string(b) != "keep" {
-		t.Fatalf("symlink target modified: %q", b)
+	if trySymlink(t, target, link) {
+		if err := writeFileSafely(link, []byte("evil"), 0o600, true); err == nil {
+			t.Fatal("expected refusal to overwrite a symlink")
+		}
+		if b, _ := os.ReadFile(target); string(b) != "keep" {
+			t.Fatalf("symlink target modified: %q", b)
+		}
 	}
 	// No temp files left behind.
 	entries, _ := os.ReadDir(dir)

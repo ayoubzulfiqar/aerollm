@@ -23,6 +23,44 @@ func newRSICmd() *cobra.Command {
 	cmd.AddCommand(newRSICurrentCmd())
 	cmd.AddCommand(newRSITriggerCmd())
 	cmd.AddCommand(newRSIConfigCmd())
+	cmd.AddCommand(newRSIStatsCmd())
+	cmd.AddCommand(newRSIRollbackCmd())
+	return cmd
+}
+
+func newRSIStatsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show RSI orchestrator statistics (GET /v1/rsi/stats)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return rsiGet(cmd, "/v1/rsi/stats", formatJSON, nil)
+		},
+	}
+	addDeprecatedAddrFlag(cmd)
+	return cmd
+}
+
+func newRSIRollbackCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rollback",
+		Short: "Roll back the most recent RSI deployment (POST /v1/rsi/rollback)",
+		Long: `Revert the most recently deployed RSI policy. The server answers 409 when
+there is nothing to roll back and 501 when no rollback hook is configured.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newServerClient(cmd)
+			if err != nil {
+				return err
+			}
+			data, err := client.call(cmd.Context(), http.MethodPost, "/v1/rsi/rollback", nil, nil)
+			if err != nil {
+				return err
+			}
+			return renderResult(cmd, data, formatJSON, nil, nil)
+		},
+	}
+	addDeprecatedAddrFlag(cmd)
 	return cmd
 }
 

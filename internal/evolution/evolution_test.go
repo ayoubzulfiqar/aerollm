@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -123,9 +124,12 @@ func TestEvaluateWritesBestAndKeepsOthers(t *testing.T) {
 	if string(data) != "high" {
 		t.Fatalf("expected best payload, got %q", data)
 	}
-	info, _ := os.Stat(filepath.Join(dir, files[0]))
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("expected 0600, got %v", info.Mode().Perm())
+	// Windows does not implement Unix permission bits.
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(filepath.Join(dir, files[0]))
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("expected 0600, got %v", info.Mode().Perm())
+		}
 	}
 	pending := e.Pending()
 	if len(pending) != 2 {

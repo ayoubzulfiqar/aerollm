@@ -171,3 +171,28 @@ func TestRedisLimiterIntegration(t *testing.T) {
 		t.Fatalf("GetLimits: %+v %v", rec, err)
 	}
 }
+
+func TestSetDefaultRPSAtRuntime(t *testing.T) {
+	l := NewTokenBucketLimiter(10, 1)
+	ctx := context.Background()
+	_, _ = l.Allow(ctx, "k", "")
+	l.SetDefaultRPS(1)
+	if l.DefaultRPS() != 1 {
+		t.Fatalf("default rps: %v", l.DefaultRPS())
+	}
+	if ok, _ := l.Allow(ctx, "k", ""); !ok {
+		t.Fatal("one token must remain after shrinking capacity")
+	}
+	if ok, _ := l.Allow(ctx, "k", ""); ok {
+		t.Fatal("capacity must shrink to the new default rate")
+	}
+	l.SetLimit("vip", Limit{RPS: 100, Burst: 100})
+	l.SetDefaultRPS(0.5)
+	if ok, _ := l.Allow(ctx, "vip", ""); !ok {
+		t.Fatal("per-key overrides are unaffected by the default")
+	}
+	l.SetDefaultRPS(-1)
+	if l.DefaultRPS() != 0.5 {
+		t.Fatal("invalid rates must be ignored")
+	}
+}

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // LoggerAdapter implements the Info/Error logger interface used across the
@@ -54,4 +58,20 @@ func (l *LoggerAdapter) Error(msg string, keysAndValues ...interface{}) {
 // Func adapts the logger to the func(msg, kv...) signature some handlers use.
 func (l *LoggerAdapter) Func() func(msg string, kv ...interface{}) {
 	return func(msg string, kv ...interface{}) { l.Info(msg, kv...) }
+}
+
+// redisLogger routes go-redis internal messages (dial retries, pool errors)
+// into the structured log instead of raw stderr, and rate-limits them so an
+// outage does not flood the logs.
+type redisLogger struct {
+	l    *LoggerAdapter
+	last atomic.Int64 // unix nanos of the last emitted message
+}
+
+func (r *redisLogger) Printf(_ context.Context, format string, v ...interface{}) {
+	now := time.Now().UnixNano()
+	if prev := r.last.Load(); now-prev < int64(10*time.Second) || !r.last.CompareAndSwap(prev, now) {
+		return
+	}
+	r.l.Warn("redis client", "detail", fmt.Sprintf(format, v...))
 }

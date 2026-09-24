@@ -71,6 +71,18 @@ func (p *LocalProvider) endpoint() (string, error) {
 	return JoinURL(base, "/chat/completions"), nil
 }
 
+// Probe implements Prober with GET {base}/models (vLLM, Ollama, llama.cpp
+// and LM Studio all serve it); the result is reflected in Health.
+func (p *LocalProvider) Probe(ctx context.Context) error {
+	return RunProbe(&p.health, func() error {
+		base, err := NormalizeBaseURL(p.BaseURL, "/v1")
+		if err != nil {
+			return &UpstreamError{Provider: p.Name(), StatusCode: http.StatusInternalServerError, Type: "configuration_error", Message: "provider base URL misconfigured: " + err.Error()}
+		}
+		return ProbeEndpoint(ctx, p.client(), p.Name(), JoinURL(base, "/models"), nil)
+	})
+}
+
 func (p *LocalProvider) model(req *models.LLMRequest) string {
 	if req.Model == "" {
 		return p.Model

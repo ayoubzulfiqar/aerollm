@@ -30,8 +30,9 @@ import (
 //
 // The region is taken from the endpoint host
 // (bedrock-runtime.<region>.amazonaws.com), else Region, else AWS_REGION /
-// AWS_DEFAULT_REGION. Streaming (ConverseStream uses AWS event-stream
-// framing) is not implemented, so the gateway falls back to non-streaming.
+// AWS_DEFAULT_REGION. Streaming uses ConverseStream
+// (POST /model/{modelId}/converse-stream), whose AWS event-stream framing is
+// decoded natively (see StreamChatCompletions).
 type BedrockAdapter struct {
 	name   string
 	apiKey string
@@ -220,13 +221,28 @@ type converseResponse struct {
 	Output struct {
 		Message converseMessage `json:"message"`
 	} `json:"output"`
-	StopReason string `json:"stopReason"`
-	Usage      struct {
-		InputTokens          int `json:"inputTokens"`
-		OutputTokens         int `json:"outputTokens"`
-		TotalTokens          int `json:"totalTokens"`
-		CacheReadInputTokens int `json:"cacheReadInputTokens"`
-	} `json:"usage"`
+	StopReason string        `json:"stopReason"`
+	Usage      converseUsage `json:"usage"`
+}
+
+type converseUsage struct {
+	InputTokens          int `json:"inputTokens"`
+	OutputTokens         int `json:"outputTokens"`
+	TotalTokens          int `json:"totalTokens"`
+	CacheReadInputTokens int `json:"cacheReadInputTokens"`
+}
+
+// toUsage converts Converse usage to OpenAI-style usage.
+func (u converseUsage) toUsage() *models.Usage {
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.InputTokens + u.OutputTokens
+	}
+	usage := &models.Usage{PromptTokens: u.InputTokens, CompletionTokens: u.OutputTokens, TotalTokens: total}
+	if u.CacheReadInputTokens > 0 {
+		usage.PromptTokensDetails = &models.PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
+	}
+	return usage
 }
 
 func (a *BedrockAdapter) badRequest(format string, args ...interface{}) error {
@@ -394,15 +410,7 @@ func (a *BedrockAdapter) toLLMResponse(model string, cr *converseResponse) *mode
 		s := text.String()
 		msg.Content = &s
 	}
-	u := cr.Usage
-	total := u.TotalTokens
-	if total == 0 {
-		total = u.InputTokens + u.OutputTokens
-	}
-	usage := &models.Usage{PromptTokens: u.InputTokens, CompletionTokens: u.OutputTokens, TotalTokens: total}
-	if u.CacheReadInputTokens > 0 {
-		usage.PromptTokensDetails = &models.PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
-	}
+	usage := cr.Usage.toUsage()
 	return &models.LLMResponse{
 		ID:      "chatcmpl-" + models.GenerateTraceID()[:24],
 		Object:  "chat.completion",
@@ -436,16 +444,23 @@ func validBedrockModelID(model string) error {
 // converseURL builds the Converse URL with the model ID escaped as a single
 // path segment (model IDs contain ':' and ARNs contain '/').
 func (a *BedrockAdapter) converseURL(model string) *url.URL {
+	return a.modelURL(model, "converse")
+}
+
+// modelURL builds /model/{modelId}/{action} with the model ID escaped as a
+// single path segment.
+func (a *BedrockAdapter) modelURL(model, action string) *url.URL {
 	u := *a.base
 	basePath := strings.TrimRight(u.Path, "/")
 	escBase := strings.TrimRight(a.base.EscapedPath(), "/")
-	u.Path = basePath + "/model/" + model + "/converse"
-	u.RawPath = escBase + "/model/" + awsURIEncode(model) + "/converse"
+	u.Path = basePath + "/model/" + model + "/" + action
+	u.RawPath = escBase + "/model/" + awsURIEncode(model) + "/" + action
 	return &u
 }
 
-// ChatCompletions calls the Converse API.
-func (a *BedrockAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
+// newConverseRequest validates req and builds the authenticated (SigV4 or
+// bearer) POST to /model/{modelId}/{action}.
+func (a *BedrockAdapter) newConverseRequest(ctx context.Context, req *models.LLMRequest, action, accept string) (*http.Request, error) {
 	if req == nil {
 		return nil, errNilRequest
 	}
@@ -471,18 +486,27 @@ func (a *BedrockAdapter) ChatCompletions(ctx context.Context, req *models.LLMReq
 	if err != nil {
 		return nil, fmt.Errorf("%s: marshal request: %w", a.name, err)
 	}
-	u := a.converseURL(req.Model)
+	u := a.modelURL(req.Model, action)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("%s: build request: %w", a.name, err)
 	}
 	httpReq.URL = u
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Accept", accept)
 	if auth.creds != nil {
 		signSigV4(httpReq, payload, *auth.creds, region, "bedrock", a.now())
 	} else {
 		httpReq.Header.Set("Authorization", "Bearer "+auth.bearer)
+	}
+	return httpReq, nil
+}
+
+// ChatCompletions calls the Converse API.
+func (a *BedrockAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
+	httpReq, err := a.newConverseRequest(ctx, req, "converse", "application/json")
+	if err != nil {
+		return nil, err
 	}
 	return timed(&a.health, func() (*models.LLMResponse, error) {
 		var cr converseResponse
@@ -493,10 +517,14 @@ func (a *BedrockAdapter) ChatCompletions(ctx context.Context, req *models.LLMReq
 	})
 }
 
-// Stream returns the complete response as a single chunk (Converse streaming
-// is not implemented).
+// Stream streams in the legacy chunk format via ConverseStream. A stream
+// that cannot start is reported as a single error chunk.
 func (a *BedrockAdapter) Stream(ctx context.Context, req *models.LLMRequest) (<-chan AeroStreamChunk, error) {
-	return singleResponseStream(ctx, a.name, func() (*models.LLMResponse, error) { return a.ChatCompletions(ctx, req) }), nil
+	ch, err := a.StreamChatCompletions(ctx, req)
+	if err != nil {
+		return singleResponseStream(ctx, a.name, func() (*models.LLMResponse, error) { return nil, err }), nil
+	}
+	return toAeroStream(ctx, a.name, ch), nil
 }
 
 // Health returns the adapter's health derived from recent calls.

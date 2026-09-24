@@ -103,6 +103,14 @@ type Handler struct {
 	TrimMessages func(model string, msgs []models.Message) []models.Message
 	// ModelLister returns extra models for GET /v1/models.
 	ModelLister func() []ModelEntry
+	// RequestHook may inspect or rewrite a chat request after validation and
+	// before caching/routing (e.g. WASM plugins). An error wrapping
+	// ErrHookRejected is returned to the client as 400; any other error as
+	// 503.
+	RequestHook func(ctx context.Context, req *models.LLMRequest) error
+	// ResponseHook may inspect or rewrite a non-streaming response before it
+	// is sent. Streaming responses are not passed through it.
+	ResponseHook func(ctx context.Context, req *models.LLMRequest, resp *models.LLMResponse) error
 
 	// CacheTTL is the exact-cache TTL (0 = cache default).
 	CacheTTL time.Duration
@@ -273,6 +281,16 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request, req *models.
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if h.RequestHook != nil {
+		if err := h.RequestHook(ctx, req); err != nil {
+			writeHookError(w, err)
+			return
+		}
+		if err := validateChatRequest(req); err != nil {
+			writeError(w, http.StatusBadRequest, "request rewritten by plugin is invalid: "+err.Error())
+			return
+		}
+	}
 
 	// Handler-level rate limiting only when no RateLimit middleware ran, so a
 	// request is never charged twice.
@@ -334,6 +352,12 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request, req *models.
 		resp.Usage = estimateUsage(req, resp)
 		estimated = true
 	}
+	if h.ResponseHook != nil {
+		if err := h.ResponseHook(ctx, req, resp); err != nil {
+			writeHookError(w, err)
+			return
+		}
+	}
 
 	respBytes, err := json.Marshal(resp)
 	if err != nil {
@@ -350,6 +374,18 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request, req *models.
 	_, _ = w.Write(respBytes)
 
 	h.afterCompletion(ctx, req, resp, respBytes, providerName, m, estimated, false)
+}
+
+// ErrHookRejected marks a request or response deliberately rejected by a
+// hook (as opposed to a hook that failed to run).
+var ErrHookRejected = errors.New("rejected by plugin")
+
+func writeHookError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrHookRejected) {
+		writeErrorType(w, http.StatusBadRequest, err.Error(), "plugin_rejected")
+		return
+	}
+	writeErrorType(w, http.StatusServiceUnavailable, "plugin hook failed", "plugin_error")
 }
 
 // isBudgetExceeded recognises budget errors from the cost tracker (and

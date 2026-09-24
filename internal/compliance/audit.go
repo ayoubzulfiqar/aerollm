@@ -111,12 +111,20 @@ const DefaultAuditCapacity = 10000
 
 // MemoryAuditLogger stores the most recent audit events in memory. It is
 // safe for concurrent use and bounded: once full, the oldest events are
-// dropped (Dropped reports how many).
+// dropped (Dropped reports how many since the logger was created).
+//
+// With persistence enabled (NewPersistentAuditLogger) every event is also
+// written to a persist.Store and evicted events are deleted from it, so the
+// retained window survives restarts. Log cannot return errors: persistence
+// failures are counted (PersistErrors) and passed to the handler set with
+// SetErrorHandler; use Append to receive them directly.
 type MemoryAuditLogger struct {
 	mu       sync.Mutex
 	events   []*AuditEvent
 	capacity int
 	dropped  uint64
+
+	disk *auditDisk // non-nil when persistence is enabled
 }
 
 // NewMemoryAuditLogger creates a new in-memory audit logger holding up to
@@ -134,10 +142,17 @@ func NewMemoryAuditLoggerWithCapacity(capacity int) *MemoryAuditLogger {
 	return &MemoryAuditLogger{events: make([]*AuditEvent, 0, min(capacity, 256)), capacity: capacity}
 }
 
-// Log appends a copy of the event (with sanitized input).
+// Log appends a copy of the event (with sanitized input). Persistence
+// errors are reported through PersistErrors and the error handler.
 func (m *MemoryAuditLogger) Log(event *AuditEvent) {
+	_ = m.Append(event)
+}
+
+// Append is Log returning the persistence error, if any. When the event
+// cannot be persisted it is not retained in memory either.
+func (m *MemoryAuditLogger) Append(event *AuditEvent) error {
 	if m == nil || event == nil {
-		return
+		return nil
 	}
 	c := *event
 	c.Input = SanitizeInput(event.Input)
@@ -145,14 +160,44 @@ func (m *MemoryAuditLogger) Log(event *AuditEvent) {
 		c.Timestamp = time.Now().UTC()
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	err := m.appendLocked(&c)
+	handler := m.errorHandlerLocked(err)
+	m.mu.Unlock()
+	if handler != nil {
+		handler(err)
+	}
+	return err
+}
+
+func (m *MemoryAuditLogger) appendLocked(c *AuditEvent) error {
+	if m.disk != nil {
+		if err := m.disk.put(c); err != nil {
+			return err
+		}
+	}
+	var evictErr error
 	if len(m.events) >= m.capacity {
 		drop := len(m.events) - m.capacity + 1
 		clear(m.events[:drop])
 		m.events = m.events[drop:]
 		m.dropped += uint64(drop)
+		if m.disk != nil {
+			evictErr = m.disk.evict(drop)
+		}
 	}
-	m.events = append(m.events, &c)
+	m.events = append(m.events, c)
+	return evictErr
+}
+
+// errorHandlerLocked records a persistence failure and returns the handler
+// to call (outside the lock), if any.
+func (m *MemoryAuditLogger) errorHandlerLocked(err error) func(error) {
+	if err == nil || m.disk == nil {
+		return nil
+	}
+	m.disk.failures++
+	m.disk.lastErr = err
+	return m.disk.onError
 }
 
 // Events returns copies of all retained events, oldest first.
@@ -181,15 +226,30 @@ func (m *MemoryAuditLogger) Dropped() uint64 {
 	return m.dropped
 }
 
-// Clear removes all logged events.
+// Clear removes all logged events (including persisted ones; failures are
+// reported like Log's).
 func (m *MemoryAuditLogger) Clear() {
+	_ = m.Reset()
+}
+
+// Reset is Clear returning the persistence error, if any.
+func (m *MemoryAuditLogger) Reset() error {
 	if m == nil {
-		return
+		return nil
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	clear(m.events)
 	m.events = m.events[:0]
+	var err error
+	if m.disk != nil {
+		err = m.disk.evict(len(m.disk.seqs))
+	}
+	handler := m.errorHandlerLocked(err)
+	m.mu.Unlock()
+	if handler != nil {
+		handler(err)
+	}
+	return err
 }
 
 // PolicyRegistry stores reusable policy rules. It is safe for concurrent use.

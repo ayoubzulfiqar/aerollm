@@ -156,6 +156,10 @@ type AnalyticsEngine struct {
 	max     int
 	evicted int64
 	now     func() time.Time
+	plog    *chunkLog[CostEntry] // nil unless EnablePersistence was called
+	// persistUsed forbids re-enabling persistence after Close, which would
+	// persist the retained entries a second time.
+	persistUsed bool
 }
 
 // NewAnalyticsEngine creates an engine retaining DefaultMaxEntries entries.
@@ -219,6 +223,14 @@ func (a *AnalyticsEngine) Record(entry CostEntry) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.insertLocked(entry)
+	if a.plog != nil {
+		a.plog.add(entry)
+	}
+}
+
+// insertLocked appends entry to the ring buffer; callers hold a.mu.
+func (a *AnalyticsEngine) insertLocked(entry CostEntry) {
 	if a.buf == nil {
 		a.buf = make([]CostEntry, 0, min(a.max, 1024))
 	}

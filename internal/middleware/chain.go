@@ -260,10 +260,10 @@ func CORS(allowed []string) Middleware {
 				} else {
 					h.Set("Access-Control-Allow-Origin", origin)
 				}
-				h.Set("Access-Control-Expose-Headers", "X-Request-ID, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, Retry-After, X-AeroLLM-Cache, X-AeroLLM-Provider")
+				h.Set("Access-Control-Expose-Headers", "X-Request-ID, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, Retry-After, X-AeroLLM-Cache, X-AeroLLM-Provider, Mcp-Session-Id")
 				if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 					h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-					h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Request-ID, Anthropic-Version, OpenAI-Organization")
+					h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Request-ID, Anthropic-Version, OpenAI-Organization, Mcp-Session-Id, Mcp-Protocol-Version")
 					h.Set("Access-Control-Max-Age", "600")
 					w.WriteHeader(http.StatusNoContent)
 					return

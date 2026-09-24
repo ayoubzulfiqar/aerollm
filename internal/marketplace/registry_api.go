@@ -160,6 +160,40 @@ type RegistryService struct {
 	publishMu sync.Mutex
 	seeded    bool
 	now       func() time.Time
+
+	sinkMu sync.RWMutex
+	sink   ReceiptSink
+}
+
+var (
+	// ErrReceiptConflict is returned by a ReceiptSink when a receipt ID is
+	// reused for a different receipt (HTTP 409).
+	ErrReceiptConflict = errors.New("marketplace: receipt id already used with different content")
+	// ErrReceiptForbidden is returned by a ReceiptSink that refuses a receipt
+	// for the authenticated caller, e.g. one naming another customer (HTTP
+	// 403).
+	ErrReceiptForbidden = errors.New("marketplace: receipt not allowed for this caller")
+)
+
+// ReceiptSink persists billing receipts accepted by BillingReceiptHandler.
+//
+// Implementations must be idempotent per ReceiptID (an identical replay
+// returns the stored receipt with created=false; a different receipt reusing
+// the ID returns ErrReceiptConflict). On a multi-tenant server they must bind
+// the receipt to the authenticated caller found in ctx, rejecting (with
+// ErrReceiptForbidden) or overwriting CustomerID/ProviderID values the caller
+// does not own: the handler itself does not authenticate.
+type ReceiptSink interface {
+	RecordReceipt(ctx context.Context, rec BillingReceipt) (stored BillingReceipt, created bool, err error)
+}
+
+// SetReceiptSink makes BillingReceiptHandler persist receipts through sink.
+// Without a sink (the default) the handler only validates the receipt and
+// echoes it back; nothing is stored.
+func (s *RegistryService) SetReceiptSink(sink ReceiptSink) {
+	s.sinkMu.Lock()
+	s.sink = sink
+	s.sinkMu.Unlock()
 }
 
 // NewRegistryService creates a registry service with a trust-on-first-use
@@ -195,6 +229,11 @@ func (s *RegistryService) seedTrustLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	seeder, shared := s.store.(creatorKeySeeder)
+	var seen map[string][][]byte
+	if shared {
+		seen = make(map[string][][]byte)
+	}
 	for _, it := range items {
 		m, _, err := lookup(ctx, s.store, it.ID)
 		if errors.Is(err, ErrNotFound) {
@@ -207,6 +246,17 @@ func (s *RegistryService) seedTrustLocked(ctx context.Context) error {
 			continue
 		}
 		if err := s.trust.Pin(m.CreatorID, m.PublicKey); err != nil {
+			return err
+		}
+		if shared {
+			seen[m.CreatorID] = append(seen[m.CreatorID], m.PublicKey)
+		}
+	}
+	if shared {
+		// Stores written before the shared creator key registry existed
+		// have pins only implied by their manifests; register them so
+		// every instance enforces the same first-use pins.
+		if err := seeder.seedCreatorKeys(ctx, seen); err != nil {
 			return err
 		}
 	}
@@ -228,12 +278,19 @@ func (s *RegistryService) PluginsHandler() http.HandlerFunc { return s.handlePlu
 // PluginByIDHandler returns the raw get-by-id handler.
 func (s *RegistryService) PluginByIDHandler() http.HandlerFunc { return s.handlePluginByID }
 
-// CapabilityManifestHandler returns the raw capability handler.
+// CapabilityManifestHandler returns the raw capability handler (POST only;
+// body capped at MaxOpenStandardBytes, strict JSON). It validates the
+// manifest, stamps updated_at and echoes it with 202; nothing is stored. It
+// performs no authentication: mount it behind the server's auth middleware.
 func (s *RegistryService) CapabilityManifestHandler() http.HandlerFunc {
 	return s.handleCapabilityManifest
 }
 
-// BillingReceiptHandler returns the raw receipt handler.
+// BillingReceiptHandler returns the raw receipt handler (POST only; body
+// capped at MaxOpenStandardBytes, strict JSON). It performs no
+// authentication: mount it behind the server's auth middleware. It persists
+// receipts only when a ReceiptSink is set (SetReceiptSink); otherwise it
+// validates and echoes the receipt with 201.
 func (s *RegistryService) BillingReceiptHandler() http.HandlerFunc { return s.handleBillingReceipt }
 
 // WriteJSONError writes {"error": msg} with the given status.
@@ -297,10 +354,30 @@ func (s *RegistryService) handlePluginByID(w http.ResponseWriter, r *http.Reques
 // Publish verifies and stores a signed manifest. It returns the stored
 // metadata and whether a new record was written (false for an idempotent
 // re-publish of the identical manifest).
+//
+// When the store implements PublishLocker (RedisStore does), the whole
+// read-check-write sequence runs under a per-plugin lock shared by every
+// instance using the store, and the write is fenced on still holding it; a
+// publish that cannot get the lock in time fails with ErrLockTimeout. In
+// trust-on-first-use mode such a store also keeps the creator key pins
+// shared, so two instances cannot pin different keys for the same creator.
 func (s *RegistryService) Publish(ctx context.Context, req PublishRequest) (Metadata, bool, error) {
 	manifest, err := VerifyPublishRequest(req)
 	if err != nil {
 		return Metadata{}, false, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lock PublishLock
+	if locker, ok := s.store.(PublishLocker); ok {
+		// Taken before publishMu so waiting for another instance never blocks
+		// unrelated local publishes.
+		lock, err = locker.LockPublish(ctx, manifest.ID)
+		if err != nil {
+			return Metadata{}, false, err
+		}
+		defer func() { _ = lock.Unlock(ctx) }()
 	}
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
@@ -325,11 +402,35 @@ func (s *RegistryService) Publish(ctx context.Context, req PublishRequest) (Meta
 			return Metadata{}, false, fmt.Errorf("%w: version %s must be greater than published %s", ErrVersionConflict, manifest.Version, existing.Version)
 		}
 	}
+	meta := Metadata{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, CreatorID: manifest.CreatorID, UpdatedAt: s.now().UTC()}
+
+	fenced, isFenced := lock.(fencedPublishLock)
+	if isFenced && s.trust.tofu {
+		// Shared trust-on-first-use: the local pins may be stale (another
+		// instance may have pinned this creator since they were seeded), so a
+		// creator unknown locally is decided atomically by the store, and
+		// pinned locally only once the store accepted it.
+		trusted, known := s.trust.lookup(manifest.CreatorID, manifest.PublicKey)
+		if known && !trusted {
+			return Metadata{}, false, fmt.Errorf("%w: key is not pinned for creator %q", ErrUntrustedKey, manifest.CreatorID)
+		}
+		if err := fenced.putFenced(ctx, *manifest, meta, true); err != nil {
+			return Metadata{}, false, err
+		}
+		if !trusted {
+			_ = s.trust.Pin(manifest.CreatorID, manifest.PublicKey)
+		}
+		return meta, true, nil
+	}
 	if err := s.trust.Check(manifest.CreatorID, manifest.PublicKey); err != nil {
 		return Metadata{}, false, err
 	}
-	meta := Metadata{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, CreatorID: manifest.CreatorID, UpdatedAt: s.now().UTC()}
-	if err := s.store.Put(ctx, *manifest, meta); err != nil {
+	if isFenced {
+		err = fenced.putFenced(ctx, *manifest, meta, false)
+	} else {
+		err = s.store.Put(ctx, *manifest, meta)
+	}
+	if err != nil {
 		return Metadata{}, false, err
 	}
 	return meta, true, nil
@@ -354,6 +455,9 @@ func (s *RegistryService) publishPlugin(w http.ResponseWriter, r *http.Request) 
 		WriteJSONError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrVersionConflict):
 		WriteJSONError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrLockTimeout), errors.Is(err, ErrLockLost):
+		w.Header().Set("Retry-After", "1")
+		WriteJSONError(w, http.StatusServiceUnavailable, "another publish of this plugin is in progress; retry")
 	default:
 		WriteJSONError(w, http.StatusInternalServerError, "registry store unavailable")
 	}
@@ -564,5 +668,24 @@ func (s *RegistryService) handleBillingReceipt(w http.ResponseWriter, r *http.Re
 		WriteJSONError(w, http.StatusBadRequest, "invalid receipt: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, rec)
+	s.sinkMu.RLock()
+	sink := s.sink
+	s.sinkMu.RUnlock()
+	if sink == nil {
+		writeJSON(w, http.StatusCreated, rec)
+		return
+	}
+	stored, created, err := sink.RecordReceipt(r.Context(), rec)
+	switch {
+	case errors.Is(err, ErrReceiptConflict):
+		WriteJSONError(w, http.StatusConflict, "receipt id already used with different content")
+	case errors.Is(err, ErrReceiptForbidden):
+		WriteJSONError(w, http.StatusForbidden, "receipt not allowed for this caller")
+	case err != nil:
+		WriteJSONError(w, http.StatusInternalServerError, "receipt store unavailable")
+	case created:
+		writeJSON(w, http.StatusCreated, stored)
+	default:
+		writeJSON(w, http.StatusOK, stored)
+	}
 }

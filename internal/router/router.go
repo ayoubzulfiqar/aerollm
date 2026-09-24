@@ -108,6 +108,10 @@ type Config struct {
 	// MaxAttempts bounds how many providers ExecuteWithFallback tries
 	// (default 3, capped at the number of candidates).
 	MaxAttempts int
+	// MaxRetryWait is the longest upstream Retry-After that
+	// ExecuteWithFallback waits out to retry the last failed provider once
+	// when no other candidate is left. 0 (the default) never waits.
+	MaxRetryWait time.Duration
 }
 
 // CircuitBreakerConfig holds circuit breaker settings.
@@ -196,7 +200,8 @@ type CircuitBreaker struct {
 	gen              uint64 // incremented on every state transition
 	failures         int64  // consecutive failures in the current generation
 	totalFailures    int64
-	lastFailTime     time.Time // when the breaker last opened / last failure
+	lastFailTime     time.Time     // when the breaker last opened / last failure
+	openFor          time.Duration // length of the current open period (0 = resetTimeout)
 	halfOpenInflight int
 	latencyEWMA      float64
 	latencySamples   int64
@@ -255,7 +260,7 @@ func (c *CircuitBreaker) DefaultModel() string {
 func (c *CircuitBreaker) State() CircuitBreakerState {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.state == StateOpen && time.Since(c.lastFailTime) >= c.resetTimeout {
+	if c.state == StateOpen && time.Since(c.lastFailTime) >= c.openDurationLocked() {
 		return StateHalfOpen
 	}
 	return c.state
@@ -312,7 +317,7 @@ func (c *CircuitBreaker) admit() (gen uint64, probe bool, err error) {
 	case StateClosed:
 		return c.gen, false, nil
 	case StateOpen:
-		remaining := c.resetTimeout - time.Since(c.lastFailTime)
+		remaining := c.openDurationLocked() - time.Since(c.lastFailTime)
 		if remaining > 0 {
 			return 0, false, &CircuitBreakerOpenError{Provider: c.provider.Name(), RetryAfter: remaining}
 		}
@@ -336,7 +341,42 @@ func (c *CircuitBreaker) setStateLocked(s CircuitBreakerState) {
 		c.failures = 0
 	case StateOpen:
 		c.lastFailTime = time.Now()
+		c.openFor = 0
 	}
+}
+
+// openDurationLocked is how long the current open period lasts. Caller must
+// hold c.mu.
+func (c *CircuitBreaker) openDurationLocked() time.Duration {
+	if c.openFor > 0 {
+		return c.openFor
+	}
+	return c.resetTimeout
+}
+
+// ForceOpen opens the circuit for d regardless of recent failures (an
+// operator action). While open, calls are rejected with a
+// *CircuitBreakerOpenError and the router skips the provider; after d the
+// breaker goes half-open and admits a trial call as usual. Calls already in
+// flight cannot change the forced state. d must be positive.
+func (c *CircuitBreaker) ForceOpen(d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("router: force-open duration must be positive, got %v", d)
+	}
+	c.mu.Lock()
+	c.setStateLocked(StateOpen)
+	c.openFor = d
+	c.mu.Unlock()
+	return nil
+}
+
+// Reset closes the circuit and clears its consecutive-failure count (an
+// operator action), ending any forced or failure-triggered open period.
+// The cumulative failure counter reported by Health is kept.
+func (c *CircuitBreaker) Reset() {
+	c.mu.Lock()
+	c.setStateLocked(StateClosed)
+	c.mu.Unlock()
 }
 
 // finish records the result of an admitted call. latency <= 0 records no
@@ -514,7 +554,7 @@ func (c *CircuitBreaker) Health() providers.ProviderHealth {
 
 	c.mu.RLock()
 	state := c.state
-	openExpired := state == StateOpen && time.Since(c.lastFailTime) >= c.resetTimeout
+	openExpired := state == StateOpen && time.Since(c.lastFailTime) >= c.openDurationLocked()
 	totalFailures := c.totalFailures
 	ewma, samples := c.latencyEWMA, c.latencySamples
 	c.mu.RUnlock()
@@ -538,6 +578,17 @@ func (c *CircuitBreaker) Health() providers.ProviderHealth {
 
 // Close releases resources.
 func (c *CircuitBreaker) Close() error { return c.provider.Close() }
+
+// Probe runs the wrapped provider's active health probe (see
+// providers.Prober) or returns providers.ErrProbeNotSupported. Probes do not
+// count as calls: they neither consume half-open slots nor move the breaker;
+// their outcome shows up in Health through the provider.
+func (c *CircuitBreaker) Probe(ctx context.Context) error {
+	if p, ok := c.provider.(providers.Prober); ok {
+		return p.Probe(ctx)
+	}
+	return providers.ErrProbeNotSupported
+}
 
 // CircuitBreakerOpenError is returned when the circuit breaker rejects a
 // call. It matches providers.ErrCircuitOpen via errors.Is and is retryable.
@@ -572,17 +623,35 @@ type Router struct {
 	rateLimits   map[string]ProviderRateLimits
 	costMap      *intelligence.ModelCostMap
 	maxAttempts  int
+	maxRetryWait time.Duration
 	currentIndex atomic.Uint64
+
+	// sleep waits for d or until ctx is done (overridable in tests).
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
 // New creates a new Router with the given configuration.
 func New(cfg Config) *Router {
 	return &Router{
-		strategy:    cfg.Strategy,
-		breakerCfg:  cfg.BreakerConfig.withDefaults(),
-		rateLimits:  copyLimits(cfg.ProviderRateLimits),
-		costMap:     cfg.CostMap,
-		maxAttempts: cfg.MaxAttempts,
+		strategy:     cfg.Strategy,
+		breakerCfg:   cfg.BreakerConfig.withDefaults(),
+		rateLimits:   copyLimits(cfg.ProviderRateLimits),
+		costMap:      cfg.CostMap,
+		maxAttempts:  cfg.MaxAttempts,
+		maxRetryWait: cfg.MaxRetryWait,
+		sleep:        sleepCtx,
+	}
+}
+
+// sleepCtx waits for d, returning ctx.Err() if ctx is done first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -753,7 +822,7 @@ func (c *CircuitBreaker) available(now time.Time) bool {
 	case StateHalfOpen:
 		return c.halfOpenInflight < c.halfOpenMaxCalls
 	default:
-		return now.Sub(c.lastFailTime) >= c.resetTimeout
+		return now.Sub(c.lastFailTime) >= c.openDurationLocked()
 	}
 }
 
@@ -848,6 +917,12 @@ func estimateCostWithMap(p providers.Provider, req *models.LLMRequest, costMap *
 // attempt; at most Config.MaxAttempts (default 3) providers are otherwise
 // tried.
 //
+// When Config.MaxRetryWait > 0, the last provider tried failed with a
+// retryable *providers.UpstreamError carrying 0 < RetryAfter <=
+// MaxRetryWait, and no other candidate is left to try, the router waits out
+// RetryAfter (only if ctx's deadline leaves room for it; the wait ends early
+// when ctx is done) and retries that provider once.
+//
 // On success it returns the provider that succeeded. On failure it returns
 // the last provider tried (nil if none) and an error wrapping the last
 // provider error (errors.As works for *providers.UpstreamError).
@@ -864,19 +939,26 @@ func (r *Router) ExecuteWithFallback(ctx context.Context, req *models.LLMRequest
 	}
 	r.mu.RLock()
 	maxAttempts := r.maxAttempts
+	maxRetryWait := r.maxRetryWait
+	sleep := r.sleep
 	r.mu.RUnlock()
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultMaxAttempts
 	}
+	if sleep == nil {
+		sleep = sleepCtx
+	}
 
 	var (
-		last     providers.Provider
-		lastErr  error // last error from a real attempt
-		skipErr  error // last skip reason (circuit open / no streaming)
-		attempts int
+		last      providers.Provider
+		lastErr   error // last error from a real attempt
+		skipErr   error // last skip reason (circuit open / no streaming)
+		attempts  int
+		exhausted = true // every candidate was tried or skipped
 	)
 	for _, p := range cands {
 		if attempts >= maxAttempts {
+			exhausted = false
 			break
 		}
 		if cerr := ctx.Err(); cerr != nil {
@@ -908,10 +990,47 @@ func (r *Router) ExecuteWithFallback(ctx context.Context, req *models.LLMRequest
 		}
 		return nil, skipErr
 	}
+	if exhausted {
+		if wait, ok := retryAfterWait(ctx, lastErr, maxRetryWait); ok {
+			if serr := sleep(ctx, wait); serr != nil {
+				return last, errors.Join(serr, lastErr)
+			}
+			err := fn(last)
+			switch {
+			case err == nil:
+				return last, nil
+			case errors.Is(err, providers.ErrCircuitOpen) || errors.Is(err, providers.ErrStreamingNotSupported):
+				// The retry was refused locally; report the real failure.
+			default:
+				attempts++
+				lastErr = err
+				if cerr := ctx.Err(); cerr != nil {
+					return last, errors.Join(cerr, err)
+				}
+			}
+		}
+	}
 	if attempts == 1 {
 		return last, lastErr
 	}
-	return last, fmt.Errorf("router: %d providers failed, last error: %w", attempts, lastErr)
+	return last, fmt.Errorf("router: %d attempts failed, last error: %w", attempts, lastErr)
+}
+
+// retryAfterWait reports how long to wait before retrying after err: the
+// upstream Retry-After of a retryable *providers.UpstreamError, when it is
+// positive, at most maxWait, and ends before ctx's deadline.
+func retryAfterWait(ctx context.Context, err error, maxWait time.Duration) (time.Duration, bool) {
+	if maxWait <= 0 {
+		return 0, false
+	}
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) || !ue.Retryable() || ue.RetryAfter <= 0 || ue.RetryAfter > maxWait {
+		return 0, false
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= ue.RetryAfter {
+		return 0, false // the retry could not finish in time
+	}
+	return ue.RetryAfter, true
 }
 
 func modelOf(req *models.LLMRequest) string {
@@ -971,6 +1090,45 @@ func (r *Router) StreamWithFallback(ctx context.Context, req *models.LLMRequest)
 	return stream, p, nil
 }
 
+// ErrProviderNotFound is returned (wrapped) by operator actions that name a
+// provider the router does not know.
+var ErrProviderNotFound = errors.New("router: provider not found")
+
+func (r *Router) breaker(name string) (*CircuitBreaker, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, cb := range r.providers {
+		if cb.Name() == name {
+			return cb, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, name)
+}
+
+// ForceOpen opens the named provider's circuit for d regardless of its
+// failure count, excluding it from Candidates (and so from routing and
+// fallback) until d elapses or ResetCircuit is called. It returns an error
+// wrapping ErrProviderNotFound for unknown providers and an error for d <= 0.
+func (r *Router) ForceOpen(provider string, d time.Duration) error {
+	cb, err := r.breaker(provider)
+	if err != nil {
+		return err
+	}
+	return cb.ForceOpen(d)
+}
+
+// ResetCircuit closes the named provider's circuit and clears its
+// consecutive failures, making it routable immediately. It returns an error
+// wrapping ErrProviderNotFound for unknown providers.
+func (r *Router) ResetCircuit(provider string) error {
+	cb, err := r.breaker(provider)
+	if err != nil {
+		return err
+	}
+	cb.Reset()
+	return nil
+}
+
 // NoProviderError is returned when no provider is available.
 type NoProviderError struct {
 	// Model is the requested model, if any.
@@ -1021,6 +1179,40 @@ func (r *Router) SetCostMap(m *intelligence.ModelCostMap) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.costMap = m
+}
+
+// SetMaxRetryWait atomically updates the longest upstream Retry-After that
+// ExecuteWithFallback waits out (<= 0 disables waiting).
+func (r *Router) SetMaxRetryWait(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxRetryWait = d
+}
+
+// ProbeAll runs the active health probe of every registered provider that
+// supports one (providers.Prober), concurrently, and returns the results by
+// provider name (nil = healthy). Providers without a probe are omitted.
+// Results are reflected in each provider's Health().
+func (r *Router) ProbeAll(ctx context.Context) map[string]error {
+	cbs := r.Providers()
+	out := make(map[string]error, len(cbs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, cb := range cbs {
+		if _, ok := cb.provider.(providers.Prober); !ok {
+			continue
+		}
+		wg.Add(1)
+		go func(cb *CircuitBreaker) {
+			defer wg.Done()
+			err := cb.Probe(ctx)
+			mu.Lock()
+			out[cb.Name()] = err
+			mu.Unlock()
+		}(cb)
+	}
+	wg.Wait()
+	return out
 }
 
 // SetMaxAttempts atomically updates the ExecuteWithFallback attempt bound

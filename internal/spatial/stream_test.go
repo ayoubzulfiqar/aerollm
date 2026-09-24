@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -312,5 +313,161 @@ func TestStreamResponseOverRealHTTP1Server(t *testing.T) {
 	}
 	if tr := resp.Trailer.Get(StreamStatusTrailer); tr != "complete" {
 		t.Fatalf("expected complete trailer, got %q", tr)
+	}
+}
+
+// stallingBody sends prefix, then blocks until release is closed, emulating a
+// client that stops sending mid-body without closing the connection.
+func stallingBody(prefix string) (io.Reader, func()) {
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte(prefix))
+	}()
+	return pr, func() { _ = pw.Close() }
+}
+
+func TestStreamResponseStalledBodyEndsByReadDeadline(t *testing.T) {
+	handlerDone := make(chan struct{})
+	h := &Video3DStreamHandler{ChunkSize: 16, IdleTimeout: 200 * time.Millisecond}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	body, release := stallingBody("hello")
+	defer release()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, body)
+	start := time.Now()
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still blocked on the stalled request body")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("stalled read took %v to end, want about the idle timeout", elapsed)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("expected the bytes sent before the stall to be relayed, got %q", got)
+	}
+	if tr := resp.Trailer.Get(StreamStatusTrailer); tr != "timeout" {
+		t.Fatalf("expected timeout trailer, got %q", tr)
+	}
+}
+
+func TestStreamResponseMaxDuration(t *testing.T) {
+	handlerDone := make(chan struct{})
+	h := &Video3DStreamHandler{ChunkSize: 16, IdleTimeout: 5 * time.Second, MaxDuration: 300 * time.Millisecond}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	// The client keeps trickling data, so the idle timeout never fires; only
+	// MaxDuration can end the stream.
+	pr, pw := io.Pipe()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		defer pw.Close()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+				if _, err := pw.Write([]byte("tick")); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL, pr)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not stop at MaxDuration")
+	}
+	if len(got) == 0 || !strings.HasPrefix(string(got), "tick") {
+		t.Fatalf("expected relayed ticks, got %q", got)
+	}
+	if tr := resp.Trailer.Get(StreamStatusTrailer); tr != "timeout" {
+		t.Fatalf("expected timeout trailer, got %q", tr)
+	}
+}
+
+// TestStreamResponseClearsDeadlinesForKeepAlive checks that the per-chunk
+// deadlines of a completed stream do not leak into the next request served on
+// the same kept-alive connection.
+func TestStreamResponseClearsDeadlinesForKeepAlive(t *testing.T) {
+	idle := 100 * time.Millisecond
+	h := &Video3DStreamHandler{IdleTimeout: idle}
+	mux := http.NewServeMux()
+	mux.Handle("/stream", h)
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		// Responds well after the stream's idle deadline would have passed.
+		_, _ = w.Write([]byte("first"))
+		http.NewResponseController(w).Flush()
+		time.Sleep(3 * idle)
+		_, _ = w.Write([]byte("-second"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client := srv.Client()
+
+	resp, err := client.Post(srv.URL+"/stream", "application/octet-stream", strings.NewReader("abc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "abc" || resp.Trailer.Get(StreamStatusTrailer) != "complete" {
+		t.Fatalf("unexpected first stream: %q %q", b, resp.Trailer.Get(StreamStatusTrailer))
+	}
+
+	time.Sleep(2 * idle)
+	reused := false
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused }}
+	req, _ := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, srv.URL+"/slow", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("second request on kept-alive connection: %v", err)
+	}
+	b, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(b) != "first-second" {
+		t.Fatalf("second response cut off by a leaked deadline: %q %v", b, err)
+	}
+	if !reused {
+		t.Log("connection was not reused; keep-alive leak check was not exercised")
+	}
+}
+
+func TestStreamResponseIdleTimeoutDisabled(t *testing.T) {
+	h := &Video3DStreamHandler{IdleTimeout: -1, MaxDuration: -1}
+	if h.idleTimeout() != 0 || h.maxDuration() != 0 {
+		t.Fatalf("negative values must disable the limits: %v %v", h.idleTimeout(), h.maxDuration())
+	}
+	var nilH *Video3DStreamHandler
+	if nilH.idleTimeout() != DefaultStreamIdleTimeout || nilH.maxDuration() != DefaultStreamMaxDuration {
+		t.Fatal("nil handler must use defaults")
+	}
+	w := httptest.NewRecorder()
+	h.StreamResponse(w, httptest.NewRequest(http.MethodPost, "/", nil), strings.NewReader("data"))
+	if w.Body.String() != "data" || w.Result().Trailer.Get(StreamStatusTrailer) != "complete" {
+		t.Fatalf("unexpected: %q %q", w.Body.String(), w.Result().Trailer.Get(StreamStatusTrailer))
 	}
 }

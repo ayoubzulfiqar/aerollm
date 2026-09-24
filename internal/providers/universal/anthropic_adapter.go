@@ -22,6 +22,7 @@ type AnthropicAdapter struct {
 
 	endpoint    string
 	endpointErr error
+	modelsURL   string
 	health      providers.HealthTracker
 }
 
@@ -35,6 +36,9 @@ func NewAnthropicAdapterV2(apiKey, baseURL string) *AnthropicAdapter {
 		http:    &http.Client{Timeout: DefaultTimeout},
 	}
 	a.endpoint, a.endpointErr = providers.AnthropicMessagesURL(baseURL)
+	if a.endpointErr == nil {
+		a.modelsURL, a.endpointErr = providers.AnthropicModelsURL(baseURL)
+	}
 	return a
 }
 
@@ -69,7 +73,9 @@ func (a *AnthropicAdapter) prepare(req *models.LLMRequest, stream bool) (*provid
 }
 
 // ChatCompletions sends a chat completion request to Anthropic's
-// /v1/messages endpoint and returns an OpenAI-style response.
+// /v1/messages endpoint and returns an OpenAI-style response. OpenAI
+// response_format (json_object / json_schema) is emulated with a forced tool
+// (see providers.BuildAnthropicRequest); seed and logprobs are dropped.
 func (a *AnthropicAdapter) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
 	body, err := a.prepare(req, false)
 	if err != nil {
@@ -99,6 +105,18 @@ func (a *AnthropicAdapter) Stream(ctx context.Context, req *models.LLMRequest) (
 		return nil, err
 	}
 	return toAeroStream(ctx, a.name, ch), nil
+}
+
+// Probe implements providers.Prober with an authenticated GET /v1/models
+// (bounded by providers.DefaultProbeTimeout). Its outcome is reflected in
+// Health until a later probe or successful call. It is opt-in.
+func (a *AnthropicAdapter) Probe(ctx context.Context) error {
+	return providers.RunProbe(&a.health, func() error {
+		if a.endpointErr != nil {
+			return configError(a.name, a.endpointErr)
+		}
+		return providers.ProbeEndpoint(ctx, a.http, a.name, a.modelsURL, providers.AnthropicHeaders(a.apiKey))
+	})
 }
 
 // Health returns the health status of the adapter.

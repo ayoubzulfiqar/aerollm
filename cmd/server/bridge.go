@@ -39,6 +39,14 @@ func (b *universalAdapterBridge) Health() providers.ProviderHealth {
 }
 func (b *universalAdapterBridge) Close() error { return b.inner.Close() }
 
+// Probe forwards an active health check to the adapter when it supports one.
+func (b *universalAdapterBridge) Probe(ctx context.Context) error {
+	if p, ok := b.inner.(providers.Prober); ok {
+		return p.Probe(ctx)
+	}
+	return providers.ErrProbeNotSupported
+}
+
 func (b *universalAdapterBridge) ChatCompletions(ctx context.Context, req *models.LLMRequest) (*models.LLMResponse, error) {
 	return b.inner.ChatCompletions(ctx, req)
 }

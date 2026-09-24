@@ -244,6 +244,11 @@ type BatchProcessorConfig struct {
 	// Admit, if set, is consulted before each request; an error fails that
 	// line with code "request_rejected" (e.g. budget exhausted).
 	Admit func(ctx context.Context, b *Batch, req *models.LLMRequest) error
+	// SuspendOnShutdown leaves batches interrupted by Shutdown (or by
+	// Context ending) in their in-progress state instead of failing them,
+	// so a later processor over the same store and work directory resumes
+	// them in Recover. Use it with a PersistentStore and PersistentWorkDir.
+	SuspendOnShutdown bool
 }
 
 // CreateOptions configures CreateBatchWithOptions.
@@ -285,6 +290,8 @@ type runState struct {
 	cancelRequested bool
 	aborted         []parsedLine
 	lastSave        time.Time
+	trailingSave    *time.Timer
+	finished        bool
 }
 
 // BatchProcessor processes batch jobs asynchronously with bounded
@@ -520,7 +527,7 @@ func (bp *BatchProcessor) CreateBatchWithOptions(ctx context.Context, opts Creat
 	rs := &runState{batch: b.Clone(), cancel: cancel}
 	bp.running[b.ID] = rs
 	bp.wg.Add(1)
-	go bp.run(runCtx, rs, reqs)
+	go bp.run(runCtx, rs, reqs, false)
 	return b.Clone(), nil
 }
 
@@ -534,6 +541,15 @@ func (bp *BatchProcessor) isClosed() bool {
 // overwrite existing paths (symlink attacks in shared temp dirs).
 func createExclusive(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+}
+
+// openAppend opens an existing private result file for appending (creating
+// it if needed); it refuses anything but a regular file.
+func openAppend(path string) (*os.File, error) {
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("batch: %s is not a regular file", filepath.Base(path))
+	}
+	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 }
 
 func writeExclusive(path string, data []byte) error {
@@ -669,6 +685,12 @@ func (w *resultWriter) write(toErr bool, line BatchResponse) {
 			dst = w.errw
 		}
 		_, err = dst.Write(append(b, '\n'))
+		if err == nil {
+			// Hand every line to the OS immediately: after a crash the
+			// files then reflect (almost) every executed request, and
+			// Recover does not execute them again.
+			err = dst.Flush()
+		}
 	}
 	if err != nil && w.err == nil {
 		w.err = err
@@ -689,7 +711,19 @@ func (w *resultWriter) flush() error {
 
 func (bp *BatchProcessor) saveLocked(rs *runState, force bool) {
 	now := bp.now()
-	if !force && now.Sub(rs.lastSave) < progressSaveEvery {
+	if wait := progressSaveEvery - now.Sub(rs.lastSave); !force && wait > 0 {
+		// Throttled: make sure the latest progress is still saved soon,
+		// even if no further request finishes (e.g. the rest block).
+		if rs.trailingSave == nil && !rs.finished {
+			rs.trailingSave = time.AfterFunc(wait, func() {
+				rs.mu.Lock()
+				defer rs.mu.Unlock()
+				rs.trailingSave = nil
+				if !rs.finished {
+					bp.saveLocked(rs, true)
+				}
+			})
+		}
 		return
 	}
 	rs.lastSave = now
@@ -697,8 +731,9 @@ func (bp *BatchProcessor) saveLocked(rs *runState, force bool) {
 	_ = bp.store.UpdateBatch(context.Background(), rs.batch)
 }
 
-// run executes a validated batch.
-func (bp *BatchProcessor) run(ctx context.Context, rs *runState, reqs []parsedLine) {
+// run executes a validated batch. When resume is set the result files of
+// an interrupted run are appended to instead of created.
+func (bp *BatchProcessor) run(ctx context.Context, rs *runState, reqs []parsedLine, resume bool) {
 	defer bp.wg.Done()
 	defer rs.cancel()
 	id := rs.batch.ID
@@ -719,12 +754,16 @@ func (bp *BatchProcessor) run(ctx context.Context, rs *runState, reqs []parsedLi
 
 	outPath, _ := bp.OutputPath(id)
 	errPath, _ := bp.ErrorPath(id)
-	outF, err := createExclusive(outPath)
+	open := createExclusive
+	if resume {
+		open = openAppend
+	}
+	outF, err := open(outPath)
 	if err != nil {
 		bp.finish(ctx, rs, nil, fmt.Errorf("cannot create output file: %w", err))
 		return
 	}
-	errF, err := createExclusive(errPath)
+	errF, err := open(errPath)
 	if err != nil {
 		outF.Close()
 		bp.finish(ctx, rs, nil, fmt.Errorf("cannot create error file: %w", err))
@@ -746,6 +785,9 @@ func (bp *BatchProcessor) run(ctx context.Context, rs *runState, reqs []parsedLi
 	dispatched := 0
 feed:
 	for _, pl := range reqs {
+		if ctx.Err() != nil {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			break feed
@@ -780,10 +822,16 @@ feed:
 	bp.finish(ctx, rs, w, werr)
 }
 
-// finish sets the terminal state.
+// finish sets the terminal state (or, when suspending on shutdown, saves
+// the final progress of the interrupted run).
 func (bp *BatchProcessor) finish(ctx context.Context, rs *runState, w *resultWriter, ioErr error) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
+	rs.finished = true
+	if rs.trailingSave != nil {
+		rs.trailingSave.Stop()
+		rs.trailingSave = nil
+	}
 	b := rs.batch
 	now := bp.now().UTC()
 	if w != nil {
@@ -794,6 +842,9 @@ func (bp *BatchProcessor) finish(ctx context.Context, rs *runState, w *resultWri
 	case rs.cancelRequested:
 		b.Status = StatusCancelled
 		b.CancelledAt = &now
+	case bp.baseCtx.Err() != nil && bp.cfg.SuspendOnShutdown && ioErr == nil:
+		// Leave the batch resumable: Recover continues it after a restart.
+		b.OutputFileID, b.ErrorFileID = "", ""
 	case bp.baseCtx.Err() != nil:
 		b.Status = StatusFailed
 		b.FailedAt = &now

@@ -43,6 +43,21 @@ type ProviderHealth struct {
 	Failures    int64        `json:"failures"`
 	LastChecked int64        `json:"last_checked"`
 	CircuitOpen bool         `json:"circuit_open"`
+	// LastProbe is the Unix time of the last active health probe (0 when
+	// probing is not used).
+	LastProbe int64 `json:"last_probe,omitempty"`
+	// ProbeError is the error of the last probe while it is failing.
+	ProbeError string `json:"probe_error,omitempty"`
+}
+
+// Prober is optionally implemented by providers that support an active
+// health probe: a cheap authenticated request (typically GET /models) that
+// proves the upstream is reachable and accepts the configured credentials.
+// Probes are opt-in: nothing calls Probe unless the operator runs them (e.g.
+// on a ticker). The result is reflected in Health(); a provider is healthy
+// until a probe (or real traffic) proves otherwise.
+type Prober interface {
+	Probe(ctx context.Context) error
 }
 
 // ProviderMetrics holds performance metrics for a provider.

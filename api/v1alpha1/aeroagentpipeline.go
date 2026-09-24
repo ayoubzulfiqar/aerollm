@@ -152,6 +152,10 @@ type AeroAgentPipelineStatus struct {
 	State       string   `json:"state,omitempty"`
 	ErrorCount  int      `json:"error_count,omitempty"`
 	FailedNodes []string `json:"failed_nodes,omitempty"`
+	// ObservedGeneration is the metadata.generation last reconciled by the
+	// operator; Conditions describe the outcome.
+	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
+	Conditions         []Condition `json:"conditions,omitempty"`
 }
 
 // AeroAgentPipeline represents an agentic DAG workflow resource.

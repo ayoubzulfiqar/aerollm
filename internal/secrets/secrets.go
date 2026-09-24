@@ -1,4 +1,4 @@
-// Package secrets is an in-memory secret store with encryption at rest.
+// Package secrets is a secret store with encryption at rest.
 //
 // Values are encrypted with AES-256-GCM using a random 96-bit nonce per
 // version and the secret ID/version as additional authenticated data, so
@@ -7,6 +7,13 @@
 // ephemeral random key is generated (IsEphemeral reports this); if it is set
 // but invalid the store refuses all writes (KeyError reports why).
 //
+// By default secrets live in memory only. EnablePersistence (or
+// NewPersistentStore) writes every change through to a persist.Store; only
+// ciphertexts, nonces and non-secret metadata are persisted, together with
+// a fingerprint of the encryption key, so a store opened with the wrong key
+// fails loudly instead of returning undecryptable data. Persistence refuses
+// ephemeral keys. See persistent.go for the crash-safe key rotation.
+//
 // List and Get never return secret values; values are only returned by
 // Reveal / RevealVersion (or the HTTP handler with ?reveal=true).
 package secrets
@@ -14,7 +21,9 @@ package secrets
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -99,15 +108,35 @@ type entry struct {
 	versions      []version // ascending
 }
 
-// Store manages encrypted secrets in memory. It is safe for concurrent use.
+// clone returns a copy of e that can be modified without affecting e.
+// Version ciphertexts are immutable and shared.
+func (e *entry) clone() *entry {
+	c := *e
+	c.metadata = maps.Clone(e.metadata)
+	c.versions = slices.Clone(e.versions)
+	return &c
+}
+
+// Store manages encrypted secrets. It is safe for concurrent use.
 type Store struct {
 	mu          sync.RWMutex
 	secrets     map[string]*entry
 	aead        cipher.AEAD
+	keyID       string // fingerprint of the current key (see keyFingerprint)
 	ephemeral   bool
 	keyErr      error
 	maxVersions int
 	audit       func(action, id string, version int)
+
+	disk *secretsDisk // non-nil when persistence is enabled
+}
+
+// keyFingerprint identifies a key without revealing it (HMAC-SHA256 of a
+// fixed label under the key, truncated to 128 bits).
+func keyFingerprint(key []byte) string {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("aerollm-secrets-key-id-v1"))
+	return hex.EncodeToString(m.Sum(nil)[:16])
 }
 
 // NewStore creates a secret store keyed from AEROLLM_SECRETS_KEY (see the
@@ -168,7 +197,7 @@ func NewStoreWithKey(key []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{secrets: map[string]*entry{}, aead: aead, maxVersions: DefaultMaxVersions}, nil
+	return &Store{secrets: map[string]*entry{}, aead: aead, keyID: keyFingerprint(key), maxVersions: DefaultMaxVersions}, nil
 }
 
 // IsEphemeral reports whether the store uses a random per-process key
@@ -266,13 +295,22 @@ func (s *Store) Upsert(secret Secret) error {
 		}
 		return err
 	}
+	if err := s.writableLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("secrets: nonce: %w", err)
 	}
-	e, ok := s.secrets[secret.ID]
-	if !ok {
+	// Build the new state on a copy so a failed persistence write leaves
+	// the store unchanged.
+	cur, ok := s.secrets[secret.ID]
+	var e *entry
+	if ok {
+		e = cur.clone()
+	} else {
 		name := secret.Name
 		if name == "" {
 			name = secret.ID
@@ -282,7 +320,6 @@ func (s *Store) Upsert(secret Secret) error {
 			created = now
 		}
 		e = &entry{id: secret.ID, name: name, createdAt: created}
-		s.secrets[secret.ID] = e
 	}
 	if secret.Name != "" {
 		e.name = secret.Name
@@ -298,11 +335,16 @@ func (s *Store) Upsert(secret Secret) error {
 	ct := s.aead.Seal(nil, nonce, []byte(secret.Value), aad(e.id, n))
 	e.versions = append(e.versions, version{n: n, nonce: nonce, ciphertext: ct, createdAt: now})
 	if max := s.maxVersions; max > 0 && len(e.versions) > max {
-		drop := len(e.versions) - max
-		clear(e.versions[:drop])
-		e.versions = slices.Clone(e.versions[drop:])
+		e.versions = slices.Clone(e.versions[len(e.versions)-max:])
 	}
 	e.updatedAt = now
+	if s.disk != nil {
+		if err := s.disk.put(e, s.keyID); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.secrets[secret.ID] = e
 	audit := s.audit
 	s.mu.Unlock()
 	if audit != nil {
@@ -423,14 +465,33 @@ func (s *Store) ListMetadata() []SecretMetadata {
 	return out
 }
 
-// Delete removes a secret (all versions) by id.
+// Delete removes a secret (all versions) by id and reports whether it
+// existed. With persistence enabled a failed write keeps the secret and
+// returns false; use Remove to obtain the error.
 func (s *Store) Delete(id string) bool {
+	ok, err := s.Remove(id)
+	return ok && err == nil
+}
+
+// Remove removes a secret (all versions) by id. It reports whether the
+// secret existed and any persistence error (in which case the secret is
+// kept).
+func (s *Store) Remove(id string) (bool, error) {
 	s.mu.Lock()
-	e, ok := s.secrets[id]
+	_, ok := s.secrets[id]
 	if ok {
-		for i := range e.versions {
-			clear(e.versions[i].ciphertext)
+		if err := s.writableLocked(); err != nil {
+			s.mu.Unlock()
+			return true, err
 		}
+		if s.disk != nil {
+			if err := s.disk.remove(id); err != nil {
+				s.mu.Unlock()
+				return true, err
+			}
+		}
+		// Ciphertexts are not wiped: RevealVersion may still be decrypting
+		// them outside the lock, and they are not secret.
 		delete(s.secrets, id)
 	}
 	audit := s.audit
@@ -438,29 +499,32 @@ func (s *Store) Delete(id string) bool {
 	if ok && audit != nil {
 		audit("delete", id, 0)
 	}
-	return ok
+	return ok, nil
 }
 
 // RotateKey re-encrypts every stored version under newKey. On error the
-// store is unchanged.
+// store is unchanged, except for errors matching ErrRotationIncomplete,
+// which mean the new key is already in effect (see persistent.go). With
+// persistence enabled the persisted ciphertexts are re-encrypted as well;
+// the process must be restarted with AEROLLM_SECRETS_KEY set to newKey.
 func (s *Store) RotateKey(newKey []byte) error {
 	newAead, err := newAEAD(newKey)
 	if err != nil {
 		return err
 	}
+	newID := keyFingerprint(newKey)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.aead == nil {
 		return ErrKeyUnavailable
 	}
-	type update struct {
-		e *entry
-		i int
-		v version
+	if err := s.writableLocked(); err != nil {
+		return err
 	}
-	var updates []update
-	for _, e := range s.secrets {
-		for i, v := range e.versions {
+	next := make(map[string]*entry, len(s.secrets))
+	for id, e := range s.secrets {
+		ne := e.clone()
+		for i, v := range ne.versions {
 			pt, err := s.aead.Open(nil, v.nonce, v.ciphertext, aad(e.id, v.n))
 			if err != nil {
 				return ErrDecrypt
@@ -473,16 +537,23 @@ func (s *Store) RotateKey(newKey []byte) error {
 			nv.nonce = nonce
 			nv.ciphertext = newAead.Seal(nil, nonce, pt, aad(e.id, v.n))
 			clear(pt)
-			updates = append(updates, update{e: e, i: i, v: nv})
+			ne.versions[i] = nv
+		}
+		next[id] = ne
+	}
+	var rotErr error
+	if s.disk != nil {
+		rotErr = s.disk.rotate(s.keyID, newID, s.secrets, next)
+		if rotErr != nil && !errors.Is(rotErr, ErrRotationIncomplete) {
+			return rotErr
 		}
 	}
-	for _, u := range updates {
-		u.e.versions[u.i] = u.v
-	}
+	s.secrets = next
 	s.aead = newAead
+	s.keyID = newID
 	s.ephemeral = false
 	s.keyErr = nil
-	return nil
+	return rotErr
 }
 
 // ---------------------------------------------------------------------------
@@ -586,11 +657,15 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "missing id")
 				return
 			}
-			if store.Delete(id) {
+			ok, err := store.Remove(id)
+			switch {
+			case err != nil:
+				writeError(w, http.StatusServiceUnavailable, "secret store unavailable")
+			case ok:
 				writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-				return
+			default:
+				writeError(w, http.StatusNotFound, "not found")
 			}
-			writeError(w, http.StatusNotFound, "not found")
 		default:
 			w.Header().Set("Allow", "GET, POST, PUT, DELETE")
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

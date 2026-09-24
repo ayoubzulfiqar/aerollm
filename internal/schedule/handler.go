@@ -91,8 +91,8 @@ func WebhookHandler(store *Store) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "missing id")
 				return
 			}
-			if !store.Delete(id) {
-				writeError(w, http.StatusNotFound, "not found")
+			if err := store.Remove(id); err != nil {
+				writeStoreError(w, err)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -179,6 +179,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "task already exists")
 	case errors.Is(err, ErrStoreFull):
 		writeError(w, http.StatusInsufficientStorage, "task limit reached")
+	case errors.Is(err, ErrPersistence):
+		writeError(w, http.StatusInternalServerError, "persistence failure")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}

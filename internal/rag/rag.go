@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // VectorStore is the interface for dense vector retrieval.
@@ -420,12 +421,18 @@ type vectorEntry struct {
 }
 
 // InMemoryVectorStore is an in-memory dense vector store with cosine
-// similarity search. It is safe for concurrent use.
+// similarity search. It is safe for concurrent use. EnablePersistence makes
+// its documents durable (embeddings are recomputed on load).
 type InMemoryVectorStore struct {
 	mu       sync.RWMutex
 	docs     map[string]*vectorEntry
 	nextSeq  int
 	embedder Embedder
+
+	// writeMu serializes writers so the persisted documents and the index
+	// are updated in the same order; ps is only accessed with it held.
+	writeMu sync.Mutex
+	ps      persist.Store
 }
 
 // NewInMemoryVectorStore creates an in-memory vector store using the
@@ -449,33 +456,68 @@ func (s *InMemoryVectorStore) Add(doc Document) {
 	_ = s.AddContext(context.Background(), doc)
 }
 
-// AddContext indexes (or replaces, by ID) a document.
+// AddContext indexes (or replaces, by ID) a document. With persistence
+// enabled the document is written through first; on a persistence error the
+// index is left unchanged and the error is returned.
 func (s *InMemoryVectorStore) AddContext(ctx context.Context, doc Document) error {
 	vec, err := s.embedder.Embed(ctx, doc.Content)
 	if err != nil {
 		return fmt.Errorf("embed document: %w", err)
 	}
 	key := docKey(doc)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	seq, isNew := s.nextSeq, true
+	if existing, ok := s.docs[key]; ok {
+		seq, isNew = existing.seq, false
+	}
+	s.mu.RUnlock()
+	if s.ps != nil {
+		if err := s.ps.Put(VectorStoreBucket, key, newPersistedDocument(doc, seq)); err != nil {
+			return fmt.Errorf("rag: persist document: %w", err)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	seq := s.nextSeq
-	if existing, ok := s.docs[key]; ok {
-		seq = existing.seq
-	} else {
+	if isNew {
 		s.nextSeq++
 	}
 	s.docs[key] = &vectorEntry{doc: doc, vector: vec, seq: seq}
 	return nil
 }
 
-// Remove deletes a document by ID and reports whether it existed.
+// Remove deletes a document by ID and reports whether it existed. With
+// persistence enabled, a document whose persisted copy cannot be deleted is
+// kept and false is returned; use RemoveContext to get the error.
 func (s *InMemoryVectorStore) Remove(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := docKey(Document{ID: id})
-	_, ok := s.docs[key]
-	delete(s.docs, key)
+	ok, _ := s.RemoveContext(context.Background(), id)
 	return ok
+}
+
+// RemoveContext deletes a document by ID and reports whether it existed.
+func (s *InMemoryVectorStore) RemoveContext(ctx context.Context, id string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	key := docKey(Document{ID: id})
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
+	_, ok := s.docs[key]
+	s.mu.RUnlock()
+	if !ok {
+		return false, nil
+	}
+	if s.ps != nil {
+		if err := s.ps.Delete(VectorStoreBucket, key); err != nil {
+			return false, fmt.Errorf("rag: delete persisted document: %w", err)
+		}
+	}
+	s.mu.Lock()
+	delete(s.docs, key)
+	s.mu.Unlock()
+	return true, nil
 }
 
 // Len returns the number of indexed documents.
@@ -537,13 +579,19 @@ type keywordEntry struct {
 }
 
 // InMemoryKeywordIndex is an in-memory BM25 keyword index (k1=1.2, b=0.75).
-// It is safe for concurrent use.
+// It is safe for concurrent use. EnablePersistence makes its documents
+// durable (they are re-indexed on load).
 type InMemoryKeywordIndex struct {
 	mu       sync.RWMutex
 	docs     map[string]*keywordEntry
 	df       map[string]int
 	totalLen int
 	nextSeq  int
+
+	// writeMu serializes writers so the persisted documents and the index
+	// are updated in the same order; ps is only accessed with it held.
+	writeMu sync.Mutex
+	ps      persist.Store
 }
 
 // NewInMemoryKeywordIndex creates a simple keyword index.
@@ -551,28 +599,62 @@ func NewInMemoryKeywordIndex() *InMemoryKeywordIndex {
 	return &InMemoryKeywordIndex{docs: make(map[string]*keywordEntry), df: make(map[string]int)}
 }
 
-// Add indexes (or replaces, by ID) a document.
+// Add indexes (or replaces, by ID) a document. Persistence errors are
+// dropped; use AddContext to receive them.
 func (i *InMemoryKeywordIndex) Add(doc Document) {
+	_ = i.AddContext(context.Background(), doc)
+}
+
+// AddContext indexes (or replaces, by ID) a document. With persistence
+// enabled the document is written through first; on a persistence error the
+// index is left unchanged and the error is returned.
+func (i *InMemoryKeywordIndex) AddContext(ctx context.Context, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := docKey(doc)
+	i.writeMu.Lock()
+	defer i.writeMu.Unlock()
+	i.mu.RLock()
+	seq, isNew := i.nextSeq, true
+	if old, ok := i.docs[key]; ok {
+		seq, isNew = old.seq, false
+	}
+	i.mu.RUnlock()
+	if i.ps != nil {
+		if err := i.ps.Put(KeywordIndexBucket, key, newPersistedDocument(doc, seq)); err != nil {
+			return fmt.Errorf("rag: persist document: %w", err)
+		}
+	}
+	entry := newKeywordEntry(doc, seq)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if isNew {
+		i.nextSeq++
+	}
+	i.insertLocked(key, entry)
+	return nil
+}
+
+func newKeywordEntry(doc Document, seq int) *keywordEntry {
 	toks := terms(doc.Content)
 	tf := make(map[string]int, len(toks))
 	for _, t := range toks {
 		tf[t]++
 	}
-	key := docKey(doc)
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	seq := i.nextSeq
+	return &keywordEntry{doc: doc, tf: tf, length: len(toks), seq: seq}
+}
+
+// insertLocked adds (or replaces) an entry, keeping df and totalLen exact.
+func (i *InMemoryKeywordIndex) insertLocked(key string, e *keywordEntry) {
 	if old, ok := i.docs[key]; ok {
 		i.removeLocked(key, old)
-		seq = old.seq
-	} else {
-		i.nextSeq++
 	}
-	for t := range tf {
+	for t := range e.tf {
 		i.df[t]++
 	}
-	i.totalLen += len(toks)
-	i.docs[key] = &keywordEntry{doc: doc, tf: tf, length: len(toks), seq: seq}
+	i.totalLen += e.length
+	i.docs[key] = e
 }
 
 func (i *InMemoryKeywordIndex) removeLocked(key string, e *keywordEntry) {
@@ -585,16 +667,39 @@ func (i *InMemoryKeywordIndex) removeLocked(key string, e *keywordEntry) {
 	delete(i.docs, key)
 }
 
-// Remove deletes a document by ID and reports whether it existed.
+// Remove deletes a document by ID and reports whether it existed. With
+// persistence enabled, a document whose persisted copy cannot be deleted is
+// kept and false is returned; use RemoveContext to get the error.
 func (i *InMemoryKeywordIndex) Remove(id string) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	ok, _ := i.RemoveContext(context.Background(), id)
+	return ok
+}
+
+// RemoveContext deletes a document by ID and reports whether it existed.
+func (i *InMemoryKeywordIndex) RemoveContext(ctx context.Context, id string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	key := docKey(Document{ID: id})
-	e, ok := i.docs[key]
-	if ok {
+	i.writeMu.Lock()
+	defer i.writeMu.Unlock()
+	i.mu.RLock()
+	_, ok := i.docs[key]
+	i.mu.RUnlock()
+	if !ok {
+		return false, nil
+	}
+	if i.ps != nil {
+		if err := i.ps.Delete(KeywordIndexBucket, key); err != nil {
+			return false, fmt.Errorf("rag: delete persisted document: %w", err)
+		}
+	}
+	i.mu.Lock()
+	if e, ok := i.docs[key]; ok {
 		i.removeLocked(key, e)
 	}
-	return ok
+	i.mu.Unlock()
+	return true, nil
 }
 
 // Len returns the number of indexed documents.

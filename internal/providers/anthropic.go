@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,6 +48,34 @@ func AnthropicMessagesURL(baseURL string) (string, error) {
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/v1")
 	return JoinURL(u, "/v1/messages"), nil
+}
+
+// AnthropicModelsURL returns the /v1/models URL (used for health probes) for
+// a base URL given with or without a trailing "/v1".
+func AnthropicModelsURL(baseURL string) (string, error) {
+	messages, err := AnthropicMessagesURL(baseURL)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(messages)
+	if err != nil {
+		return "", err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/messages") + "/models"
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+// Probe implements Prober with GET /v1/models; the result is reflected in
+// Health.
+func (p *AnthropicProvider) Probe(ctx context.Context) error {
+	return RunProbe(&p.health, func() error {
+		endpoint, err := AnthropicModelsURL(p.BaseURL)
+		if err != nil {
+			return &UpstreamError{Provider: p.Name(), StatusCode: http.StatusInternalServerError, Type: "configuration_error", Message: "provider base URL misconfigured: " + err.Error()}
+		}
+		return ProbeEndpoint(ctx, p.client(), p.Name(), endpoint, AnthropicHeaders(p.APIKey))
+	})
 }
 
 // Name returns the provider name.

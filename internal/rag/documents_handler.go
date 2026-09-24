@@ -2,6 +2,7 @@ package rag
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,13 +14,26 @@ import (
 )
 
 // DocumentIndexer is implemented by stores that accept documents
-// (InMemoryVectorStore, InMemoryKeywordIndex).
+// (InMemoryVectorStore, InMemoryKeywordIndex). Indexes that also implement
+// AddContext/RemoveContext have their errors (embedding or persistence
+// failures) reported by the documents handler as HTTP 500.
 type DocumentIndexer interface {
 	Add(doc Document)
 }
 
 type documentRemover interface {
 	Remove(id string) bool
+}
+
+// contextIndexer is implemented by indexes whose writes can fail (e.g. with
+// persistence enabled); the handler prefers it over Add.
+type contextIndexer interface {
+	AddContext(ctx context.Context, doc Document) error
+}
+
+// contextRemover is the error-reporting counterpart of documentRemover.
+type contextRemover interface {
+	RemoveContext(ctx context.Context, id string) (bool, error)
 }
 
 type documentCounter interface {
@@ -76,8 +90,18 @@ func NewDocumentsHandler(indexes ...DocumentIndexer) http.Handler {
 			}
 			deleted := false
 			for _, idx := range indexes {
-				if rm, ok := idx.(documentRemover); ok && rm.Remove(id) {
-					deleted = true
+				switch rm := idx.(type) {
+				case contextRemover:
+					ok, err := rm.RemoveContext(r.Context(), id)
+					if err != nil {
+						writeDocError(w, http.StatusInternalServerError, "failed to delete document")
+						return
+					}
+					deleted = deleted || ok
+				case documentRemover:
+					if rm.Remove(id) {
+						deleted = true
+					}
 				}
 			}
 			if !deleted {
@@ -152,8 +176,21 @@ func ingest(w http.ResponseWriter, r *http.Request, indexes []DocumentIndexer) {
 		prepared = append(prepared, Document{ID: d.ID, Content: d.Content, Source: d.Source, Metadata: d.Metadata})
 		ids = append(ids, d.ID)
 	}
-	for _, doc := range prepared {
+	for n, doc := range prepared {
 		for _, idx := range indexes {
+			if ci, ok := idx.(contextIndexer); ok {
+				if err := ci.AddContext(r.Context(), doc); err != nil {
+					// Documents before this one are fully indexed; report
+					// them so the client can retry the rest.
+					writeDocJSON(w, http.StatusInternalServerError, map[string]interface{}{
+						"error":   map[string]interface{}{"message": "failed to index document " + doc.ID, "code": http.StatusInternalServerError},
+						"indexed": n,
+						"ids":     ids[:n],
+					})
+					return
+				}
+				continue
+			}
 			idx.Add(doc)
 		}
 	}

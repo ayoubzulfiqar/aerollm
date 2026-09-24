@@ -23,6 +23,7 @@ import (
 type ProviderMetric struct {
 	Name      string  `json:"name"`
 	Requests  int64   `json:"requests"`
+	Errors    int64   `json:"errors"`
 	LatencyMs float64 `json:"avg_latency_ms"`
 }
 
@@ -194,7 +195,7 @@ func ProviderMetrics() []ProviderMetric {
 		if s.samples > 0 {
 			avg = s.latencyMs / float64(s.samples)
 		}
-		out = append(out, ProviderMetric{Name: name, Requests: s.requests, LatencyMs: avg})
+		out = append(out, ProviderMetric{Name: name, Requests: s.requests, Errors: s.errors, LatencyMs: avg})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

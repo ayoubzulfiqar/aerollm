@@ -20,7 +20,6 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/chaos"
 	"github.com/ayoubzulfiqar/aerollm/internal/compliance"
 	"github.com/ayoubzulfiqar/aerollm/internal/contextmgr"
-	"github.com/ayoubzulfiqar/aerollm/internal/federated"
 	"github.com/ayoubzulfiqar/aerollm/internal/flags"
 	"github.com/ayoubzulfiqar/aerollm/internal/flywheel"
 	"github.com/ayoubzulfiqar/aerollm/internal/genui"
@@ -34,6 +33,7 @@ import (
 	"github.com/ayoubzulfiqar/aerollm/internal/middleware"
 	"github.com/ayoubzulfiqar/aerollm/internal/models"
 	"github.com/ayoubzulfiqar/aerollm/internal/notification"
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 	"github.com/ayoubzulfiqar/aerollm/internal/pqc"
 	"github.com/ayoubzulfiqar/aerollm/internal/rag"
 	"github.com/ayoubzulfiqar/aerollm/internal/realtime"
@@ -146,6 +146,20 @@ func (a *app) routes() (http.Handler, error) {
 	vectorStore := rag.NewInMemoryVectorStore()
 	keywordIndex := rag.NewInMemoryKeywordIndex()
 	graphStore := graphrag.NewBboltGraphStore()
+	if a.persist != nil {
+		for name, enable := range map[string]func(persist.Store) error{
+			"rag vectors":  vectorStore.EnablePersistence,
+			"rag keywords": keywordIndex.EnablePersistence,
+			"graph":        graphStore.EnablePersistence,
+		} {
+			if err := enable(a.persist); err != nil {
+				if !errors.Is(err, rag.ErrPartialLoad) && !errors.Is(err, graphrag.ErrPartialLoad) {
+					return nil, fmt.Errorf("%s persistence: %w", name, err)
+				}
+				a.logger.Warn("partially restored "+name, "error", err)
+			}
+		}
+	}
 	chatGuards := []middleware.Middleware{
 		adapt(guardrails.APIKeyScopingMiddleware(scoper)),
 		adapt(guardrails.PIIMiddleware),
@@ -166,14 +180,22 @@ func (a *app) routes() (http.Handler, error) {
 	mux.Handle("/v1/audio/transcriptions", client(http.HandlerFunc(h.AudioTranscriptions)))
 	mux.Handle("/v1/responses", client(http.HandlerFunc(h.Responses)))
 	mux.Handle("/v1/spatial/parse", client(spatial.ParseHandler()))
-	mux.Handle("/v1/spatial/stream", client(spatial.NewVideo3DStreamHandler()))
+	spatialStream := spatial.NewVideo3DStreamHandler()
+	spatialStream.MaxDuration = 5 * time.Minute
+	mux.Handle("/v1/spatial/stream", client(spatialStream))
 
 	feedback := flywheel.NewFeedbackExporter(a.ledger)
 	mux.Handle("/v1/feedback", client(http.HandlerFunc(feedback.FeedbackHandler)))
 
 	// MCP exposes the server tool registry; tools execute server-side, so
 	// it requires a valid key.
-	mux.Handle("/mcp", client(mcp.NewServerWithRegistry(a.registry)))
+	var mcpOpts []mcp.Option
+	if envBool("AEROLLM_MCP_STATELESS") {
+		// Sessions live in one process; multi-replica deployments without
+		// sticky routing must run stateless.
+		mcpOpts = append(mcpOpts, mcp.WithoutSessions())
+	}
+	mux.Handle("/mcp", client(mcp.NewServerWithRegistry(a.registry, mcpOpts...)))
 
 	hub := realtime.NewHub()
 	a.onClose(func(context.Context) { hub.CancelAll() })
@@ -207,6 +229,7 @@ func (a *app) routes() (http.Handler, error) {
 	}
 	mux.Handle("/key/info", selfService(kh.InfoKey))
 	mux.Handle("/user/info", selfService(kh.UserInfo))
+	mux.Handle("/team/info", selfService(kh.TeamInfo))
 
 	configHandler := api.NewConfigHandler(a.reloader, a.logger.Func())
 	mux.Handle("/model/info", adminFunc(configHandler.ModelInfo))
@@ -216,18 +239,25 @@ func (a *app) routes() (http.Handler, error) {
 	spend := api.NewSpendHandler(a.analytics, a.logger.Func())
 	mux.Handle("/global/spend/report", adminFunc(spend.SpendReport))
 	mux.Handle("/global/spend/logs", adminFunc(spend.SpendLogs))
+	mux.Handle("/v1/budgets", admin(api.NewBudgetHandler(a.costTracker, a.budgetPeriod)))
 
 	cacheHandler := api.NewCacheHandler(h.Cache, h.SemanticCache)
 	mux.Handle("/v1/cache/stats", adminFunc(cacheHandler.Stats))
 	mux.Handle("/v1/cache", adminFunc(cacheHandler.Clear))
 	mux.Handle("/v1/cache/inspect", adminFunc(cacheHandler.Inspect))
 
-	a.mountBatches(mux, client)
+	if err := a.mountBatches(mux, client); err != nil {
+		return nil, err
+	}
 
 	mux.Handle("/v1/rag/documents", admin(rag.NewDocumentsHandler(vectorStore, keywordIndex)))
+	mux.Handle("/v1/graphrag/graph", admin(graphrag.NewGraphHandler(graphStore, nil)))
 
 	// ---- Admin: human-in-the-loop approvals & traffic tools -------------
-	advancedStore := newApprovalStore(a)
+	advancedStore, err := newApprovalStore(a)
+	if err != nil {
+		return nil, fmt.Errorf("approvals: %w", err)
+	}
 	advanced := newAdvancedAgent(a, advancedStore)
 	h.Advanced = advanced
 	mux.Handle("/v1/agents/approvals/", adminFunc(h.ResumeApproval))
@@ -240,6 +270,7 @@ func (a *app) routes() (http.Handler, error) {
 		return nil, fmt.Errorf("shadow tester: %w", err)
 	}
 	a.onClose(func(context.Context) { shadow.Wait() })
+	mux.Handle("/v1/shadow/results", admin(shadow.ResultsHandler()))
 	mux.Handle("/v1/shadow", adminFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -262,33 +293,71 @@ func (a *app) routes() (http.Handler, error) {
 	}))
 
 	// ---- Admin: RSI -----------------------------------------------------
-	a.mountRSI(mux, adminFunc)
+	if err := a.mountRSI(mux, adminFunc); err != nil {
+		return nil, err
+	}
 
 	// ---- Admin: control plane -------------------------------------------
-	secretStore := secrets.NewStore()
-	if err := secretStore.KeyError(); err != nil {
-		return nil, fmt.Errorf("secrets: %w", err)
-	}
-	if secretStore.IsEphemeral() {
-		a.logger.Warn("AEROLLM_SECRETS_KEY not set: secrets are encrypted with an ephemeral key and lost on restart")
+	var secretStore *secrets.Store
+	if a.persist != nil && os.Getenv(secrets.EnvKey) != "" {
+		if secretStore, err = secrets.NewPersistentStore(a.persist); err != nil {
+			return nil, fmt.Errorf("secrets: %w", err)
+		}
+	} else {
+		secretStore = secrets.NewStore()
+		if err := secretStore.KeyError(); err != nil {
+			return nil, fmt.Errorf("secrets: %w", err)
+		}
+		a.logger.Warn(secrets.EnvKey + " not set: secrets are encrypted with an ephemeral key and not persisted")
 	}
 	both("/v1/secrets", admin(secrets.WebhookHandler(secretStore)))
 	policyStore := compliance.NewHTTPPolicyStore()
+	auditLog := compliance.NewMemoryAuditLogger()
+	quotaStore := tenant.NewInMemoryQuotaStore()
+	if a.persist != nil {
+		if policyStore, err = compliance.NewPersistentHTTPPolicyStore(a.persist); err != nil {
+			return nil, fmt.Errorf("policy store: %w", err)
+		}
+		if auditLog, err = compliance.NewPersistentAuditLogger(a.persist, compliance.DefaultAuditCapacity); err != nil {
+			return nil, fmt.Errorf("audit log: %w", err)
+		}
+		if quotaStore, err = tenant.NewPersistentQuotaStore(a.persist); err != nil {
+			return nil, fmt.Errorf("quota store: %w", err)
+		}
+	}
 	mux.Handle("/v1/policy", admin(compliance.HTTPPolicyHandler(policyStore)))
 	mux.Handle("/v1/policy/block", admin(compliance.HTTPBlockHandler(policyStore)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}))))
-	both("/v1/flags", admin(flags.WebhookHandler(flags.NewStore())))
+	flagStore, err := openStore(a, "flags", flags.NewStore, flags.NewStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
+	both("/v1/flags", admin(flags.WebhookHandler(flagStore)))
 
-	retentionStore := retention.NewRetentionStore()
+	retentionStore, err := openStore(a, "retention", retention.NewRetentionStore, retention.NewRetentionStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
 	both("/v1/retention", admin(retention.WebhookHandler(retentionStore)))
 
-	notificationStore := notification.NewStore()
+	notificationStore, err := openStore(a, "notification", notification.NewStore, notification.NewStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
 	both("/v1/notification/channels", admin(notification.WebhookHandler(notificationStore)))
 	both("/v1/notification/subscriptions", admin(notification.WebhookHandler(notificationStore)))
-	notifier := notification.NewDispatcher(notificationStore, notification.DispatcherOptions{})
+	emailSender, smsSender, err := notification.SendersFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("notification senders: %w", err)
+	}
+	notifier := notification.NewDispatcher(notificationStore, notification.DispatcherOptions{EmailSender: emailSender, SMSSender: smsSender})
+	mux.Handle(notification.SendPath, admin(notification.SendHandler(notifier)))
 
-	incidentStore := incident.NewStore()
+	incidentStore, err := openStore(a, "incident", incident.NewStore, incident.NewStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
 	incidentStore.SetHook(func(ev incident.Event) {
 		inc := ev.Incident
 		msg := notification.Message{
@@ -308,8 +377,18 @@ func (a *app) routes() (http.Handler, error) {
 	})
 	both("/v1/incidents", admin(incident.WebhookHandler(incidentStore)))
 
-	both("/v1/schedule", admin(schedule.WebhookHandler(schedule.NewStore())))
-	regionStore := region.NewStore()
+	scheduleStore, err := openStore(a, "schedule", schedule.NewStore, schedule.NewStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
+	both("/v1/schedule", admin(schedule.WebhookHandler(scheduleStore)))
+	if err := a.startScheduleRunner(scheduleStore); err != nil {
+		return nil, err
+	}
+	regionStore, err := openStore(a, "region", region.NewStore, region.NewStoreWithPersistence)
+	if err != nil {
+		return nil, err
+	}
 	both("/v1/region/regions", admin(region.WebhookHandler(regionStore)))
 	both("/v1/region/residency", admin(region.WebhookHandler(regionStore)))
 	both("/v1/region/routes", admin(region.WebhookHandler(regionStore)))
@@ -324,7 +403,6 @@ func (a *app) routes() (http.Handler, error) {
 		return admission.AdmissionResponse{Allowed: true, Reason: "no admission policy configured"}
 	}))))
 
-	auditLog := compliance.NewMemoryAuditLogger()
 	mux.Handle("/v1/audit/events", adminFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -334,7 +412,6 @@ func (a *app) routes() (http.Handler, error) {
 		writeJSON(w, http.StatusOK, auditLog.Events())
 	}))
 
-	quotaStore := tenant.NewInMemoryQuotaStore()
 	mux.Handle("/v1/quota", adminFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -346,6 +423,10 @@ func (a *app) routes() (http.Handler, error) {
 			return
 		}
 		res, err := quotaStore.Enforce(r.Context(), &q, 0)
+		if errors.Is(err, tenant.ErrPersistence) {
+			middleware.WriteJSONError(w, http.StatusServiceUnavailable, "quota store unavailable", "")
+			return
+		}
 		if err != nil {
 			middleware.WriteJSONError(w, http.StatusBadRequest, err.Error(), "")
 			return
@@ -362,8 +443,22 @@ func (a *app) routes() (http.Handler, error) {
 	mux.Handle("/v1/eval/regression", admin(evalRegression))
 	mux.Handle("/v1/eval/benchmark", admin(evalBenchmark))
 
-	fedAgg := federated.NewFedAvgAggregator()
-	mux.Handle("/v1/federated/aggregate", admin(federated.AggregateHandler(fedAgg)))
+	clientPlain := func(hd http.Handler) http.Handler { return client(hd) }
+	if err := a.mountFederated(mux, admin, clientPlain); err != nil {
+		return nil, err
+	}
+	if err := a.configureAutoscaleBootstrap(); err != nil {
+		return nil, err
+	}
+	if err := a.mountFineTuning(mux, adminFunc, feedback); err != nil {
+		return nil, err
+	}
+	if err := a.startAIOps(mux, adminFunc, h.RateLimiter); err != nil {
+		return nil, err
+	}
+	if err := a.mountRedTeam(mux, adminFunc); err != nil {
+		return nil, err
+	}
 
 	infra := autoscale.NewServerMetaAgentLoop()
 	mux.Handle("/v1/autoscale/evaluate", adminFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -395,7 +490,7 @@ func (a *app) routes() (http.Handler, error) {
 
 	mux.Handle("/v1/pqc/keys", admin(pqc.HandshakeHandler(pqc.NewQuantumSafeKeyManager(pqc.AlgorithmHybridMLKEM768X25519Ed25519))))
 
-	if err := a.mountStudioAndMarketplace(mux, admin); err != nil {
+	if err := a.mountStudioAndMarketplace(mux, admin, client); err != nil {
 		return nil, err
 	}
 	a.startMesh()
@@ -461,11 +556,19 @@ func (a *app) billingPreview(w http.ResponseWriter, r *http.Request) {
 // mountRSI wires the recursive self-improvement orchestrator. Policies are
 // evaluated and reported, but live deployment is opt-in
 // (AEROLLM_RSI_DEPLOY=true); otherwise it runs in dry-run mode.
-func (a *app) mountRSI(mux *http.ServeMux, adminFunc func(http.HandlerFunc) http.Handler) {
+func (a *app) mountRSI(mux *http.ServeMux, adminFunc func(http.HandlerFunc) http.Handler) error {
 	rsiCfg := rsi.DefaultRSIConfig()
 	deploy := envBool("AEROLLM_RSI_DEPLOY")
 	rsiCfg.DryRun = !deploy
 	orch := rsi.NewRSIOrchestrator(a.ledger, a.trace, a.costTracker, &routerProviderLister{r: a.router}, rsiCfg)
+	if a.persist != nil {
+		if err := orch.EnablePersistence(a.persist); err != nil {
+			if !errors.Is(err, rsi.ErrPartialRestore) {
+				return fmt.Errorf("rsi persistence: %w", err)
+			}
+			a.logger.Warn("rsi state partially restored", "error", err)
+		}
+	}
 	if deploy {
 		orch.SetHooks(
 			func(ctx context.Context, policy rsi.Policy, cycle rsi.RSICycle) error {
@@ -488,17 +591,15 @@ func (a *app) mountRSI(mux *http.ServeMux, adminFunc func(http.HandlerFunc) http
 	mux.Handle("/v1/rsi/config", adminFunc(rh.Config()))
 	mux.Handle("/v1/rsi/stats", adminFunc(rh.Stats()))
 	mux.Handle("/v1/rsi/rollback", adminFunc(rh.Rollback()))
+	return nil
 }
 
 // mountStudioAndMarketplace wires the studio (licensed) and plugin registry.
-func (a *app) mountStudioAndMarketplace(mux *http.ServeMux, admin func(http.Handler) http.Handler) error {
-	stateDir := os.Getenv("AEROLLM_STATE_DIR")
-	if stateDir == "" {
-		stateDir = "./aerollm-state"
-	}
-	stateStore, err := state.OpenBboltStateStore(stateDir)
+func (a *app) mountStudioAndMarketplace(mux *http.ServeMux, admin func(http.Handler) http.Handler, client func(http.Handler, ...middleware.Middleware) http.Handler) error {
+	dir := stateDir()
+	stateStore, err := state.OpenBboltStateStore(dir)
 	if err != nil {
-		a.logger.Warn("state store unavailable; swarm features disabled", "dir", stateDir, "error", err)
+		a.logger.Warn("state store unavailable; swarm features disabled", "dir", dir, "error", err)
 	} else {
 		a.onClose(func(context.Context) { _ = stateStore.Close() })
 	}
@@ -518,6 +619,9 @@ func (a *app) mountStudioAndMarketplace(mux *http.ServeMux, admin func(http.Hand
 	}
 	mux.Handle("/v1/marketplace/plugins", admin(registryService.PluginsHandler()))
 	mux.Handle("/v1/marketplace/plugins/", admin(registryService.PluginByIDHandler()))
+	registryService.SetReceiptSink(newReceiptSink(a.persist))
+	mux.Handle("/v1/marketplace/openstandard/capability", client(registryService.CapabilityManifestHandler()))
+	mux.Handle("/v1/marketplace/openstandard/receipt", client(registryService.BillingReceiptHandler()))
 
 	royaltyCfg := webhooks.BudgetWebhookConfig{URL: os.Getenv("AEROLLM_ROYALTY_WEBHOOK_URL"), Timeout: 2 * time.Second}
 	royalties := marketplace.NewRoyaltyRecorder(a.webhooks, royaltyCfg)
@@ -558,20 +662,43 @@ func (a *app) startMesh() {
 		meshCfg.LocalPeerID = mesh.PeerID(randomToken("node-", 6))
 	}
 	meshCfg.PeerAddresses = mesh.ParsePeerAddresses(os.Getenv("AEROLLM_MESH_PEERS"))
-	transport := mesh.NewInMemoryTransport(meshCfg.LocalPeerID)
-	discovery := mesh.NewDiscovery(mesh.DiscoveryConfig{
+	// Real peers talk over mutual TLS (AEROLLM_MESH_TLS_CERT/KEY/CA or
+	// AEROLLM_MESH_TLS_PINS); without it the mesh is in-process only.
+	var transport mesh.SecureTransport
+	tlsTr, ok, err := mesh.NewTLSTransportFromEnv(mesh.PeerID(os.Getenv("AEROLLM_MESH_NODE_ID")), os.Getenv)
+	switch {
+	case err != nil:
+		a.logger.Error("mesh TLS transport unavailable; mesh disabled", "error", err)
+		return
+	case ok:
+		transport = tlsTr
+		meshCfg.LocalPeerID = tlsTr.LocalID()
+	default:
+		a.logger.Warn("mesh running without TLS: in-process transport only (set AEROLLM_MESH_TLS_* to join remote peers)")
+		transport = mesh.NewInMemoryTransport(meshCfg.LocalPeerID)
+	}
+	dcfg := mesh.DiscoveryConfig{
 		LocalID:     meshCfg.LocalPeerID,
 		BindAddress: meshCfg.BindAddress,
 		Peers:       meshCfg.PeerDescriptors(),
 		Transport:   transport,
-	})
+	}
+	if adv := os.Getenv("AEROLLM_MESH_ADVERTISE"); adv != "" {
+		dcfg.Advertise = mesh.PeerDescriptor{ID: meshCfg.LocalPeerID, Address: adv}
+	}
+	discovery := mesh.NewDiscovery(dcfg)
 	worker := mesh.NewSyncWorker(mesh.SyncWorkerConfig{
 		State:     mesh.NewPluginRegistrySync(),
 		Discovery: discovery,
 		Interval:  meshCfg.GossipInterval,
 	})
 	a.goWorker("mesh-sync", worker.Start)
-	a.onClose(func(context.Context) { worker.Stop() })
+	a.onClose(func(context.Context) {
+		worker.Stop()
+		if c, ok := transport.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	})
 	a.logger.Info("mesh sync started", "node", string(meshCfg.LocalPeerID), "peers", len(meshCfg.PeerAddresses))
 }
 
@@ -587,4 +714,47 @@ func (l *routerProviderLister) ProviderNames() []string {
 		names[i] = p.Name()
 	}
 	return names
+}
+
+// openStore returns a durable store when persistence is enabled, else the
+// in-memory one. A nil store from the persistent constructor is fatal; an
+// error alongside a store means some saved documents were skipped.
+func openStore[T any](a *app, name string, mem func() *T, durable func(persist.Store) (*T, error)) (*T, error) {
+	if a.persist == nil {
+		return mem(), nil
+	}
+	s, err := durable(a.persist)
+	if s == nil {
+		if err == nil {
+			err = errors.New("no store returned")
+		}
+		return nil, fmt.Errorf("%s persistence: %w", name, err)
+	}
+	if err != nil {
+		a.logger.Warn("some persisted "+name+" documents were skipped", "error", err)
+	}
+	return s, nil
+}
+
+// startScheduleRunner executes scheduled webhook tasks (SSRF-safe,
+// optionally HMAC-signed via AEROLLM_SCHEDULE_WEBHOOK_SECRET).
+func (a *app) startScheduleRunner(store *schedule.Store) error {
+	opts, err := schedule.WebhookExecutorOptionsFromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("schedule executor: %w", err)
+	}
+	exec, err := schedule.NewWebhookExecutor(opts)
+	if err != nil {
+		return fmt.Errorf("schedule executor: %w", err)
+	}
+	runner, err := schedule.NewRunner(store, exec, schedule.RunnerOptions{})
+	if err != nil {
+		return fmt.Errorf("schedule runner: %w", err)
+	}
+	a.goWorker("schedule-runner", func(ctx context.Context) {
+		if err := runner.Run(ctx); err != nil {
+			a.logger.Error("schedule runner stopped", "error", err)
+		}
+	})
+	return nil
 }

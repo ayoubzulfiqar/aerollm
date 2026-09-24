@@ -1,0 +1,86 @@
+# Example Deployment of aero-operator (apply rbac.yaml and crds.yaml first).
+#
+# There is no published operator image yet; build one from ./cmd/operator,
+# e.g. CGO_ENABLED=0 go build -trimpath -o aero-operator ./cmd/operator, and
+# replace the image below.
+#
+# Run a single replica: the operator has no leader election.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aero-operator-admin-key
+  namespace: aerollm-system
+type: Opaque
+stringData:
+  # The gateway admin key (AEROLLM_MASTER_KEY or an auth.admin_keys entry).
+  admin-key: REPLACE_ME
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aero-operator-config
+  namespace: aerollm-system
+data:
+  operator.yaml: |
+    kube: true
+    namespace: ""
+    resync_interval: 10m
+    watch_timeout: 5m
+    gateway_url: http://aerollm.aerollm-system.svc:8080
+    gateway_allow_http: true
+    admin_key_env: AEROLLM_ADMIN_KEY
+    request_timeout: 15s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aero-operator
+  namespace: aerollm-system
+  labels:
+    app.kubernetes.io/name: aero-operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aero-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aero-operator
+    spec:
+      serviceAccountName: aero-operator
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: aerollm/aero-operator:v0.3.0
+          args: ["--operator-config", "/etc/aero-operator/operator.yaml"]
+          env:
+            - name: AEROLLM_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aero-operator-admin-key
+                  key: admin-key
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/aero-operator
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: aero-operator-config

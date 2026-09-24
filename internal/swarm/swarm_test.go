@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -302,7 +303,8 @@ func TestFederatedShareAndExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows does not implement Unix permission bits.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("expected 0600 perms, got %v", info.Mode().Perm())
 	}
 	b, _ := os.ReadFile(path)

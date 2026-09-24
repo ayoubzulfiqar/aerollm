@@ -18,22 +18,68 @@ var buildVersion = "dev"
 
 // Config holds the entire application configuration.
 type Config struct {
-	App        AppConfig        `mapstructure:"app" json:"app"`
-	Server     ServerConfig     `mapstructure:"server" json:"server"`
-	Redis      RedisConfig      `mapstructure:"redis" json:"redis"`
-	Auth       AuthConfig       `mapstructure:"auth" json:"auth"`
-	Security   SecurityConfig   `mapstructure:"security" json:"security"`
-	Providers  []ProviderConfig `mapstructure:"providers" json:"providers"`
-	Callbacks  CallbacksConfig  `mapstructure:"callbacks" json:"callbacks"`
-	Router     RouterConfig     `mapstructure:"router" json:"router"`
-	RateLimit  RateLimitConfig  `mapstructure:"rate_limit" json:"rate_limit"`
-	Cache      CacheConfig      `mapstructure:"cache" json:"cache"`
-	Telemetry  TelemetryConfig  `mapstructure:"telemetry" json:"telemetry"`
-	Agent      AgentConfig      `mapstructure:"agent" json:"agent"`
-	Logging    LoggingConfig    `mapstructure:"logging" json:"logging"`
-	Guardrails GuardrailsConfig `mapstructure:"guardrails" json:"guardrails"`
-	Finops     FinopsConfig     `mapstructure:"finops" json:"finops"`
-	Webhooks   WebhooksConfig   `mapstructure:"webhooks" json:"webhooks"`
+	App         AppConfig         `mapstructure:"app" json:"app"`
+	Server      ServerConfig      `mapstructure:"server" json:"server"`
+	Redis       RedisConfig       `mapstructure:"redis" json:"redis"`
+	Auth        AuthConfig        `mapstructure:"auth" json:"auth"`
+	Security    SecurityConfig    `mapstructure:"security" json:"security"`
+	Providers   []ProviderConfig  `mapstructure:"providers" json:"providers"`
+	Callbacks   CallbacksConfig   `mapstructure:"callbacks" json:"callbacks"`
+	Router      RouterConfig      `mapstructure:"router" json:"router"`
+	RateLimit   RateLimitConfig   `mapstructure:"rate_limit" json:"rate_limit"`
+	Cache       CacheConfig       `mapstructure:"cache" json:"cache"`
+	Telemetry   TelemetryConfig   `mapstructure:"telemetry" json:"telemetry"`
+	Agent       AgentConfig       `mapstructure:"agent" json:"agent"`
+	Logging     LoggingConfig     `mapstructure:"logging" json:"logging"`
+	Guardrails  GuardrailsConfig  `mapstructure:"guardrails" json:"guardrails"`
+	Finops      FinopsConfig      `mapstructure:"finops" json:"finops"`
+	Webhooks    WebhooksConfig    `mapstructure:"webhooks" json:"webhooks"`
+	Persistence PersistenceConfig `mapstructure:"persistence" json:"persistence"`
+	Plugins     PluginsConfig     `mapstructure:"plugins" json:"plugins"`
+}
+
+// PluginsConfig configures sandboxed WebAssembly (WASI) plugins. Each entry
+// in Tools becomes a server-side tool available to the agent loop and MCP.
+type PluginsConfig struct {
+	// Dir holds the .wasm files; tool files are resolved inside it only.
+	Dir string `mapstructure:"dir" json:"dir"`
+	// Timeout bounds one tool invocation.
+	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
+	// MemoryMiB caps each module's linear memory.
+	MemoryMiB int `mapstructure:"memory_mib" json:"memory_mib"`
+	// MaxConcurrent bounds simultaneous runs (0 = runtime default).
+	MaxConcurrent int `mapstructure:"max_concurrent" json:"max_concurrent"`
+	// AllowClock / AllowRandom expose real clocks / crypto randomness to
+	// guests (deterministic fakes otherwise).
+	AllowClock  bool               `mapstructure:"allow_clock" json:"allow_clock"`
+	AllowRandom bool               `mapstructure:"allow_random" json:"allow_random"`
+	Tools       []PluginToolConfig `mapstructure:"tools" json:"tools"`
+	// Hooks run, in order, on every chat request (OnRequest) and
+	// non-streaming response (OnResponse).
+	Hooks []PluginHookConfig `mapstructure:"hooks" json:"hooks"`
+}
+
+// PluginHookConfig registers one WASM module as a request/response hook.
+type PluginHookConfig struct {
+	ID   string `mapstructure:"id" json:"id"`
+	File string `mapstructure:"file" json:"file"`
+}
+
+// PluginToolConfig registers one WASM module as a tool.
+type PluginToolConfig struct {
+	Name        string                 `mapstructure:"name" json:"name"`
+	Description string                 `mapstructure:"description" json:"description"`
+	File        string                 `mapstructure:"file" json:"file"`
+	Parameters  map[string]interface{} `mapstructure:"parameters" json:"parameters"`
+}
+
+// PersistenceConfig controls durable storage of gateway state (virtual keys,
+// secrets, budgets, batches, control-plane stores). The file is a
+// single-process bbolt database.
+type PersistenceConfig struct {
+	Enabled bool `mapstructure:"enabled" json:"enabled"`
+	// Path of the database file (default <AEROLLM_STATE_DIR>/gateway.db).
+	Path string `mapstructure:"path" json:"path"`
 }
 
 // AppConfig holds application-level settings.
@@ -101,6 +147,8 @@ type ProviderConfig struct {
 	Timeout      time.Duration `mapstructure:"timeout" json:"timeout"`
 	RateLimitRPS float64       `mapstructure:"rate_limit_rps" json:"rate_limit_rps"`
 	Models       []string      `mapstructure:"models" json:"models"`
+	// APIVersion is sent as ?api-version= for Azure OpenAI deployment URLs.
+	APIVersion string `mapstructure:"api_version" json:"api_version,omitempty"`
 }
 
 // ResolvedName returns the effective provider name.
@@ -168,6 +216,12 @@ type RouterConfig struct {
 	// MaxAttempts bounds how many providers are tried for one request when
 	// earlier attempts fail with retryable errors.
 	MaxAttempts int `mapstructure:"max_attempts" json:"max_attempts"`
+	// MaxRetryWait is the longest upstream Retry-After the router will wait
+	// out before retrying when no other provider is left (0 disables).
+	MaxRetryWait time.Duration `mapstructure:"max_retry_wait" json:"max_retry_wait"`
+	// HealthCheckInterval actively probes providers (cheap model-list GETs)
+	// so readiness and routing reflect upstream health. 0 disables.
+	HealthCheckInterval time.Duration `mapstructure:"health_check_interval" json:"health_check_interval"`
 }
 
 // KnownRouterStrategies lists supported routing strategies.
@@ -194,6 +248,10 @@ type CacheConfig struct {
 	// SharedAcrossKeys lets different API keys share cache entries. Off by
 	// default so one tenant can never be served another tenant's response.
 	SharedAcrossKeys bool `mapstructure:"shared_across_keys" json:"shared_across_keys"`
+	// SemanticEmbeddingModel, when set, embeds prompts for the semantic
+	// cache through the gateway's embeddings route (otherwise a local
+	// lexical embedder is used).
+	SemanticEmbeddingModel string `mapstructure:"semantic_embedding_model" json:"semantic_embedding_model"`
 }
 
 // TelemetryConfig holds OpenTelemetry and Prometheus settings.
@@ -229,6 +287,9 @@ type GuardrailsConfig struct {
 type FinopsConfig struct {
 	Enabled       bool    `mapstructure:"enabled" json:"enabled"`
 	DefaultMaxUSD float64 `mapstructure:"default_max_usd" json:"default_max_usd"`
+	// BudgetPeriod resets per-key spend: "lifetime" (default), "daily" or
+	// "monthly" (UTC).
+	BudgetPeriod string `mapstructure:"budget_period" json:"budget_period"`
 }
 
 // WebhooksConfig holds webhook settings.
@@ -301,6 +362,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.public_metrics", true)
 	v.SetDefault("router.strategy", "round_robin")
 	v.SetDefault("router.max_attempts", 3)
+	v.SetDefault("router.max_retry_wait", 0)
+	v.SetDefault("router.health_check_interval", 0)
 	v.SetDefault("router.circuit_break.max_failures", 5)
 	v.SetDefault("router.circuit_break.reset_timeout", 60*time.Second)
 	v.SetDefault("router.circuit_break.half_open_max_calls", 3)
@@ -315,6 +378,15 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("cache.semantic_threshold", 0.95)
 	v.SetDefault("cache.semantic_enabled", false)
 	v.SetDefault("cache.shared_across_keys", false)
+	v.SetDefault("cache.semantic_embedding_model", "")
+	v.SetDefault("persistence.enabled", true)
+	v.SetDefault("plugins.dir", "")
+	v.SetDefault("plugins.timeout", 5*time.Second)
+	v.SetDefault("plugins.memory_mib", 64)
+	v.SetDefault("plugins.max_concurrent", 0)
+	v.SetDefault("plugins.allow_clock", false)
+	v.SetDefault("plugins.allow_random", false)
+	v.SetDefault("persistence.path", "")
 	v.SetDefault("telemetry.enabled", false)
 	v.SetDefault("telemetry.exporter", "prometheus")
 	v.SetDefault("telemetry.otlp_addr", "")
@@ -330,6 +402,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("guardrails.enabled", true)
 	v.SetDefault("finops.enabled", true)
 	v.SetDefault("finops.default_max_usd", 0)
+	v.SetDefault("finops.budget_period", "lifetime")
 	v.SetDefault("webhooks.enabled", true)
 	v.SetDefault("callbacks.webhook.enabled", false)
 	v.SetDefault("callbacks.webhook.url", "")
@@ -469,6 +542,12 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s must not be negative", name))
 		}
 	}
+	if hc := c.Router.HealthCheckInterval; hc < 0 || (hc > 0 && hc < 5*time.Second) {
+		errs = append(errs, errors.New("router.health_check_interval must be 0 (off) or at least 5s"))
+	}
+	if c.Router.MaxRetryWait < 0 || c.Router.MaxRetryWait > time.Minute {
+		errs = append(errs, errors.New("router.max_retry_wait must be between 0 and 1m"))
+	}
 	if c.Server.MaxBodyBytes < 0 {
 		errs = append(errs, errors.New("server.max_body_bytes must not be negative"))
 	}
@@ -489,6 +568,37 @@ func (c *Config) Validate() error {
 	}
 	if c.Router.Strategy != "" && !contains(KnownRouterStrategies, c.Router.Strategy) {
 		errs = append(errs, fmt.Errorf("router.strategy %q unknown (want one of %s)", c.Router.Strategy, strings.Join(KnownRouterStrategies, ", ")))
+	}
+	if (len(c.Plugins.Tools) > 0 || len(c.Plugins.Hooks) > 0) && c.Plugins.Dir == "" {
+		errs = append(errs, errors.New("plugins.dir is required when plugins.tools or plugins.hooks are configured"))
+	}
+	seenHooks := map[string]bool{}
+	for i, hk := range c.Plugins.Hooks {
+		if hk.ID == "" || hk.File == "" || seenHooks[hk.ID] {
+			errs = append(errs, fmt.Errorf("plugins.hooks[%d]: unique id and file are required", i))
+		}
+		seenHooks[hk.ID] = true
+	}
+	if c.Plugins.MemoryMiB < 0 || c.Plugins.MemoryMiB > 4096 || c.Plugins.Timeout < 0 || c.Plugins.MaxConcurrent < 0 {
+		errs = append(errs, errors.New("plugins.memory_mib must be 0-4096 and plugins.timeout/max_concurrent non-negative"))
+	}
+	seenTools := map[string]bool{}
+	for i, t := range c.Plugins.Tools {
+		if t.Name == "" || t.File == "" {
+			errs = append(errs, fmt.Errorf("plugins.tools[%d]: name and file are required", i))
+		}
+		if seenTools[t.Name] {
+			errs = append(errs, fmt.Errorf("plugins.tools[%d]: duplicate tool name %q", i, t.Name))
+		}
+		seenTools[t.Name] = true
+	}
+	switch c.Finops.BudgetPeriod {
+	case "", "lifetime", "daily", "monthly":
+	default:
+		errs = append(errs, fmt.Errorf("finops.budget_period %q must be lifetime, daily or monthly", c.Finops.BudgetPeriod))
+	}
+	if c.Finops.DefaultMaxUSD < 0 {
+		errs = append(errs, errors.New("finops.default_max_usd must not be negative"))
 	}
 	if c.Agent.MaxIterations < 0 || c.Agent.MaxConcurrent < 0 {
 		errs = append(errs, errors.New("agent.max_iterations and agent.max_concurrent must not be negative"))

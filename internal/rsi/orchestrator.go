@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ayoubzulfiqar/aerollm/internal/persist"
 )
 
 // ---------------------------------------------------------------------------
@@ -30,7 +32,9 @@ import (
 //     previously deployed policy for that dimension. Rollback() reverts the
 //     most recent successful deployment on demand.
 //   - The orchestrator itself never touches files, processes or the network;
-//     any live effect happens only inside the injected hooks.
+//     any live effect happens only inside the injected hooks. The only
+//     exception is the opt-in persist.Store attached by EnablePersistence
+//     (see persistence.go), which is written through on every state change.
 
 // Sentinel errors returned by the orchestrator.
 var (
@@ -377,6 +381,11 @@ type RSIStats struct {
 	LastDeployedAt     time.Time `json:"last_deployed_at"`
 	DeployedPolicy     string    `json:"deployed_policy,omitempty"`
 	HistorySize        int       `json:"history_size"`
+	// Persistent reports whether EnablePersistence attached a store.
+	Persistent bool `json:"persistent,omitempty"`
+	// PersistErrors counts failed write-throughs (store errors and deployed
+	// policies that have no PolicyCodec) since the process started.
+	PersistErrors uint64 `json:"persist_errors,omitempty"`
 }
 
 // deploymentRecord tracks one successful deployment for rollback.
@@ -408,6 +417,17 @@ type RSIOrchestrator struct {
 	deployedByDim map[HeadroomDimension]Policy
 	deployments   []deploymentRecord
 	stats         RSIStats
+	// codecs are the custom PolicyCodecs registered through
+	// RegisterPolicyCodec (built-in policy types need none).
+	codecs []PolicyCodec
+
+	// Opt-in persistence (see EnablePersistence). persistMu serialises store
+	// writes and guards ps; it is never acquired while holding mu.
+	persistMu      sync.Mutex
+	ps             persist.Store
+	persistOn      atomic.Bool
+	persistErrs    atomic.Uint64
+	lastPersistErr atomic.Pointer[persistError]
 
 	// OnDeploy is invoked when a cycle produces a policy that passes the
 	// deploy gate (see package safety model). Set it before calling Run, or
@@ -574,7 +594,8 @@ func (o *RSIOrchestrator) RunCycle(ctx context.Context) (*RSICycle, error) {
 		}
 	}
 
-	o.recordCycle(cycle, cfg, err)
+	removed := o.recordCycle(cycle, cfg, err)
+	o.persistCycle(cycle, removed)
 	if hooks.onCycle != nil {
 		func() {
 			defer func() { _ = recover() }()
@@ -789,6 +810,9 @@ func (o *RSIOrchestrator) decideAndDeploy(ctx context.Context, cfg RSIConfig, ho
 		o.deployments = o.deployments[len(o.deployments)-maxDeploymentStack:]
 	}
 	o.mu.Unlock()
+	// Write the deployment through immediately so it survives a crash before
+	// the cycle is recorded.
+	o.persistState()
 }
 
 func callDeploy(ctx context.Context, fn DeployFunc, p Policy, c RSICycle) (err error) {
@@ -864,6 +888,7 @@ func (o *RSIOrchestrator) Rollback(ctx context.Context) error {
 		o.mu.Lock()
 		o.stats.RollbackFailures++
 		o.mu.Unlock()
+		o.persistState()
 		return fmt.Errorf("rsi: rollback of cycle %d failed: %w", last.cycleID, err)
 	}
 
@@ -885,6 +910,7 @@ func (o *RSIOrchestrator) Rollback(ctx context.Context) error {
 	}
 	o.stats.Rollbacks++
 	o.mu.Unlock()
+	o.persistRollback(last.cycleID)
 	return nil
 }
 
@@ -957,6 +983,8 @@ func (o *RSIOrchestrator) Stats() RSIStats {
 	if o.deployed != nil {
 		s.DeployedPolicy = policyName(o.deployed)
 	}
+	s.Persistent = o.persistOn.Load()
+	s.PersistErrors = o.persistErrs.Load()
 	return s
 }
 
@@ -985,8 +1013,9 @@ func (o *RSIOrchestrator) SetConfig(cfg RSIConfig) error {
 	}
 	o.mu.Lock()
 	o.config = cfg
-	o.trimHistoryLocked(cfg.MaxHistory)
+	removed := o.trimHistoryLocked(cfg.MaxHistory)
 	o.mu.Unlock()
+	o.persistConfig(removed)
 	select {
 	case o.wake <- struct{}{}:
 	default:
@@ -997,8 +1026,9 @@ func (o *RSIOrchestrator) SetConfig(cfg RSIConfig) error {
 // RestoreHistory loads previously persisted cycles (e.g. captured through
 // OnCycle) into the in-memory history, keeping the most recent MaxHistory
 // and advancing the cycle ID counter past them. Deployed policies are not
-// restored: policies are runtime objects and a restart begins from the base
-// policies again.
+// restored by this method; use EnablePersistence for full durable state
+// (history, deployed policies and the rollback stack). When persistence is
+// enabled the restored cycles are written through to the store.
 func (o *RSIOrchestrator) RestoreHistory(cycles []RSICycle) {
 	if o == nil || len(cycles) == 0 {
 		return
@@ -1013,7 +1043,6 @@ func (o *RSIOrchestrator) RestoreHistory(cycles []RSICycle) {
 	sort.SliceStable(restored, func(i, j int) bool { return restored[i].ID < restored[j].ID })
 
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	merged := append(restored, o.cycles...)
 	o.cycles = merged
 	for _, c := range merged {
@@ -1021,7 +1050,9 @@ func (o *RSIOrchestrator) RestoreHistory(cycles []RSICycle) {
 			o.cycleID = c.ID
 		}
 	}
-	o.trimHistoryLocked(o.config.MaxHistory)
+	removed := o.trimHistoryLocked(o.config.MaxHistory)
+	o.mu.Unlock()
+	o.persistCycles(restored, removed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,11 +1060,12 @@ func (o *RSIOrchestrator) RestoreHistory(cycles []RSICycle) {
 // ---------------------------------------------------------------------------
 
 // recordCycle appends the cycle to the bounded history and updates stats.
-func (o *RSIOrchestrator) recordCycle(c RSICycle, cfg RSIConfig, err error) {
+// It returns the IDs of cycles trimmed from the history.
+func (o *RSIOrchestrator) recordCycle(c RSICycle, cfg RSIConfig, err error) []int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.cycles = append(o.cycles, c.clone())
-	o.trimHistoryLocked(cfg.MaxHistory)
+	removed := o.trimHistoryLocked(cfg.MaxHistory)
 
 	s := &o.stats
 	s.CycleInProgress = false
@@ -1043,7 +1075,7 @@ func (o *RSIOrchestrator) recordCycle(c RSICycle, cfg RSIConfig, err error) {
 	s.LastCycleDuration = c.DurationMs
 	if err != nil {
 		s.CyclesFailed++
-		return
+		return removed
 	}
 	if c.HoldoutSamples > 0 {
 		s.LastImprovementPct = c.ImprovementPct
@@ -1066,17 +1098,27 @@ func (o *RSIOrchestrator) recordCycle(c RSICycle, cfg RSIConfig, err error) {
 			s.RollbackFailures++
 		}
 	}
+	return removed
 }
 
-func (o *RSIOrchestrator) trimHistoryLocked(maxHistory int) {
+// trimHistoryLocked keeps the most recent maxHistory cycles and returns the
+// IDs of the cycles it dropped.
+func (o *RSIOrchestrator) trimHistoryLocked(maxHistory int) []int {
 	if maxHistory <= 0 {
 		maxHistory = DefaultRSIConfig().MaxHistory
 	}
-	if len(o.cycles) > maxHistory {
-		trimmed := make([]RSICycle, maxHistory)
-		copy(trimmed, o.cycles[len(o.cycles)-maxHistory:])
-		o.cycles = trimmed
+	if len(o.cycles) <= maxHistory {
+		return nil
 	}
+	drop := len(o.cycles) - maxHistory
+	removed := make([]int, 0, drop)
+	for _, c := range o.cycles[:drop] {
+		removed = append(removed, c.ID)
+	}
+	trimmed := make([]RSICycle, maxHistory)
+	copy(trimmed, o.cycles[drop:])
+	o.cycles = trimmed
+	return removed
 }
 
 // policyName returns a human-readable name for a Policy implementation.
