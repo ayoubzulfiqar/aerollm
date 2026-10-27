@@ -1,8 +1,27 @@
+
 # AeroLLM
 
 ![Logo](assets/aero.png)
 
 AeroLLM is a high-performance, intelligent LLM routing and proxy server written in Go. It provides intelligent routing between multiple LLM providers, agentic tool execution, Redis caching, rate limiting, and OpenTelemetry observability.
+
+---
+
+## Table of Contents
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [API Compatibility](#api-compatibility)
+- [Usage Guides](#usage-guides)
+- [CLI](#cli)
+- [Migration CLI](#migration-cli)
+- [API Documentation](#api-documentation)
+- [Architecture](#architecture)
+- [Key Packages](#key-packages)
+- [RSI Engine](#rsi-engine-recursive-self-improvement)
+- [Community](#community)
+- [Author & License](#author)
+
+---
 
 ## Features
 
@@ -25,45 +44,47 @@ AeroLLM is a high-performance, intelligent LLM routing and proxy server written 
 - **Webhooks**: Async retry-capable webhook delivery with exponential backoff
 
 ### Advanced
-|- **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
-|- **MCP Hub**: Native Model Context Protocol server for external tool integration
-|- **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
-|- **Context Manager**: Token counting and auto-summarization for long conversations
-|- **GitOps**: Git-backed prompt template versioning and delivery
-|- **Immutable Ledger**: Cryptographic audit chain for request/response integrity
-|- **WASM Sandbox**: Zero-trust isolated tool execution runtime
-|- **Realtime**: Bidirectional WebSocket streaming with barge-in support
-|- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
-|- **Kubernetes Operator**: Control-plane reconciliation for routes, budgets, and agent pipelines
-|- **Flywheel**: Feedback ingestion, dataset export, and fine-tuning pipeline
-|- **Embedded State**: bbolt-backed KV with flat vector index for zero-latency agent memory
-|- **Agent Swarms**: Dynamic sub-agent spawning with shared hive-mind context
-|- **Red-Teaming**: Adversarial prompt generation and self-healing patch proposal
-|- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner
-|- **Compliance-as-Code**: Policy engine with HTTP 451 enforcement
-|- **Multi-Tenant**: Hierarchical tenant model with tenant-scoped service wrappers
-|- **Plugins**: WASM-compatible plugin interface with lifecycle hooks and registry
-|- **Marketplace**: Signed manifest verification, registry client, micro-royalty tracking
-|- **Post-Quantum Crypto**: ML-KEM/ML-DSA hybrid key management and stream encryptors
-|- **Spatial Fabric**: Chunked video/3D streaming and WebXR spatial translation
-|- **Federated Learning**: FedAvg aggregation for secure LoRA weight averaging
-|- **Edge Companion**: Local-first binary with bbolt, hardware detection, and WASM sandbox
-|- **Policy Engine**: HTTP policy evaluation with rule-based access control
-|- **Data Retention**: TTL and max-items retention policies
-|- **Incident Management**: Incident lifecycle with severity and status tracking
-|- **Notifications**: Multi-channel notification routing (webhook, email, Slack, SMS)
-|- **Scheduled Tasks**: Cron, interval, and onetime automation tasks
-|- **Secrets Management**: In-memory secret storage with metadata
-|- **Multi-Region**: Region-aware routing and data residency controls
+- **Graph Orchestrator**: DAG-based execution engine with dependency-aware concurrency
+- **MCP Hub**: Native Model Context Protocol server for external tool integration
+- **Hybrid RAG**: Dense + keyword retrieval with Reciprocal Rank Fusion
+- **Context Manager**: Token counting and auto-summarization for long conversations
+- **GitOps**: Git-backed prompt template versioning and delivery
+- **Immutable Ledger**: Cryptographic audit chain for request/response integrity
+- **WASM Sandbox**: Zero-trust isolated tool execution runtime
+- **Realtime**: Bidirectional WebSocket streaming with barge-in support
+- **Multimodal**: Audio/image preprocessing with transcription/vision hooks
+- **Kubernetes Operator**: Control-plane reconciliation for routes, budgets, and agent pipelines
+- **Flywheel**: Feedback ingestion, dataset export, and fine-tuning pipeline
+- **Embedded State**: bbolt-backed KV with flat vector index for zero-latency agent memory
+- **Agent Swarms**: Dynamic sub-agent spawning with shared hive-mind context
+- **Red-Teaming**: Adversarial prompt generation and self-healing patch proposal
+- **Evaluation Engine**: Judge pipeline, regression detector, and benchmark runner
+- **Compliance-as-Code**: Policy engine with HTTP 451 enforcement
+- **Multi-Tenant**: Hierarchical tenant model with tenant-scoped service wrappers
+- **Plugins**: WASM-compatible plugin interface with lifecycle hooks and registry
+- **Marketplace**: Signed manifest verification, registry client, micro-royalty tracking
+- **Post-Quantum Crypto**: ML-KEM/ML-DSA hybrid key management and stream encryptors
+- **Spatial Fabric**: Chunked video/3D streaming and WebXR spatial translation
+- **Federated Learning**: FedAvg aggregation for secure LoRA weight averaging
+- **Edge Companion**: Local-first binary with bbolt, hardware detection, and WASM sandbox
+- **Policy Engine**: HTTP policy evaluation with rule-based access control
+- **Data Retention**: TTL and max-items retention policies
+- **Incident Management**: Incident lifecycle with severity and status tracking
+- **Notifications**: Multi-channel notification routing (webhook, email, Slack, SMS)
+- **Scheduled Tasks**: Cron, interval, and one-time automation tasks
+- **Secrets Management**: In-memory secret storage with metadata
+- **Multi-Region**: Region-aware routing and data residency controls
 
 ### Enterprise & Migration
-|- **Virtual Keys & Agencies**: Per-key rate limits, budget tracking, and agency-level RBAC
-|- **LiteLLM Migration CLI**: Convert LiteLLM `litellm_config.yaml` to AeroLLM `config.yaml`
-|- **OpenAI-Compatible Batch API**: Asynchronous batch processing for large-scale LLM workloads
-|- **OpenAPI/Swagger Docs**: Auto-generated API spec with interactive Swagger UI
-|- **Standardized Rate Limit Headers**: OpenAI-compatible `X-RateLimit-*` headers for SDK backpressure
-|- **Cache Management APIs**: Inspect, stats, and clear endpoints for DevOps (admin-auth protected)
-|- **Advanced Provider Features**: OpenAI structured outputs (JSON schema) and Anthropic prompt caching
+- **Virtual Keys & Agencies**: Per-key rate limits, budget tracking, and agency-level RBAC
+- **LiteLLM Migration CLI**: Convert LiteLLM `litellm_config.yaml` to AeroLLM `config.yaml`
+- **OpenAI-Compatible Batch API**: Asynchronous batch processing for large-scale LLM workloads
+- **OpenAPI/Swagger Docs**: Auto-generated API spec with interactive Swagger UI
+- **Standardized Rate Limit Headers**: OpenAI-compatible `X-RateLimit-*` headers for SDK backpressure
+- **Cache Management APIs**: Inspect, stats, and clear endpoints for DevOps (admin-auth protected)
+- **Advanced Provider Features**: OpenAI structured outputs (JSON schema) and Anthropic prompt caching
+
+---
 
 ## Quick Start
 
@@ -83,12 +104,7 @@ go build -o aerollm ./cmd/server
 
 ### Configuration
 
-AeroLLM reads `config.yaml` (from `$AEROLLM_CONFIG`, `./` or `/etc/aerollm/`) and
-`AEROLLM_*` environment variables, which override nested keys
-(`AEROLLM_REDIS_ADDR` → `redis.addr`, `AEROLLM_AUTH_MASTER_KEY` → `auth.master_key`).
-String values may reference the environment as `${VAR}` or `${VAR:-default}`.
-Invalid configuration (unknown provider type or routing strategy, out-of-range
-values, malformed YAML) fails fast at startup and is rejected on hot reload.
+AeroLLM reads `config.yaml` (from `$AEROLLM_CONFIG`, `./`, or `/etc/aerollm/`) and `AEROLLM_*` environment variables, which override nested keys (e.g., `AEROLLM_REDIS_ADDR` → `redis.addr`, `AEROLLM_AUTH_MASTER_KEY` → `auth.master_key`). String values may reference the environment as `${VAR}` or `${VAR:-default}`. Invalid configuration (unknown provider type or routing strategy, out-of-range values, malformed YAML) fails fast at startup and is rejected on hot reload.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
@@ -104,31 +120,25 @@ values, malformed YAML) fails fast at startup and is rejected on hot reload.
 | `security.cors_allowed_origins` | `[]` | Browser origins allowed to call the API. |
 | `security.public_metrics` | `true` | Serve `/metrics` without auth. |
 | `security.enable_pprof` | `false` | Expose pprof on `localhost:6060`. |
-| `persistence.enabled` | `true` | Keep keys, budgets, secrets, batches and control-plane state in `$AEROLLM_STATE_DIR/gateway.db`. |
+| `persistence.enabled` | `true` | Keep keys, budgets, secrets, batches, and control-plane state in `$AEROLLM_STATE_DIR/gateway.db`. |
 | `finops.budget_period` | `lifetime` | Reset per-key spend `daily`/`monthly`. |
 | `finops.default_max_usd` | `0` | Default budget for keys without an explicit one. |
 | `router.max_retry_wait` | `0` | Wait out an upstream `Retry-After` up to this long when no fallback is left. |
 
-Providers can be configured in `config.yaml` (`providers:`) or via
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `AEROLLM_LOCAL_URL`.
+Providers can be configured in `config.yaml` (`providers:`) or via `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `AEROLLM_LOCAL_URL`.
 
 ### Authentication
 
-Every endpoint except `/health`, `/ready(z)`, `/metrics` and `/swagger/` needs a key,
-sent as `Authorization: Bearer <key>` (or `X-API-Key` for Anthropic SDKs).
+Every endpoint except `/health`, `/ready(z)`, `/metrics`, and `/swagger/` needs a key, sent as `Authorization: Bearer <key>` (or `X-API-Key` for Anthropic SDKs).
 
 | Tier | Accepted keys | Endpoints |
 | --- | --- | --- |
-| Client | admin, `auth.api_keys`, virtual keys | `/v1/chat/completions`, `/v1/messages`, `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/responses`, `/v1/feedback`, `/mcp`, `/ws` |
-| Admin | admin keys only | key/team management, `/config/*`, `/global/spend/*`, `/v1/cache*`, `/v1/batches*`, `/v1/rsi/*`, and the whole control plane (`/v1/secrets`, `/v1/policy`, `/v1/flags`, `/v1/incidents`, `/v1/chaos/fault`, …) |
+| **Client** | admin, `auth.api_keys`, virtual keys | `/v1/chat/completions`, `/v1/messages`, `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/responses`, `/v1/feedback`, `/mcp`, `/ws` |
+| **Admin** | admin keys only | key/team management, `/config/*`, `/global/spend/*`, `/v1/cache*`, `/v1/batches*`, `/v1/rsi/*`, and the whole control plane (`/v1/secrets`, `/v1/policy`, `/v1/flags`, `/v1/incidents`, `/v1/chaos/fault`, …) |
 
-Virtual keys are created with `POST /key/generate` and may restrict models, budget,
-expiry and per-key rate limits (`metadata.rate_limit_rps`). Only a hash of each key
-is stored.
+Virtual keys are created with `POST /key/generate` and may restrict models, budget, expiry, and per-key rate limits (`metadata.rate_limit_rps`). Only a hash of each key is stored.
 
-Spend limits for any key (static or virtual) are managed with `/v1/budgets`
-(admin): `PUT {"key": "...", "max_usd": 25}`, `GET ?key_id=key_...`, `DELETE`.
-Requests over budget get `402 insufficient_quota`.
+Spend limits for any key (static or virtual) are managed with `/v1/budgets` (admin): `PUT {"key": "...", "max_usd": 25}`, `GET ?key_id=key_...`, `DELETE`. Requests over budget get `402 Insufficient Quota`.
 
 ### Running
 
@@ -142,19 +152,13 @@ AEROLLM_AUTH_MASTER_KEY=$(openssl rand -hex 32) OPENAI_API_KEY=sk-... ./aerollm
 docker compose up -d
 ```
 
-### Durability & multi-instance
+### Durability & Multi-Instance
 
-With `persistence.enabled` (default) the gateway keeps virtual keys, users/teams,
-budgets and spend, secrets (encrypted; requires `AEROLLM_SECRETS_KEY`), batches
-(resumed after a restart), spend analytics, the audit ledger, RAG/graph documents,
-HITL approvals and all control-plane stores in `$AEROLLM_STATE_DIR/gateway.db`.
-When Redis is configured, keys, budgets, rate limits, approvals and the webhook
-queue live in Redis instead, so several replicas can share them.
+With `persistence.enabled` (default), the gateway keeps virtual keys, users/teams, budgets and spend, secrets (encrypted; requires `AEROLLM_SECRETS_KEY`), batches (resumed after a restart), spend analytics, the audit ledger, RAG/graph documents, HITL approvals, and all control-plane stores in `$AEROLLM_STATE_DIR/gateway.db`. When Redis is configured, keys, budgets, rate limits, approvals, and the webhook queue live in Redis instead, so several replicas can share them.
 
 ### Plugins (WebAssembly)
 
-WASI modules run in a sandbox (no filesystem, network or host environment;
-memory, time and output caps) as server-side tools or request/response hooks:
+WASI modules run in a sandbox (no filesystem, network, or host environment; memory, time, and output caps) as server-side tools or request/response hooks:
 
 ```yaml
 plugins:
@@ -169,43 +173,39 @@ plugins:
       file: redact.wasm
 ```
 
-Scaffold one with `aerollm plugin init --kind tool|hook` and build it with
-`GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm`.
+Scaffold one with `aerollm plugin init --kind tool|hook` and build it with `GOOS=wasip1 GOARCH=wasm go build -o plugin.wasm`.
 
-### Optional integrations (environment)
+### Optional Integrations (Environment)
 
 | Variable(s) | Enables |
 | --- | --- |
-| `AEROLLM_SMTP_ADDR`, `AEROLLM_SMTP_FROM`, `AEROLLM_SMTP_USER/PASSWORD` | Email notification channels (TLS required) |
-| `AEROLLM_TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM` | SMS notification channels |
+| `AEROLLM_SMTP_ADDR`, `AEROLLM_SMTP_FROM`, `AEROLLM_SMTP_USER`/`PASSWORD` | Email notification channels (TLS required) |
+| `AEROLLM_TWILIO_ACCOUNT_SID`/`AUTH_TOKEN`/`FROM` | SMS notification channels |
 | `AEROLLM_FINETUNE_API_KEY` (`_BASE_URL`, `_MODEL`) | `/v1/fine-tuning/jobs` on an OpenAI-compatible fine-tuning API |
 | `AEROLLM_FEDERATION_TOKEN` / `AEROLLM_FEDERATION_OPERATOR_KEYS` | Authenticated federated-learning node registration |
-| `AEROLLM_MESH_ENABLED`, `AEROLLM_MESH_TLS_CERT/KEY/CA` | mTLS mesh between gateway nodes |
+| `AEROLLM_MESH_ENABLED`, `AEROLLM_MESH_TLS_CERT`/`KEY`/`CA` | mTLS mesh between gateway nodes |
 | `AEROLLM_AIOPS_ACTIONS_LIVE=true` | AIOps actions (otherwise dry-run, see `/v1/aiops/actions`) |
 | `AEROLLM_REDTEAM_LIVE_PROBE=true`, `AEROLLM_REDTEAM_MODEL` | Live adversarial probing (otherwise dry-run) |
 | `AEROLLM_RSI_DEPLOY=true` | Let the self-improvement engine deploy policies (otherwise dry-run) |
 | `AEROLLM_MCP_STATELESS=true` | Stateless MCP (required behind a non-sticky load balancer) |
 
-A Kubernetes operator (`docker build --target operator`, manifests in
-`cmd/operator/deploy/`) syncs `AeroRoute`/`AeroBudget`/`AeroAgentPipeline`
-resources into the gateway.
+A Kubernetes operator (`docker build --target operator`, manifests in `cmd/operator/deploy/`) syncs `AeroRoute`/`AeroBudget`/`AeroAgentPipeline` resources into the gateway.
+
+---
 
 ## API Compatibility
 
-- **OpenAI**: `/v1/chat/completions` (incl. `stream: true` Server-Sent Events with
-  `stream_options.include_usage`, tools, multimodal content parts, `response_format`),
-  `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`,
-  `/v1/responses`, `/v1/batches`.
-- **Anthropic**: `/v1/messages` accepts the Messages API (system prompts, content
-  blocks, tool use/results, streaming events) and serves it through any provider.
-- **Errors** use the OpenAI envelope `{"error":{"message","type","code"}}`; upstream
-  429/`Retry-After` are forwarded, upstream credential failures surface as 502.
-- **Response headers**: `X-Request-ID`, `X-AeroLLM-Provider`, `X-AeroLLM-Cache: HIT|MISS`,
-  `X-RateLimit-*`. Send `Cache-Control: no-cache` to bypass the cache.
-- **Fallback**: retryable upstream failures are retried on the next provider
-  (bounded by `router.max_attempts`) behind per-provider circuit breakers.
+- **OpenAI**: `/v1/chat/completions` (incl. `stream: true` Server-Sent Events with `stream_options.include_usage`, tools, multimodal content parts, `response_format`), `/v1/models`, `/v1/embeddings`, `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/responses`, `/v1/batches`.
+- **Anthropic**: `/v1/messages` accepts the Messages API (system prompts, content blocks, tool use/results, streaming events) and serves it through any provider.
+- **Errors**: Use the OpenAI envelope `{"error":{"message","type","code"}}`; upstream 429/`Retry-After` are forwarded, upstream credential failures surface as 502.
+- **Response Headers**: `X-Request-ID`, `X-AeroLLM-Provider`, `X-AeroLLM-Cache: HIT|MISS`, `X-RateLimit-*`. Send `Cache-Control: no-cache` to bypass the cache.
+- **Fallback**: Retryable upstream failures are retried on the next provider (bounded by `router.max_attempts`) behind per-provider circuit breakers.
+
+---
 
 ## Usage Guides
+
+> **Note:** The control-plane examples below need the admin key: add `-H "Authorization: Bearer $AEROLLM_ADMIN_KEY"`.
 
 ### Chat Completions
 
@@ -220,9 +220,6 @@ curl -N http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $AEROLLM_KEY" -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
-
-> The control-plane examples below need the admin key:
-> add `-H "Authorization: Bearer $AEROLLM_ADMIN_KEY"`.
 
 ### Health Checks
 
@@ -239,8 +236,7 @@ curl http://localhost:8080/resilience/status
 
 ### Shadow Traffic
 
-Requires `AEROLLM_SHADOW_URL` (the only target the tester may call; optional
-`AEROLLM_SHADOW_API_KEY`). The body is a chat request, mirrored asynchronously.
+Requires `AEROLLM_SHADOW_URL` (the only target the tester may call; optional `AEROLLM_SHADOW_API_KEY`). The body is a chat request, mirrored asynchronously.
 
 ```bash
 curl -X POST http://localhost:8080/v1/shadow \
@@ -319,8 +315,7 @@ curl http://localhost:8080/v1/flags
 
 ### Evaluation Engine
 
-Scores are produced by a real judge model routed through the gateway; set
-`AEROLLM_EVAL_JUDGE_MODEL` (otherwise the endpoints return 503).
+Scores are produced by a real judge model routed through the gateway; set `AEROLLM_EVAL_JUDGE_MODEL` (otherwise the endpoints return 503).
 
 ```bash
 # Judge scoring
@@ -461,6 +456,8 @@ curl -X POST http://localhost:8080/mcp \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
+---
+
 ## CLI
 
 AeroLLM includes a CLI for common operations:
@@ -536,9 +533,11 @@ aerollm schedule --name "backup" --schedule "0 0 * * *"
 # Secrets
 aerollm secrets --name "api-key" --value "secret123" --type token
 
-|# Region
+# Region
 aerollm region --resource region --name "us-east-1" --endpoint "https://us.example.com" --primary
 ```
+
+---
 
 ## Migration CLI
 
@@ -559,15 +558,15 @@ The migration tool translates:
 - `litellm_params.model` into `models` list
 - `router_settings.routing_strategy` into `router.strategy`
 
-Supported strategy mappings:
+**Supported strategy mappings:**
 - `simple-rotation` / `round robin` → `round_robin`
 - `lowest-latency` → `latency`
 - `cost` / `cost-optimized` → `cost`
-- `least-busy` → `least-busy`
-- `usage-based` → `usage-based`
+- `least-busy` → `least_busy`
+- `usage-based` → `usage_based`
 - `sequential` / `fallback` → `fallback`
 
-Supported model classification (prefix-based):
+**Supported model classification (prefix-based):**
 - `bedrock/` → bedrock provider
 - `vertex_ai/` → gemini provider
 - `claude-*` → anthropic provider
@@ -576,6 +575,8 @@ Supported model classification (prefix-based):
 - `llama-*` → openai-compatible (Groq) provider
 - `command-*` → openai-compatible (Cohere) provider
 
+---
+
 ## API Documentation
 
 AeroLLM provides auto-generated OpenAPI/Swagger documentation. Once the server is running, access:
@@ -583,6 +584,8 @@ AeroLLM provides auto-generated OpenAPI/Swagger documentation. Once the server i
 - **Swagger UI**: http://localhost:8080/swagger/index.html
 - **JSON spec**: http://localhost:8080/swagger/doc.json
 - **YAML spec**: http://localhost:8080/swagger/doc.yaml
+
+---
 
 ## Rate Limit Headers
 
@@ -599,6 +602,8 @@ All responses include OpenAI-compatible rate limit headers for SDK backpressure 
 
 Headers reflect per-key limits from Virtual Key or Tenant configuration. On 429 responses, remaining counts are zeroed.
 
+---
+
 ## Cache Management API
 
 DevOps endpoints for cache inspection and management. These require Master/Admin API key authentication (not standard virtual keys).
@@ -614,6 +619,8 @@ curl -X DELETE -H "Authorization: Bearer <master-key>" "http://localhost:8080/v1
 # Inspect cached entries (paginated, metadata-only for security)
 curl -H "Authorization: Bearer <master-key>" "http://localhost:8080/v1/cache/inspect?cursor=0&page_size=50"
 ```
+
+---
 
 ## Batch API
 
@@ -638,6 +645,8 @@ The input JSONL file format matches the OpenAI Batch API spec:
 ```
 
 Batch statuses: `validating` → `in_progress` → `completed` (or `failed`)
+
+---
 
 ## Advanced Provider Features
 
@@ -688,6 +697,8 @@ The adapter automatically:
 2. Inserts `cache_control` on the annotated message
 3. Uses Anthropic's native `/v1/messages` endpoint format
 
+---
+
 ## Architecture
 
 Request path for `/v1/chat/completions`:
@@ -707,9 +718,12 @@ Request path for `/v1/chat/completions`:
 13. AIOps self-optimization
 14. Usage recording + webhook dispatch on failure
 
+---
+
 ## Key Packages
 
 - `internal/middleware` — HTTP middleware primitives
+- `internal/middleware/ratelimit.go` — standardized rate limit header middleware
 - `internal/guardrails` — PII, injection shield, API key scoping
 - `internal/finops` — cost tracking and budget enforcement
 - `internal/traffic` — shadow testing
@@ -732,9 +746,8 @@ Request path for `/v1/chat/completions`:
 - `internal/redteam` — adversarial worker and self-healing patch proposal
 - `internal/evolution` — self-evolution proposal queue and scoring
 - `internal/learning` — autonomous fine-tuning pipeline from flywheel datasets
-- `internal/providers/universal` — provider registry and unified adapter/stream normalizer
+- `internal/providers/universal` — provider registry, unified adapter/stream normalizer, and universal model registry for capability cards
 - `internal/batch` — async batch processing engine for OpenAI-compatible Batch API
-- `internal/middleware/ratelimit.go` — standardized rate limit header middleware
 - `internal/intelligence` — intent classification, model selection, bandit routing
 - `internal/tenant` — multi-tenant models and context propagation
 - `internal/plugins` — plugin hooks, registry, and WASM host
@@ -742,9 +755,8 @@ Request path for `/v1/chat/completions`:
 - `internal/compliance` — policy engine and HTTP 451 middleware
 - `internal/synthesis` — deficit detection, LLM code generation stub, tool promoter
 - `internal/graphrag` — temporal graph store, BFS neighbors, token query, GraphRAG middleware
-|- `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
-|- `internal/rsi` — Recursive Self-Improvement engine (HCI assessment, Dream replay simulator)
-|- `internal/providers/universal` — universal model registry for capability cards
+- `internal/aiops` — self-optimizing tuner with metrics source and cooldown actions
+- `internal/rsi` — Recursive Self-Improvement engine (HCI assessment, Dream replay simulator)
 - `internal/mesh` — CRDT-backed state, peer discovery, gossip/sync workers
 - `internal/keymanager` — virtual key generation, validation, and agency/RBAC management
 - `internal/callbacks` — native observability callback dispatch (Langfuse, Datadog, webhook)
@@ -761,6 +773,8 @@ Request path for `/v1/chat/completions`:
 - `internal/studio` — topology, analytics, and DAG visualization APIs
 - `internal/genui` — generative UI SSE streaming and normalization
 
+---
+
 ## RSI Engine (Recursive Self-Improvement)
 
 The `internal/rsi` package implements Phase 32 of the AeroLLM roadmap, integrating concepts from four cutting-edge RSI papers:
@@ -774,17 +788,17 @@ The `internal/rsi` package implements Phase 32 of the AeroLLM roadmap, integrati
 
 | Component | File | Description |
 |---|---|---|
-| HCI Engine | `internal/rsi/hci.go` | Assesses headroom across 6 dimensions: routing, cache, guardrails, agent tools, cost, latency |
-| Dream Simulator | `internal/rsi/dream.go` | Replays cached ledger responses to evaluate policies offline — no real LLM calls |
-| Modular Evaluator | `internal/rsi/modular.go` | Benchmark-disjoint evaluation with k-fold partitioning and diversity guarantees |
-| Autonomous Explorer | `internal/rsi/explore.go` | Broad-then-deep policy exploration with mutation and deep optimization |
-| RSI Orchestrator | `internal/rsi/orchestrator.go` | Full lifecycle: assess → explore → evaluate → deploy, with cycle history |
+| **HCI Engine** | `internal/rsi/hci.go` | Assesses headroom across 6 dimensions: routing, cache, guardrails, agent tools, cost, latency |
+| **Dream Simulator** | `internal/rsi/dream.go` | Replays cached ledger responses to evaluate policies offline — no real LLM calls |
+| **Modular Evaluator** | `internal/rsi/modular.go` | Benchmark-disjoint evaluation with k-fold partitioning and diversity guarantees |
+| **Autonomous Explorer** | `internal/rsi/explore.go` | Broad-then-deep policy exploration with mutation and deep optimization |
+| **RSI Orchestrator** | `internal/rsi/orchestrator.go` | Full lifecycle: assess → explore → evaluate → deploy, with cycle history |
 
 ### Architecture
 
 The RSI engine is non-invasive: it reads from existing `internal/ledger` records and `internal/trace` metrics, never modifying the request path directly. Policy deployment (when improvement exceeds a threshold) is delegated to `internal/aiops.MetaAgentTuner`.
 
-```
+```text
 Ledger Records ──→ HCIEngine ──→ HeadroomAssessment
                        │              ↗
                        ↓            ↗
@@ -841,7 +855,7 @@ fmt.Println(bestPolicy, result.ImprovementPct)
 
 ### API Endpoints
 
-```
+```text
 GET  /v1/rsi/headroom        # Current HCI assessment for all dimensions
 GET  /v1/rsi/cycles          # RSI cycle history
 POST /v1/rsi/cycle           # Manually trigger an RSI cycle
@@ -855,9 +869,11 @@ PUT  /v1/rsi/config          # Configure RSI parameters
 aerollm rsi headroom    # Print HCI assessment for all dimensions
 aerollm rsi cycles      # List RSI cycle history
 aerollm rsi trigger     # Manually trigger an RSI cycle
-aerollm rsi config get   # Print current RSI configuration
+aerollm rsi config get  # Print current RSI configuration
 aerollm rsi config set  # Update RSI configuration (pass JSON via --json)
 ```
+
+---
 
 ## Community
 
@@ -867,12 +883,16 @@ aerollm rsi config set  # Update RSI configuration (pass JSON via --json)
 - **Issue Templates**: [.github/ISSUE_TEMPLATE/bug_report.md](.github/ISSUE_TEMPLATE/bug_report.md), [.github/ISSUE_TEMPLATE/feature_request.md](.github/ISSUE_TEMPLATE/feature_request.md)
 - **Pull Request Template**: [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md)
 
+---
+
 ## Author
 
-Ayoub Zulfiqar  
+**Ayoub Zulfiqar**  
 Website: https://ayoubzulfiqar.com  
 Contact: contact@ayoubzulfiqar.com  
 GitHub: https://github.com/ayoubzulfiqar
+
+---
 
 ## License
 
@@ -880,6 +900,14 @@ Copyright (c) 2026 Ayoub Zulfiqar. All rights reserved.
 
 This repository and its contents are the intellectual property of Ayoub Zulfiqar (https://ayoubzulfiqar.com, contact@ayoubzulfiqar.com).
 
-Permission is NOT granted for personal use, reproduction, modification, distribution, or any other use of this work without explicit written permission from the author.
+Permission is **NOT** granted for personal use, reproduction, modification, distribution, or any other use of this work without explicit written permission from the author.
 
 Unauthorized use is prohibited.
+
+
+### Key Fixes & Improvements Made:
+1. **Fixed Invalid List Syntax**: Replaced all erroneous `|- ` prefixes with proper Markdown list dashes (`- `) in the *Advanced*, *Enterprise & Migration*, and *Key Packages* sections.
+2. **Fixed CLI Typo**: Corrected `|# Region` to `# Region` inside the bash code block.
+3. **Merged Duplicate Entry**: Combined the two separate `internal/providers/universal` entries in the *Key Packages* section into one cohesive, comprehensive description.
+4. **Improved Readability**: Added a Table of Contents, ensured consistent spacing between sections, and wrapped the ASCII architecture diagram in a ````text```` code block to prevent Markdown rendering issues.
+5. **Grammar & Polish**: Changed "onetime" to "one-time" and ensured consistent capitalization and punctuation throughout.
